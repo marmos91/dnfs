@@ -1,0 +1,126 @@
+package server
+
+import (
+	"github.com/cubbit/dnfs/internal/content"
+	"github.com/cubbit/dnfs/internal/metadata"
+	"github.com/cubbit/dnfs/internal/protocol/mount"
+	"github.com/cubbit/dnfs/internal/protocol/nfs"
+)
+
+type NFSHandler interface {
+	// Null does nothing. This is used to test connectivity.
+	// RFC 1813 Section 3.3.0
+	Null(repository metadata.Repository) ([]byte, error)
+
+	// GetAttr returns the attributes for a file system object.
+	// RFC 1813 Section 3.3.1
+	GetAttr(repository metadata.Repository, req *nfs.GetAttrRequest) (*nfs.GetAttrResponse, error)
+
+	// SetAttr sets the attributes for a file system object.
+	// RFC 1813 Section 3.3.2
+	SetAttr(repository metadata.Repository, req *nfs.SetAttrRequest) (*nfs.SetAttrResponse, error)
+
+	// Lookup searches a directory for a specific name and returns its file handle.
+	// RFC 1813 Section 3.3.3
+	Lookup(repository metadata.Repository, req *nfs.LookupRequest) (*nfs.LookupResponse, error)
+
+	// Access checks access permissions for a file system object.
+	// RFC 1813 Section 3.3.4
+	Access(repository metadata.Repository, req *nfs.AccessRequest) (*nfs.AccessResponse, error)
+
+	// // ReadLink reads the data associated with a symbolic link.
+	// // RFC 1813 Section 3.3.5
+	// ReadLink(repository metadata.Repository, data []byte) ([]byte, error)
+
+	// Read reads data from a file.
+	// RFC 1813 Section 3.3.6
+	Read(content content.Repository, repository metadata.Repository, req *nfs.ReadRequest) (*nfs.ReadResponse, error)
+
+	//
+	// // Write writes data to a file.
+	// // RFC 1813 Section 3.3.7
+	// Write(repository metadata.Repository, data []byte) ([]byte, error)
+	//
+	// // Create creates a regular file.
+	// // RFC 1813 Section 3.3.8
+	// Create(repository metadata.Repository, data []byte) ([]byte, error)
+	//
+	// // Mkdir creates a directory.
+	// // RFC 1813 Section 3.3.9
+	// Mkdir(repository metadata.Repository, data []byte) ([]byte, error)
+	//
+	// // Symlink creates a symbolic link.
+	// // RFC 1813 Section 3.3.10
+	// Symlink(repository metadata.Repository, data []byte) ([]byte, error)
+	//
+	// // MkNod creates a special device file.
+	// // RFC 1813 Section 3.3.11
+	// MkNod(repository metadata.Repository, data []byte) ([]byte, error)
+	//
+	// // Remove removes a file.
+	// // RFC 1813 Section 3.3.12
+	// Remove(repository metadata.Repository, data []byte) ([]byte, error)
+	//
+	// // RmDir removes a directory.
+	// // RFC 1813 Section 3.3.13
+	// RmDir(repository metadata.Repository, data []byte) ([]byte, error)
+	//
+	// // Rename renames a file or directory.
+	// // RFC 1813 Section 3.3.14
+	// Rename(repository metadata.Repository, data []byte) ([]byte, error)
+	//
+	// // Link creates a hard link to a file.
+	// // RFC 1813 Section 3.3.15
+	// Link(repository metadata.Repository, data []byte) ([]byte, error)
+
+	// ReadDir reads entries from a directory.
+	// RFC 1813 Section 3.3.16
+	ReadDir(repository metadata.Repository, req *nfs.ReadDirRequest) (*nfs.ReadDirResponse, error)
+
+	// ReadDirPlus reads entries from a directory with their attributes.
+	// RFC 1813 Section 3.3.17
+	ReadDirPlus(repository metadata.Repository, req *nfs.ReadDirPlusRequest) (*nfs.ReadDirPlusResponse, error)
+
+	// // FsStat returns dynamic information about a file system.
+	// // RFC 1813 Section 3.3.18
+	FsStat(repository metadata.Repository, req *nfs.FsStatRequest) (*nfs.FsStatResponse, error)
+
+	// FsInfo returns static information about a file system.
+	// RFC 1813 Section 3.3.19
+	FsInfo(repository metadata.Repository, req *nfs.FsInfoRequest) (*nfs.FsInfoResponse, error)
+
+	// PathConf returns POSIX information about a file system object.
+	// RFC 1813 Section 3.3.20
+	PathConf(repository metadata.Repository, req *nfs.PathConfRequest) (*nfs.PathConfResponse, error)
+	//
+	// // Commit commits cached data on the server to stable storage.
+	// // RFC 1813 Section 3.3.21
+	// Commit(repository metadata.Repository, data []byte) ([]byte, error)
+}
+
+type MountHandler interface {
+	// MountNull does nothing. This is used to test connectivity.
+	// RFC 1813 Appendix I
+	MountNull(repository metadata.Repository) ([]byte, error)
+
+	// Mount returns a file handle for the requested export path.
+	// This is the primary procedure used to mount an NFS file system.
+	// RFC 1813 Appendix I
+	Mount(repository metadata.Repository, req *mount.MountRequest) (*mount.MountResponse, error)
+
+	// // Dump returns a list of all mounted file systems.
+	// // RFC 1813 Appendix I
+	// Dump(repository metadata.Repository, data []byte) ([]byte, error)
+
+	// Umnt removes a mount entry from the mount list.
+	// RFC 1813 Appendix I
+	Umnt(repository metadata.Repository, req *mount.UmountRequest) (*mount.UmountResponse, error)
+	//
+	// // UmntAll removes all mount entries for the calling client.
+	// // RFC 1813 Appendix I
+	// UmntAll(repository metadata.Repository, data []byte) ([]byte, error)
+	//
+	// // Export returns a list of all exported file systems.
+	// // RFC 1813 Appendix I
+	// Export(repository metadata.Repository, data []byte) ([]byte, error)
+}

@@ -1,0 +1,72 @@
+package server
+
+import (
+	"github.com/cubbit/dnfs/internal/logger"
+	"github.com/cubbit/dnfs/internal/protocol/mount"
+	"github.com/cubbit/dnfs/internal/protocol/nfs"
+)
+
+type rpcRequest interface {
+	*nfs.GetAttrRequest |
+		*nfs.FsStatRequest |
+		*nfs.FsInfoRequest |
+		*nfs.PathConfRequest |
+		*nfs.ReadDirRequest |
+		*nfs.LookupRequest |
+		*nfs.AccessRequest |
+		*nfs.ReadDirPlusRequest |
+		*nfs.ReadRequest |
+		*nfs.SetAttrRequest |
+		*mount.MountRequest |
+		*mount.UmountRequest
+}
+
+type rpcResponse interface {
+	*nfs.GetAttrResponse |
+		*nfs.FsStatResponse |
+		*nfs.FsInfoResponse |
+		*nfs.PathConfResponse |
+		*nfs.ReadDirResponse |
+		*nfs.LookupResponse |
+		*nfs.AccessResponse |
+		*nfs.ReadDirPlusResponse |
+		*nfs.ReadResponse |
+		*nfs.SetAttrResponse |
+		*mount.MountResponse |
+		*mount.UmountResponse
+	Encode() ([]byte, error)
+}
+
+func handleRequest[Req rpcRequest, Resp rpcResponse](
+	data []byte,
+	decode func([]byte) (Req, error),
+	handle func(Req) (Resp, error),
+	errorStatus uint32,
+	makeErrorResp func(uint32) Resp,
+) ([]byte, error) {
+	// Decode request
+	req, err := decode(data)
+	if err != nil {
+		logger.Debug("Error decoding request: %v", err)
+		errorResp := makeErrorResp(errorStatus)
+		return errorResp.Encode()
+	}
+
+	// Call handler
+	resp, err := handle(req)
+	if err != nil {
+		logger.Debug("Handler error: %v", err)
+		errorResp := makeErrorResp(errorStatus)
+		return errorResp.Encode()
+	}
+
+	// Encode response
+	encoded, err := resp.Encode()
+	if err != nil {
+		logger.Debug("Error encoding response: %v", err)
+		errorResp := makeErrorResp(errorStatus)
+		return errorResp.Encode()
+	}
+
+	return encoded, nil
+}
