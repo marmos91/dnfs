@@ -114,6 +114,7 @@ func main() {
 	port := flag.String("port", "2049", "Port to listen on")
 	logLevel := flag.String("log-level", "INFO", "Log level (DEBUG, INFO, WARN, ERROR)")
 	contentPath := flag.String("content-path", "/tmp/dittofs-content", "Path to store file content")
+	dumpRestricted := flag.Bool("dump-restricted", false, "Restrict DUMP to localhost only")
 	flag.Parse()
 
 	// Configure logger
@@ -130,6 +131,20 @@ func main() {
 	}
 
 	repo := persistence.NewMemoryRepository()
+
+	// Configure server-wide settings
+	serverConfig := metadata.ServerConfig{}
+	if *dumpRestricted {
+		// Restrict DUMP to localhost only
+		serverConfig.DumpAllowedClients = []string{"127.0.0.1", "::1"}
+		logger.Info("DUMP access restricted to localhost")
+	} else {
+		logger.Info("DUMP access unrestricted (default)")
+	}
+
+	if err := repo.SetServerConfig(serverConfig); err != nil {
+		log.Fatalf("Failed to set server config: %v", err)
+	}
 
 	// Create root directory attributes
 	now := time.Now()

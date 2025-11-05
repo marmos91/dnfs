@@ -19,13 +19,14 @@ type mountKey struct {
 
 // MemoryRepository implements Repository using in-memory storage
 type MemoryRepository struct {
-	mu          sync.RWMutex
-	exports     map[string]*exportData
-	files       map[string]*metadata.FileAttr
-	parents     map[string]metadata.FileHandle
-	children    map[string]map[string]metadata.FileHandle
-	handleIndex uint64
-	mounts      map[mountKey]*metadata.MountEntry
+	mu           sync.RWMutex
+	exports      map[string]*exportData
+	files        map[string]*metadata.FileAttr
+	parents      map[string]metadata.FileHandle
+	children     map[string]map[string]metadata.FileHandle
+	handleIndex  uint64
+	mounts       map[mountKey]*metadata.MountEntry
+	serverConfig metadata.ServerConfig
 }
 
 type exportData struct {
@@ -502,5 +503,68 @@ func (r *MemoryRepository) RemoveAllMounts(clientAddr string) error {
 		delete(r.mounts, key)
 	}
 
+	return nil
+}
+
+// SetServerConfig sets the server-wide configuration
+func (r *MemoryRepository) SetServerConfig(config metadata.ServerConfig) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.serverConfig = config
+	return nil
+}
+
+// GetServerConfig returns the current server configuration
+func (r *MemoryRepository) GetServerConfig() (metadata.ServerConfig, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	return r.serverConfig, nil
+}
+
+// CheckDumpAccess verifies if a client can call the DUMP procedure
+func (r *MemoryRepository) CheckDumpAccess(clientAddr string) error {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	// If no restrictions configured, allow all (RFC 1813 default)
+	if len(r.serverConfig.DumpAllowedClients) == 0 &&
+		len(r.serverConfig.DumpDeniedClients) == 0 {
+		return nil
+	}
+
+	// Check denied clients first (deny takes precedence)
+	if len(r.serverConfig.DumpDeniedClients) > 0 {
+		for _, denied := range r.serverConfig.DumpDeniedClients {
+			if matchesIPPattern(clientAddr, denied) {
+				return &metadata.ExportError{
+					Code:    metadata.ExportErrAccessDenied,
+					Message: fmt.Sprintf("client %s is denied DUMP access", clientAddr),
+					Export:  "DUMP",
+				}
+			}
+		}
+	}
+
+	// Check allowed clients (if specified)
+	if len(r.serverConfig.DumpAllowedClients) > 0 {
+		allowed := false
+		for _, pattern := range r.serverConfig.DumpAllowedClients {
+			if matchesIPPattern(clientAddr, pattern) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return &metadata.ExportError{
+				Code:    metadata.ExportErrAccessDenied,
+				Message: fmt.Sprintf("client %s not in DUMP allowed list", clientAddr),
+				Export:  "DUMP",
+			}
+		}
+	}
+
+	// Access granted
 	return nil
 }

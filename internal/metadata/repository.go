@@ -55,4 +55,15 @@ type Repository interface {
 	// RemoveAllMounts removes all mount records for a specific client
 	// Used by UMNTALL to clean up all mounts in one operation
 	RemoveAllMounts(clientAddr string) error
+
+	// ServerConfig operations
+	// SetServerConfig sets the server-wide configuration
+	SetServerConfig(config ServerConfig) error
+
+	// GetServerConfig returns the current server configuration
+	GetServerConfig() (ServerConfig, error)
+
+	// CheckDumpAccess verifies if a client can call the DUMP procedure
+	// Returns error if access is denied, nil if allowed
+	CheckDumpAccess(clientAddr string) error
 }

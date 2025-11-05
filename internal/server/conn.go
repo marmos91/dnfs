@@ -102,6 +102,9 @@ func (c *conn) handleRPCCall(call *rpc.RPCCallMessage, procedureData []byte) err
 	var replyData []byte
 	var err error
 
+	logger.Debug("RPC Call Details: Program=%d Version=%d Procedure=%d",
+		call.Program, call.Version, call.Procedure)
+
 	switch call.Program {
 	case rpc.ProgramNFS:
 		replyData, err = c.handleNFSProcedure(call, procedureData)
@@ -448,7 +451,37 @@ func (c *conn) handleMountProcedure(call *rpc.RPCCallMessage, data []byte) ([]by
 				return &mount.MountResponse{Status: status}
 			},
 		)
+	case mount.MountProcExport:
 
+		return handleRequest(
+			data,
+			mount.DecodeExportRequest,
+			func(req *mount.ExportRequest) (*mount.ExportResponse, error) {
+				return handler.Export(repo, req)
+			},
+			mount.MountErrIO,
+			func(status uint32) *mount.ExportResponse {
+				// EXPORT doesn't use status codes, but we need this for the generic handler
+				return &mount.ExportResponse{Entries: []mount.ExportEntry{}}
+			},
+		)
+	case mount.MountProcDump:
+		ctx := &mount.DumpContext{
+			ClientAddr: c.conn.RemoteAddr().String(),
+		}
+		return handleRequest(
+			data,
+			mount.DecodeDumpRequest,
+			func(req *mount.DumpRequest) (*mount.DumpResponse, error) {
+				return handler.Dump(repo, req, ctx)
+			},
+			mount.MountErrIO,
+			func(status uint32) *mount.DumpResponse {
+				// DUMP doesn't use status codes, but we need this for the generic handler
+				// In practice, errors are returned as Go errors, not mount status codes
+				return &mount.DumpResponse{Entries: []mount.DumpEntry{}}
+			},
+		)
 	case mount.MountProcUmnt:
 		ctx := &mount.UmountContext{
 			ClientAddr: c.conn.RemoteAddr().String(),

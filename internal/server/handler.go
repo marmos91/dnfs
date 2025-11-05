@@ -109,7 +109,7 @@ type MountHandler interface {
 
 	// Dump returns a list of all mounted file systems.
 	// RFC 1813 Appendix I
-	Dump(repository metadata.Repository) (*mount.DumpResponse, error)
+	Dump(repository metadata.Repository, req *mount.DumpRequest, ctx *mount.DumpContext) (*mount.DumpResponse, error)
 
 	// Umnt removes a mount entry from the mount list.
 	// RFC 1813 Appendix I
@@ -121,5 +121,5 @@ type MountHandler interface {
 
 	// Export returns a list of all exported file systems.
 	// RFC 1813 Appendix I
-	Export(repository metadata.Repository) (*mount.ExportResponse, error)
+	Export(repository metadata.Repository, req *mount.ExportRequest) (*mount.ExportResponse, error)
 }

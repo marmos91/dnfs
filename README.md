@@ -157,6 +157,49 @@ func (r *S3ContentRepository) ReadContent(id ContentID) (io.ReadCloser, error) {
 server := nfsServer.New("2049", postgresRepo, s3Repo)
 ```
 
+## Mounting Without Portmapper
+
+DittoFS uses a fixed port and does not require portmapper/rpcbind.
+This simplifies deployment in containerized and cloud environments.
+
+**Mount with explicit port:**
+
+```bash
+# Linux
+sudo mount -t nfs -o nfsvers=3,tcp,port=12049 localhost:/export /mnt/test
+
+# macOS
+sudo mount -t nfs -o nfsvers=3,tcp,port=12049,resvport localhost:/export /mnt/test
+```
+
+**Using showmount (traditional tools):**
+
+Traditional tools like `showmount` require portmapper and will not work
+with DittoFS. Instead, use direct mount commands or the provided test clients.
+
+**Kubernetes/Container environments:**
+
+DittoFS is designed for modern cloud-native deployments where service
+discovery is handled by the orchestration platform:
+
+```yaml
+# Kubernetes PV example
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: dittofs-pv
+spec:
+  capacity:
+    storage: 10Gi
+  nfs:
+    server: dittofs.default.svc.cluster.local
+    path: /export
+  mountOptions:
+    - nfsvers=3
+    - tcp
+    - port=12049
+```
+
 ## Current Status
 
 ### ✅ Implemented
