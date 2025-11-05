@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"net"
 
 	"github.com/marmos91/dittofs/internal/logger"
 	"github.com/marmos91/dittofs/internal/metadata"
@@ -55,8 +56,140 @@ type MountResponse struct {
 	// Common values:
 	//   - 0: AUTH_NULL (no authentication)
 	//   - 1: AUTH_UNIX (Unix-style authentication)
-	// Currently, this implementation only supports AUTH_NULL.
 	AuthFlavors []int32
+}
+
+// MountContext contains the context information needed to process a mount request.
+// This includes client identification and authentication details.
+type MountContext struct {
+	// ClientAddr is the network address of the client making the request
+	// Format: "IP:port" (e.g., "192.168.1.100:1234")
+	ClientAddr string
+
+	// AuthFlavor is the authentication method used by the client
+	// 0 = AUTH_NULL, 1 = AUTH_UNIX, etc.
+	AuthFlavor uint32
+
+	// UnixAuth contains Unix authentication credentials if AuthFlavor == AUTH_UNIX
+	// This includes UID, GID, machine name, etc.
+	UnixAuth *rpc.UnixAuth
+}
+
+// Mount handles the MOUNT (MNT) procedure, which is the primary operation
+// used by NFS clients to obtain a file handle for an exported filesystem.
+//
+// The mount process follows these steps:
+//  1. Extract client IP address from the network context
+//  2. Perform access control checks via the repository
+//  3. Validate authentication requirements
+//  4. Retrieve the root file handle for the export
+//  5. Record the mount in the repository for tracking
+//  6. Return the handle with appropriate authentication flavors
+//
+// Security considerations:
+//   - Validates client IP against export access control lists
+//   - Enforces authentication requirements per export configuration
+//   - Tracks active mounts for audit and the DUMP procedure
+//   - Returns detailed error codes for troubleshooting
+//
+// Parameters:
+//   - repository: The metadata repository containing export configurations
+//   - req: The mount request containing the directory path to mount
+//   - ctx: Context information including client address and auth flavor
+//
+// Returns:
+//   - *MountResponse: The mount response with status and file handle (if successful)
+//   - error: Returns error only for internal server failures; protocol-level
+//     errors are indicated via the response Status field
+//
+// RFC 1813 Appendix I: MOUNT Procedure
+//
+// Example:
+//
+//	handler := &DefaultMountHandler{}
+//	req := &MountRequest{DirPath: "/export"}
+//	ctx := &MountContext{
+//	    ClientAddr: "192.168.1.100:1234",
+//	    AuthFlavor: 0, // AUTH_NULL
+//	}
+//	resp, err := handler.Mount(repository, req, ctx)
+//	if err != nil {
+//	    // Internal server error
+//	}
+//	if resp.Status == MountOK {
+//	    // Use resp.FileHandle for NFS operations
+//	}
+func (h *DefaultMountHandler) Mount(repository metadata.Repository, req *MountRequest, ctx *MountContext) (*MountResponse, error) {
+	// Extract client IP from address (remove port)
+	clientIP, _, err := net.SplitHostPort(ctx.ClientAddr)
+	if err != nil {
+		// If parsing fails, use the whole address (might be IP only)
+		clientIP = ctx.ClientAddr
+	}
+
+	// Log authentication details
+	if ctx.AuthFlavor == rpc.AuthUnix && ctx.UnixAuth != nil {
+		logger.Info("Mount request: path=%s client=%s auth=UNIX uid=%d gid=%d machine=%s",
+			req.DirPath, clientIP, ctx.UnixAuth.UID, ctx.UnixAuth.GID, ctx.UnixAuth.MachineName)
+	} else {
+		logger.Info("Mount request: path=%s client=%s auth=%s",
+			req.DirPath, clientIP, authFlavorName(ctx.AuthFlavor))
+	}
+
+	// Rest of the method remains the same...
+	accessDecision, err := repository.CheckExportAccess(req.DirPath, clientIP, ctx.AuthFlavor)
+	if err != nil {
+		if exportErr, ok := err.(*metadata.ExportError); ok {
+			logger.Warn("Mount denied: path=%s client=%s reason=%s",
+				req.DirPath, clientIP, exportErr.Message)
+
+			status := mapExportErrorToMountStatus(exportErr.Code)
+			return &MountResponse{Status: status}, nil
+		}
+
+		logger.Error("Mount access check failed: path=%s client=%s error=%v",
+			req.DirPath, clientIP, err)
+		return &MountResponse{Status: MountErrServerFault}, nil
+	}
+
+	if !accessDecision.Allowed {
+		logger.Warn("Mount access denied: path=%s client=%s reason=%s",
+			req.DirPath, clientIP, accessDecision.Reason)
+		return &MountResponse{Status: MountErrAccess}, nil
+	}
+
+	handleBytes, err := repository.GetRootHandle(req.DirPath)
+	if err != nil {
+		logger.Error("Failed to get root handle: path=%s error=%v", req.DirPath, err)
+		return &MountResponse{Status: MountErrServerFault}, nil
+	}
+
+	var uid, gid *uint32
+	machineName := ""
+	if ctx.UnixAuth != nil {
+		uid = &ctx.UnixAuth.UID
+		gid = &ctx.UnixAuth.GID
+		machineName = ctx.UnixAuth.MachineName
+	}
+
+	if err := repository.RecordMount(req.DirPath, clientIP, ctx.AuthFlavor, machineName, uid, gid); err != nil {
+		logger.Warn("Failed to record mount: path=%s client=%s error=%v",
+			req.DirPath, clientIP, err)
+	}
+
+	authFlavors := make([]int32, len(accessDecision.AllowedAuth))
+	for i, flavor := range accessDecision.AllowedAuth {
+		authFlavors[i] = int32(flavor)
+	}
+
+	logger.Info("Mount successful: path=%s client=%s handle_len=%d auth_flavors=%v readonly=%v",
+		req.DirPath, clientIP, len(handleBytes), authFlavors, accessDecision.ReadOnly)
+
+	return &MountResponse{
+		Status:      MountOK,
+		FileHandle:  handleBytes,
+		AuthFlavors: authFlavors,
+	}, nil
 }
 
 // DecodeMountRequest decodes a MOUNT request from XDR-encoded bytes.
@@ -69,21 +202,11 @@ type MountResponse struct {
 // Returns:
 //   - *MountRequest: The decoded mount request containing the directory path
 //   - error: Any error encountered during decoding
-//
-// Example:
-//
-//	data := []byte{...} // XDR-encoded mount request
-//	req, err := DecodeMountRequest(data)
-//	if err != nil {
-//	    // handle error
-//	}
-//	fmt.Println("Mount path:", req.DirPath)
 func DecodeMountRequest(data []byte) (*MountRequest, error) {
 	req := &MountRequest{}
 	_, err := xdr.Unmarshal(bytes.NewReader(data), req)
-
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to unmarshal mount request: %w", err)
 	}
 	return req, nil
 }
@@ -142,7 +265,7 @@ func (resp *MountResponse) Encode() ([]byte, error) {
 	buf.Write(resp.FileHandle)
 
 	// Add padding to 4-byte boundary (XDR alignment requirement)
-	padding := rpc.XdrPadding(handleLen)
+	padding := (4 - (handleLen % 4)) % 4
 	buf.Write(make([]byte, padding))
 
 	// Write auth flavors array
@@ -161,71 +284,34 @@ func (resp *MountResponse) Encode() ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// Mount handles the MOUNT (MNT) procedure, which is the primary operation
-// used by NFS clients to obtain a file handle for an exported filesystem.
-//
-// The mount process:
-//  1. Validates that the requested path corresponds to a configured export
-//  2. Retrieves the root file handle for that export from the metadata repository
-//  3. Returns the handle along with supported authentication flavors
-//
-// This implementation currently supports only AUTH_NULL (no authentication).
-// In a production system, you might want to add:
-//   - Authentication/authorization checks
-//   - Export access control (read-only, client restrictions)
-//   - Mount tracking for the DUMP procedure
-//
-// Parameters:
-//   - repository: The metadata repository containing export configurations
-//   - req: The mount request containing the directory path to mount
-//
-// Returns:
-//   - *MountResponse: The mount response with status and file handle (if successful)
-//   - error: Always returns nil; errors are indicated via response Status field
-//
-// RFC 1813 Appendix I: MOUNT Procedure
-//
-// Example:
-//
-//	handler := &DefaultMountHandler{}
-//	req := &MountRequest{DirPath: "/export"}
-//	resp, err := handler.Mount(repository, req)
-//	if err != nil {
-//	    // handle error
-//	}
-//	if resp.Status == MountOK {
-//	    // Use resp.FileHandle for NFS operations
-//	}
-func (h *DefaultMountHandler) Mount(
-	repository metadata.Repository,
-	req *MountRequest,
-) (*MountResponse, error) {
-	logger.Info("Mount called for path: %s", req.DirPath)
-
-	// Check if the export exists
-	export, err := repository.FindExport(req.DirPath)
-	if err != nil {
-		logger.Warn("Export not found: %s", req.DirPath)
-
-		return &MountResponse{
-			Status: MountErrNoEnt,
-		}, nil
+// converts repository export errors to Mount protocol status codes
+func mapExportErrorToMountStatus(code metadata.ExportErrorCode) uint32 {
+	switch code {
+	case metadata.ExportErrNotFound:
+		return MountErrNoEnt
+	case metadata.ExportErrAccessDenied:
+		return MountErrAccess
+	case metadata.ExportErrAuthRequired:
+		return MountErrAccess
+	case metadata.ExportErrServerFault:
+		return MountErrServerFault
+	default:
+		return MountErrServerFault
 	}
+}
 
-	logger.Info("Found export: %s (readonly=%v)", export.Path, export.Options.ReadOnly)
-
-	// Get the root handle for this export
-	handleBytes, err := repository.GetRootHandle(export.Path)
-	if err != nil {
-		logger.Warn("Failed to get root handle: %v", err)
-		return &MountResponse{
-			Status: MountErrServerFault,
-		}, nil
+// authFlavorName returns a human-readable name for an auth flavor
+func authFlavorName(flavor uint32) string {
+	switch flavor {
+	case rpc.AuthNull:
+		return "NULL"
+	case rpc.AuthUnix:
+		return "UNIX"
+	case rpc.AuthShort:
+		return "SHORT"
+	case rpc.AuthDES:
+		return "DES"
+	default:
+		return fmt.Sprintf("UNKNOWN(%d)", flavor)
 	}
-
-	return &MountResponse{
-		Status:      MountOK,
-		FileHandle:  handleBytes,
-		AuthFlavors: []int32{0}, // AUTH_NULL
-	}, nil
 }

@@ -24,3 +24,20 @@ type OpaqueAuth struct {
 	Flavor uint32
 	Body   []byte `xdr:"opaque"`
 }
+
+// GetAuthFlavor returns the authentication flavor from the RPC call credentials.
+// Common values:
+//   - 0: AUTH_NULL (no authentication)
+//   - 1: AUTH_UNIX (Unix-style authentication with UID/GID)
+//   - 2: AUTH_SHORT (short hand Unix credential)
+//   - 3: AUTH_DES (DES encryption-based authentication)
+func (c *RPCCallMessage) GetAuthFlavor() uint32 {
+	return c.Cred.Flavor
+}
+
+// GetAuthBody returns the authentication body data.
+// For AUTH_NULL, this will be empty.
+// For AUTH_UNIX, this contains the Unix credentials (timestamp, machine name, UID, GID, etc.)
+func (c *RPCCallMessage) GetAuthBody() []byte {
+	return c.Cred.Body
+}

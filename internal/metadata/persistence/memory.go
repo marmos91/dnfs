@@ -1,23 +1,31 @@
-// internal/metadata/persistence/memory.go
 package persistence
 
 import (
 	"crypto/sha256"
 	"fmt"
 	"maps"
+	"net"
 	"sync"
+	"time"
 
 	"github.com/marmos91/dittofs/internal/metadata"
 )
 
+// Mount tracking
+type mountKey struct {
+	exportPath string
+	clientAddr string
+}
+
 // MemoryRepository implements Repository using in-memory storage
 type MemoryRepository struct {
 	mu          sync.RWMutex
-	exports     map[string]*exportData // map[path]*exportData
+	exports     map[string]*exportData
 	files       map[string]*metadata.FileAttr
 	parents     map[string]metadata.FileHandle
 	children    map[string]map[string]metadata.FileHandle
-	handleIndex uint64 // counter for generating unique handles
+	handleIndex uint64
+	mounts      map[mountKey]*metadata.MountEntry
 }
 
 type exportData struct {
@@ -32,8 +40,173 @@ func NewMemoryRepository() *MemoryRepository {
 		files:       make(map[string]*metadata.FileAttr),
 		parents:     make(map[string]metadata.FileHandle),
 		children:    make(map[string]map[string]metadata.FileHandle),
+		mounts:      make(map[mountKey]*metadata.MountEntry),
 		handleIndex: 0,
 	}
+}
+
+// RemoveMount removes a mount record when a client unmounts
+func (r *MemoryRepository) RemoveMount(exportPath string, clientAddr string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	key := mountKey{exportPath: exportPath, clientAddr: clientAddr}
+	delete(r.mounts, key)
+	return nil
+}
+
+// GetMounts returns all active mounts, optionally filtered by export path
+func (r *MemoryRepository) GetMounts(exportPath string) ([]metadata.MountEntry, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	result := make([]metadata.MountEntry, 0)
+	for key, mount := range r.mounts {
+		if exportPath == "" || key.exportPath == exportPath {
+			result = append(result, *mount)
+		}
+	}
+
+	return result, nil
+}
+
+// IsClientMounted checks if a specific client has an active mount
+func (r *MemoryRepository) IsClientMounted(exportPath string, clientAddr string) (bool, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	key := mountKey{exportPath: exportPath, clientAddr: clientAddr}
+	_, exists := r.mounts[key]
+	return exists, nil
+}
+
+// CheckExportAccess verifies if a client can access an export
+func (r *MemoryRepository) CheckExportAccess(exportPath string, clientAddr string, authFlavor uint32) (*metadata.AccessDecision, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	// Check if export exists
+	ed, exists := r.exports[exportPath]
+	if !exists {
+		return nil, &metadata.ExportError{
+			Code:    metadata.ExportErrNotFound,
+			Message: fmt.Sprintf("export not found: %s", exportPath),
+			Export:  exportPath,
+		}
+	}
+
+	opts := ed.Export.Options
+
+	// Check authentication requirements
+	if opts.RequireAuth && authFlavor == 0 {
+		return nil, &metadata.ExportError{
+			Code:    metadata.ExportErrAuthRequired,
+			Message: "authentication required for this export",
+			Export:  exportPath,
+		}
+	}
+
+	// Check if auth flavor is allowed
+	if len(opts.AllowedAuthFlavors) > 0 {
+		allowed := false
+		for _, flavor := range opts.AllowedAuthFlavors {
+			if flavor == authFlavor {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return nil, &metadata.ExportError{
+				Code:    metadata.ExportErrAuthRequired,
+				Message: fmt.Sprintf("authentication flavor %d not allowed", authFlavor),
+				Export:  exportPath,
+			}
+		}
+	}
+
+	// Check denied clients first
+	if len(opts.DeniedClients) > 0 {
+		for _, denied := range opts.DeniedClients {
+			if matchesIPPattern(clientAddr, denied) {
+				return nil, &metadata.ExportError{
+					Code:    metadata.ExportErrAccessDenied,
+					Message: fmt.Sprintf("client %s is explicitly denied", clientAddr),
+					Export:  exportPath,
+				}
+			}
+		}
+	}
+
+	// Check allowed clients (if specified)
+	if len(opts.AllowedClients) > 0 {
+		allowed := false
+		for _, pattern := range opts.AllowedClients {
+			if matchesIPPattern(clientAddr, pattern) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return nil, &metadata.ExportError{
+				Code:    metadata.ExportErrAccessDenied,
+				Message: fmt.Sprintf("client %s not in allowed list", clientAddr),
+				Export:  exportPath,
+			}
+		}
+	}
+
+	// Determine allowed auth flavors
+	allowedAuth := opts.AllowedAuthFlavors
+	if len(allowedAuth) == 0 {
+		// If not specified, allow AUTH_NULL and AUTH_UNIX
+		allowedAuth = []uint32{0, 1}
+	}
+
+	// Access granted
+	return &metadata.AccessDecision{
+		Allowed:     true,
+		Reason:      "access granted",
+		AllowedAuth: allowedAuth,
+		ReadOnly:    opts.ReadOnly,
+	}, nil
+}
+
+// matchesIPPattern checks if an IP matches a pattern (IP address or CIDR)
+func matchesIPPattern(clientIP string, pattern string) bool {
+	// Try parsing as CIDR first
+	_, ipNet, err := net.ParseCIDR(pattern)
+	if err == nil {
+		ip := net.ParseIP(clientIP)
+		if ip != nil {
+			return ipNet.Contains(ip)
+		}
+		return false
+	}
+
+	// Otherwise, exact IP match
+	return clientIP == pattern
+}
+
+// RecordMount records an active mount by a client with auth details
+func (r *MemoryRepository) RecordMount(exportPath string, clientAddr string, authFlavor uint32, machineName string, uid *uint32, gid *uint32) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	key := mountKey{exportPath: exportPath, clientAddr: clientAddr}
+
+	entry := &metadata.MountEntry{
+		ExportPath:  exportPath,
+		ClientAddr:  clientAddr,
+		MountedAt:   time.Now(),
+		AuthFlavor:  authFlavor,
+		MachineName: machineName,
+		UnixUID:     uid,
+		UnixGID:     gid,
+	}
+
+	// Update if already exists
+	r.mounts[key] = entry
+	return nil
 }
 
 // Helper to convert FileHandle to string key

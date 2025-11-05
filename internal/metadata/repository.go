@@ -28,4 +28,23 @@ type Repository interface {
 
 	// Helper method to add files/directories to a parent
 	AddFileToDirectory(parentHandle FileHandle, name string, attr *FileAttr) (FileHandle, error)
+
+	// Mount tracking operations
+	// RecordMount records an active mount by a client
+	RecordMount(exportPath string, clientAddr string, authFlavor uint32, machineName string, uid *uint32, gid *uint32) error
+
+	// RemoveMount removes a mount record when a client unmounts
+	RemoveMount(exportPath string, clientAddr string) error
+
+	// GetMounts returns all active mounts, optionally filtered by export path
+	// If exportPath is empty, returns all mounts
+	GetMounts(exportPath string) ([]MountEntry, error)
+
+	// IsClientMounted checks if a specific client has an active mount
+	IsClientMounted(exportPath string, clientAddr string) (bool, error)
+
+	// Access control operations
+	// CheckExportAccess verifies if a client can access an export
+	// Returns an AccessDecision with details about the authorization
+	CheckExportAccess(exportPath string, clientAddr string, authFlavor uint32) (*AccessDecision, error)
 }

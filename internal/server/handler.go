@@ -105,7 +105,7 @@ type MountHandler interface {
 	// Mount returns a file handle for the requested export path.
 	// This is the primary procedure used to mount an NFS file system.
 	// RFC 1813 Appendix I
-	Mount(repository metadata.Repository, req *mount.MountRequest) (*mount.MountResponse, error)
+	Mount(repository metadata.Repository, req *mount.MountRequest, ctx *mount.MountContext) (*mount.MountResponse, error)
 
 	// Dump returns a list of all mounted file systems.
 	// RFC 1813 Appendix I

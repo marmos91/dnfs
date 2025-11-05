@@ -104,9 +104,9 @@ func (c *conn) handleRPCCall(call *rpc.RPCCallMessage, procedureData []byte) err
 
 	switch call.Program {
 	case rpc.ProgramNFS:
-		replyData, err = c.handleNFSProcedure(call.Procedure, procedureData)
+		replyData, err = c.handleNFSProcedure(call, procedureData)
 	case rpc.ProgramMount:
-		replyData, err = c.handleMountProcedure(call.Procedure, procedureData)
+		replyData, err = c.handleMountProcedure(call, procedureData)
 	default:
 		logger.Debug("Unknown program: %d", call.Program)
 		return nil
@@ -120,12 +120,26 @@ func (c *conn) handleRPCCall(call *rpc.RPCCallMessage, procedureData []byte) err
 	return c.sendReply(call.XID, replyData)
 }
 
-func (c *conn) handleNFSProcedure(procedure uint32, data []byte) ([]byte, error) {
+func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte, error) {
 	repo := c.server.repository
 	contentRepo := c.server.content
 	handler := c.server.nfsHandler
 
-	switch procedure {
+	// Note: NFS procedures also receive auth info through the RPC call
+	// We may want to pass this context to NFS handlers for permission checks
+	// For now, we'll extract it but not use it in most operations
+	authFlavor := call.GetAuthFlavor()
+
+	if authFlavor == rpc.AuthUnix {
+		authBody := call.GetAuthBody()
+		if len(authBody) > 0 {
+			if unixAuth, err := rpc.ParseUnixAuth(authBody); err == nil {
+				logger.Debug("NFS call with Unix auth: uid=%d gid=%d", unixAuth.UID, unixAuth.GID)
+			}
+		}
+	}
+
+	switch call.Procedure {
 	case nfs.NFSProcNull:
 		return handler.Null(repo)
 	case nfs.NFSProcGetAttr:
@@ -383,30 +397,58 @@ func (c *conn) handleNFSProcedure(procedure uint32, data []byte) ([]byte, error)
 			},
 		)
 	default:
-		logger.Debug("Unknown NFS procedure: %d", procedure)
+		logger.Debug("Unknown NFS procedure: %d", call)
 		return []byte{}, nil
 	}
 }
 
-func (c *conn) handleMountProcedure(procedure uint32, data []byte) ([]byte, error) {
+func (c *conn) handleMountProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte, error) {
 	repo := c.server.repository
 	handler := c.server.mountHandler
 
-	switch procedure {
+	switch call.Procedure {
 	case mount.MountProcNull:
 		return handler.MountNull(repo)
+
 	case mount.MountProcMnt:
+		// Extract authentication from RPC call
+		authFlavor := call.GetAuthFlavor()
+
+		// Parse Unix credentials if present
+		var unixAuth *rpc.UnixAuth
+		if authFlavor == rpc.AuthUnix {
+			authBody := call.GetAuthBody()
+			if len(authBody) > 0 {
+				parsedAuth, err := rpc.ParseUnixAuth(authBody)
+				if err != nil {
+					logger.Warn("Failed to parse Unix auth credentials: %v", err)
+					// Don't fail the mount, just proceed without detailed auth info
+				} else {
+					unixAuth = parsedAuth
+					logger.Debug("Parsed Unix auth: %s", parsedAuth.String())
+				}
+			}
+		}
+
+		// Create mount context with client information and auth
+		ctx := &mount.MountContext{
+			ClientAddr: c.conn.RemoteAddr().String(),
+			AuthFlavor: authFlavor,
+			UnixAuth:   unixAuth,
+		}
+
 		return handleRequest(
 			data,
 			mount.DecodeMountRequest,
 			func(req *mount.MountRequest) (*mount.MountResponse, error) {
-				return handler.Mount(repo, req)
+				return handler.Mount(repo, req, ctx)
 			},
 			mount.MountErrIO,
 			func(status uint32) *mount.MountResponse {
 				return &mount.MountResponse{Status: status}
 			},
 		)
+
 	case mount.MountProcUmnt:
 		return handleRequest(
 			data,
@@ -419,46 +461,9 @@ func (c *conn) handleMountProcedure(procedure uint32, data []byte) ([]byte, erro
 				return &mount.UmountResponse{}
 			},
 		)
-	case mount.MountProcDump:
-		return handleRequest(
-			data,
-			mount.DecodeDumpRequest,
-			func(req *mount.DumpRequest) (*mount.DumpResponse, error) {
-				return handler.Dump(repo)
-			},
-			mount.MountErrIO,
-			func(status uint32) *mount.DumpResponse {
-				return &mount.DumpResponse{Mounts: []*mount.MountEntry{}}
-			},
-		)
 
-	case mount.MountProcUmntAll:
-		return handleRequest(
-			data,
-			mount.DecodeUmntAllRequest,
-			func(req *mount.UmntAllRequest) (*mount.UmntAllResponse, error) {
-				return handler.UmntAll(repo)
-			},
-			mount.MountErrIO,
-			func(status uint32) *mount.UmntAllResponse {
-				return &mount.UmntAllResponse{}
-			},
-		)
-
-	case mount.MountProcExport:
-		return handleRequest(
-			data,
-			mount.DecodeExportRequest,
-			func(req *mount.ExportRequest) (*mount.ExportResponse, error) {
-				return handler.Export(repo)
-			},
-			mount.MountErrIO,
-			func(status uint32) *mount.ExportResponse {
-				return &mount.ExportResponse{Exports: []*mount.ExportEntry{}}
-			},
-		)
 	default:
-		logger.Debug("Unknown Mount procedure: %d", procedure)
+		logger.Debug("Unknown Mount procedure: %d", call.Procedure)
 		return []byte{}, nil
 	}
 }

@@ -151,8 +151,17 @@ func main() {
 	}, rootAttr); err != nil {
 		log.Fatalf("Failed to add export: %v", err)
 	}
-
 	logger.Info("Export added: /export")
+
+	repo.AddExport("/nolocalhost", metadata.ExportOptions{
+		ReadOnly:           false,
+		AllowedClients:     []string{"192.168.1.0/24"},
+		DeniedClients:      []string{"192.168.1.50", "::1"},
+		RequireAuth:        false,
+		AllowedAuthFlavors: []uint32{0, 1}, // AUTH_NULL, AUTH_UNIX
+	}, rootAttr)
+
+	logger.Info("Export added: /nolocalhost")
 
 	// Get root handle
 	rootHandle, err := repo.GetRootHandle("/export")
@@ -164,8 +173,6 @@ func main() {
 	if err := createInitialStructure(repo, contentRepo, rootHandle); err != nil {
 		log.Fatalf("Failed to create initial structure: %v", err)
 	}
-
-	logger.Info("Initial file structure created")
 
 	srv := nfsServer.New(*port, repo, contentRepo)
 
