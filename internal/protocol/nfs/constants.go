@@ -68,6 +68,9 @@ const (
 
 	// NFSProcCommit - Commit cached data to stable storage
 	NFSProcCommit = 21
+
+	// NFS3ErrInval - Invalid argument
+	NFS3ErrInval = 22
 )
 
 // NFS Status Codes

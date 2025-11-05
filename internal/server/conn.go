@@ -176,8 +176,18 @@ func (c *conn) handleNFSProcedure(procedure uint32, data []byte) ([]byte, error)
 				return &nfs.AccessResponse{Status: status}
 			},
 		)
-		// case NFSProcReadLink:
-		// 	return handler.ReadLink(repo, data)
+	case nfs.NFSProcReadLink:
+		return handleRequest(
+			data,
+			nfs.DecodeReadLinkRequest,
+			func(req *nfs.ReadLinkRequest) (*nfs.ReadLinkResponse, error) {
+				return handler.ReadLink(repo, req)
+			},
+			nfs.NFS3ErrIO,
+			func(status uint32) *nfs.ReadLinkResponse {
+				return &nfs.ReadLinkResponse{Status: status}
+			},
+		)
 	case nfs.NFSProcRead:
 		return handleRequest(
 			data,

@@ -28,9 +28,9 @@ type NFSHandler interface {
 	// RFC 1813 Section 3.3.4
 	Access(repository metadata.Repository, req *nfs.AccessRequest) (*nfs.AccessResponse, error)
 
-	// // ReadLink reads the data associated with a symbolic link.
-	// // RFC 1813 Section 3.3.5
-	// ReadLink(repository metadata.Repository, data []byte) ([]byte, error)
+	// ReadLink reads the data associated with a symbolic link.
+	// RFC 1813 Section 3.3.5
+	ReadLink(repository metadata.Repository, req *nfs.ReadLinkRequest) (*nfs.ReadLinkResponse, error)
 
 	// Read reads data from a file.
 	// RFC 1813 Section 3.3.6
