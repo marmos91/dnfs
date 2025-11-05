@@ -1,4 +1,3 @@
-// internal/protocol/nfs/rename.go
 package nfs
 
 import (

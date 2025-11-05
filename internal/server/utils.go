@@ -24,6 +24,7 @@ type rpcRequest interface {
 		*nfs.MkdirRequest |
 		*nfs.RmdirRequest |
 		*nfs.LinkRequest |
+		*nfs.SymlinkRequest |
 		*mount.MountRequest |
 		*mount.UmountRequest
 }
@@ -46,6 +47,7 @@ type rpcResponse interface {
 		*nfs.MkdirResponse |
 		*nfs.RmdirResponse |
 		*nfs.LinkResponse |
+		*nfs.SymlinkResponse |
 		*mount.MountResponse |
 		*mount.UmountResponse
 	Encode() ([]byte, error)

@@ -25,4 +25,7 @@ type Repository interface {
 	GetChild(parent FileHandle, name string) (FileHandle, error)
 	GetChildren(parent FileHandle) (map[string]FileHandle, error)
 	DeleteChild(parent FileHandle, name string) error
+
+	// Helper method to add files/directories to a parent
+	AddFileToDirectory(parentHandle FileHandle, name string, attr *FileAttr) (FileHandle, error)
 }
