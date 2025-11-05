@@ -17,22 +17,6 @@ type SetAttrRequest struct {
 	Guard   TimeGuard
 }
 
-// SetAttrs contains the attributes to set
-type SetAttrs struct {
-	SetMode  bool
-	Mode     uint32
-	SetUID   bool
-	UID      uint32
-	SetGID   bool
-	GID      uint32
-	SetSize  bool
-	Size     uint64
-	SetAtime bool
-	Atime    TimeVal
-	SetMtime bool
-	Mtime    TimeVal
-}
-
 // TimeGuard is used for conditional updates
 type TimeGuard struct {
 	Check bool

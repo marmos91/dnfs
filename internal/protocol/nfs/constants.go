@@ -133,3 +133,102 @@ const (
 	FSFHomogeneous = 0x0008 // PATHCONF valid for all files
 	FSFCanSetTime  = 0x0010 // Server can set times
 )
+
+// File type constants as defined in RFC 1813 Section 2.5.5.
+// These values are used in FileAttr.Type to indicate the type of filesystem object.
+const (
+	// FileTypeRegular indicates a regular file
+	FileTypeRegular = 1
+
+	// FileTypeDirectory indicates a directory
+	FileTypeDirectory = 2
+
+	// FileTypeBlock indicates a block special device file
+	FileTypeBlock = 3
+
+	// FileTypeChar indicates a character special device file
+	FileTypeChar = 4
+
+	// FileTypeSymlink indicates a symbolic link
+	FileTypeSymlink = 5
+
+	// FileTypeSocket indicates a socket
+	FileTypeSocket = 6
+
+	// FileTypeFifo indicates a named pipe (FIFO)
+	FileTypeFifo = 7
+)
+
+// ============================================================================
+// Access Rights
+// ============================================================================
+
+// Access rights bits used in ACCESS procedure (RFC 1813 Section 3.3.4).
+// These can be combined with bitwise OR to check multiple permissions.
+//
+// Usage:
+//
+//   - Check read and execute:
+//     rights := AccessRead | AccessExecute
+//
+//   - Check all permissions:
+//     rights := AccessRead | AccessLookup | AccessModify | AccessExtend | AccessDelete | AccessExecute
+const (
+	// AccessRead indicates permission to read file data or list directory
+	AccessRead = 0x0001
+
+	// AccessLookup indicates permission to look up names in a directory
+	AccessLookup = 0x0002
+
+	// AccessModify indicates permission to modify file data
+	AccessModify = 0x0004
+
+	// AccessExtend indicates permission to extend a file (write beyond current EOF)
+	AccessExtend = 0x0008
+
+	// AccessDelete indicates permission to delete a file or directory
+	AccessDelete = 0x0010
+
+	// AccessExecute indicates permission to execute a file or search a directory
+	AccessExecute = 0x0020
+)
+
+// ============================================================================
+// Write Stability
+// ============================================================================
+
+// Write stability modes (RFC 1813 Section 3.3.7).
+// These indicate how committed the data should be after a WRITE operation.
+const (
+	// WriteUnstable means data can be cached in memory (fastest)
+	// Data may be lost if server crashes before COMMIT
+	WriteUnstable = 0
+
+	// WriteDataSync means data is committed to disk before returning
+	// But metadata (like mtime) may still be cached
+	WriteDataSync = 1
+
+	// WriteFileSync means both data and metadata are committed to disk
+	// Slowest but safest
+	WriteFileSync = 2
+)
+
+// ============================================================================
+// Create Modes
+// ============================================================================
+
+// Create modes used in CREATE procedure (RFC 1813 Section 3.3.8).
+const (
+	// CreateUnchecked creates a file or truncates if it already exists.
+	// This is the default mode for most file creation operations.
+	CreateUnchecked = 0
+
+	// CreateGuarded creates a file only if it doesn't exist.
+	// Returns NFS3ErrExist if the file already exists.
+	CreateGuarded = 1
+
+	// CreateExclusive creates a file exclusively using a verifier.
+	// The verifier ensures idempotent file creation across retries.
+	// If the file exists and the verifier matches, the operation succeeds (idempotent).
+	CreateExclusive = 2
+)

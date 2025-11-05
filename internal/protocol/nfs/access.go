@@ -9,16 +9,6 @@ import (
 	"github.com/marmos91/dittofs/internal/metadata"
 )
 
-// Access permission bits (RFC 1813 Section 3.3.4)
-const (
-	AccessRead    = 0x0001
-	AccessLookup  = 0x0002
-	AccessModify  = 0x0004
-	AccessExtend  = 0x0008
-	AccessDelete  = 0x0010
-	AccessExecute = 0x0020
-)
-
 // AccessRequest represents an ACCESS request
 type AccessRequest struct {
 	Handle []byte

@@ -25,6 +25,11 @@ type WriteRepository interface {
 	// WriteAt writes data at the specified offset
 	// If the file doesn't exist, it will be created
 	WriteAt(id ContentID, data []byte, offset int64) error
+
+	// Truncate changes the size of the content to the specified size.
+	// If size is less than current size, content is truncated.
+	// If size is greater than current size, content is extended (usually with zeros).
+	Truncate(id ContentID, size uint64) error
 }
 
 // SeekableContentRepository is an optional extended interface

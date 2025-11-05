@@ -26,13 +26,6 @@ type ReadDirResponse struct {
 	Eof        bool
 }
 
-// DirEntry represents a single directory entry
-type DirEntry struct {
-	Fileid uint64
-	Name   string
-	Cookie uint64
-}
-
 // ReadDir reads entries from a directory.
 // RFC 1813 Section 3.3.16
 func (h *DefaultNFSHandler) ReadDir(repository metadata.Repository, req *ReadDirRequest) (*ReadDirResponse, error) {
