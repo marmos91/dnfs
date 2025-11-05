@@ -93,3 +93,7 @@ func MakeSuccessReply(xid uint32, data []byte) ([]byte, error) {
 
 	return append(fragmentHeader, replyData...), nil
 }
+
+func XdrPadding(length uint32) uint32 {
+	return (4 - (length % 4)) % 4
+}
