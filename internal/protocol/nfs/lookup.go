@@ -28,7 +28,7 @@ type LookupResponse struct {
 func (h *DefaultNFSHandler) Lookup(repository metadata.Repository, req *LookupRequest) (*LookupResponse, error) {
 	logger.Debug("LOOKUP for file '%s' in directory %x", req.Filename, req.DirHandle)
 
-	// Get the directory attributes
+	// Get the directory attributes first (we'll need them even on failure)
 	dirAttr, err := repository.GetFile(metadata.FileHandle(req.DirHandle))
 	if err != nil {
 		logger.Warn("Directory not found: %v", err)
@@ -41,22 +41,32 @@ func (h *DefaultNFSHandler) Lookup(repository metadata.Repository, req *LookupRe
 		return &LookupResponse{Status: NFS3ErrNotDir}, nil
 	}
 
+	// Generate directory file ID (we'll need this for post-op attrs)
+	dirFileid := binary.BigEndian.Uint64(req.DirHandle[:8])
+	nfsDirAttr := MetadataToNFSAttr(dirAttr, dirFileid)
+
 	// Look up the child
 	childHandle, err := repository.GetChild(metadata.FileHandle(req.DirHandle), req.Filename)
 	if err != nil {
 		logger.Debug("Child '%s' not found: %v", req.Filename, err)
-		return &LookupResponse{Status: NFS3ErrNoEnt}, nil
+		// Return NOENT but include directory post-op attributes
+		return &LookupResponse{
+			Status:  NFS3ErrNoEnt,
+			DirAttr: nfsDirAttr,
+		}, nil
 	}
 
 	// Get child attributes
 	childAttr, err := repository.GetFile(childHandle)
 	if err != nil {
 		logger.Error("Child handle exists but attributes not found: %v", err)
-		return &LookupResponse{Status: NFS3ErrIO}, nil
+		return &LookupResponse{
+			Status:  NFS3ErrIO,
+			DirAttr: nfsDirAttr,
+		}, nil
 	}
 
-	// Generate file IDs
-	dirFileid := binary.BigEndian.Uint64(req.DirHandle[:8])
+	// Generate child file ID
 	childFileid := binary.BigEndian.Uint64(childHandle[:8])
 
 	logger.Info("LOOKUP successful: '%s' -> handle %x", req.Filename, childHandle)
@@ -65,7 +75,7 @@ func (h *DefaultNFSHandler) Lookup(repository metadata.Repository, req *LookupRe
 		Status:     NFS3OK,
 		FileHandle: childHandle,
 		Attr:       MetadataToNFSAttr(childAttr, childFileid),
-		DirAttr:    MetadataToNFSAttr(dirAttr, dirFileid),
+		DirAttr:    nfsDirAttr,
 	}, nil
 }
 
@@ -125,8 +135,21 @@ func (resp *LookupResponse) Encode() ([]byte, error) {
 		return nil, fmt.Errorf("write status: %w", err)
 	}
 
-	// If status is not OK, return just the status
+	// If status is not OK, skip file handle and object attributes
 	if resp.Status != NFS3OK {
+		// But still write post-op dir attributes
+		if resp.DirAttr != nil {
+			if err := binary.Write(&buf, binary.BigEndian, uint32(1)); err != nil {
+				return nil, err
+			}
+			if err := encodeFileAttr(&buf, resp.DirAttr); err != nil {
+				return nil, err
+			}
+		} else {
+			if err := binary.Write(&buf, binary.BigEndian, uint32(0)); err != nil {
+				return nil, err
+			}
+		}
 		return buf.Bytes(), nil
 	}
 

@@ -2,6 +2,7 @@ package nfs
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 	"time"
@@ -171,13 +172,32 @@ func (h *DefaultNFSHandler) Create(contentRepo content.Repository, metadataRepo 
 		}
 	}
 
-	// Add file to repository
-	fileHandle, err := metadataRepo.(interface {
-		AddFileToDirectory(metadata.FileHandle, string, *metadata.FileAttr) (metadata.FileHandle, error)
-	}).AddFileToDirectory(metadata.FileHandle(req.DirHandle), req.Filename, fileAttr)
+	// Generate a new file handle
+	// We'll use a hash similar to how MemoryRepository does it
+	handleData := fmt.Sprintf("%s-%s-%d", req.DirHandle, req.Filename, time.Now().UnixNano())
+	hash := sha256.Sum256([]byte(handleData))
+	fileHandle := metadata.FileHandle(hash[:])
 
-	if err != nil {
-		logger.Error("Failed to create file: %v", err)
+	// Create the file in the metadata repository
+	if err := metadataRepo.CreateFile(fileHandle, fileAttr); err != nil {
+		logger.Error("Failed to create file metadata: %v", err)
+		return &CreateResponse{Status: NFS3ErrIO}, nil
+	}
+
+	// Add as child to parent directory
+	if err := metadataRepo.AddChild(metadata.FileHandle(req.DirHandle), req.Filename, fileHandle); err != nil {
+		logger.Error("Failed to add child to directory: %v", err)
+		// Clean up the file we just created
+		metadataRepo.DeleteFile(fileHandle)
+		return &CreateResponse{Status: NFS3ErrIO}, nil
+	}
+
+	// Set parent relationship
+	if err := metadataRepo.SetParent(fileHandle, metadata.FileHandle(req.DirHandle)); err != nil {
+		logger.Error("Failed to set parent: %v", err)
+		// Clean up
+		metadataRepo.DeleteChild(metadata.FileHandle(req.DirHandle), req.Filename)
+		metadataRepo.DeleteFile(fileHandle)
 		return &CreateResponse{Status: NFS3ErrIO}, nil
 	}
 

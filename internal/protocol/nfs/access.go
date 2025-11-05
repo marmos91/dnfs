@@ -52,17 +52,17 @@ func (h *DefaultNFSHandler) Access(repository metadata.Repository, req *AccessRe
 	// In a real implementation, you would check user/group/permissions
 	grantedAccess := req.Access
 
-	// If it's a directory, ensure lookup is granted
+	// If it's a directory, ensure lookup, modify, extend and delete are granted
 	if attr.Type == metadata.FileTypeDirectory {
-		grantedAccess |= AccessLookup
+		grantedAccess |= AccessLookup | AccessModify | AccessExtend | AccessDelete
 	}
 
-	// If it's a regular file, ensure read is granted
+	// If it's a regular file, ensure read, modify, and extend are granted
 	if attr.Type == metadata.FileTypeRegular {
-		grantedAccess |= AccessRead
+		grantedAccess |= AccessRead | AccessModify | AccessExtend
 	}
 
-	logger.Debug("ACCESS granted: 0x%x", grantedAccess)
+	logger.Debug("ACCESS granted: 0x%x (requested: 0x%x)", grantedAccess, req.Access)
 
 	return &AccessResponse{
 		Status: NFS3OK,
