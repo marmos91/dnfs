@@ -10,25 +10,53 @@ import (
 	"github.com/marmos91/dittofs/internal/metadata"
 )
 
-// SymlinkRequest represents a SYMLINK request
+// SymlinkRequest represents an NFS SYMLINK request (RFC 1813 Section 3.3.10).
+// The SYMLINK procedure creates a symbolic link.
 type SymlinkRequest struct {
+	// DirHandle is the file handle of the parent directory
 	DirHandle []byte
-	Name      string
-	Target    string   // The symbolic link target path
-	Attr      SetAttrs // Attributes for the new symlink
+
+	// Name is the name of the symbolic link to create
+	Name string
+
+	// Target is the path the symbolic link points to
+	Target string
+
+	// Attr contains attributes for the new symbolic link
+	Attr SetAttrs
 }
 
-// SymlinkResponse represents a SYMLINK response
+// SymlinkResponse represents an NFS SYMLINK response (RFC 1813 Section 3.3.10).
 type SymlinkResponse struct {
-	Status        uint32
-	FileHandle    []byte    // Handle of created symlink (optional)
-	Attr          *FileAttr // Post-op attributes of symlink (optional)
-	DirAttrBefore *WccAttr  // Pre-op dir attributes (optional)
-	DirAttrAfter  *FileAttr // Post-op dir attributes (optional)
+	// Status is the NFS status code
+	Status uint32
+
+	// FileHandle is the handle of the created symlink (only if Status == NFS3OK)
+	FileHandle []byte
+
+	// Attr contains post-operation attributes of the symlink
+	Attr *FileAttr
+
+	// DirAttrBefore contains pre-operation weak cache consistency data for the directory
+	DirAttrBefore *WccAttr
+
+	// DirAttrAfter contains post-operation attributes for the directory
+	DirAttrAfter *FileAttr
 }
 
 // Symlink creates a symbolic link.
-// RFC 1813 Section 3.3.10
+//
+// This implements the NFS SYMLINK procedure as defined in RFC 1813 Section 3.3.10.
+// Symbolic links are special files that contain a path to another file or directory.
+//
+// Authentication: This layer performs no authentication. Auth checks should be
+// performed by the caller based on the authenticated RPC credentials.
+//
+// Error Handling:
+//   - Returns NFS3ErrNoEnt if the parent directory doesn't exist
+//   - Returns NFS3ErrNotDir if DirHandle is not a directory
+//   - Returns NFS3ErrExist if a file with the same name already exists
+//   - Returns NFS3ErrIO for metadata repository errors
 func (h *DefaultNFSHandler) Symlink(repository metadata.Repository, req *SymlinkRequest) (*SymlinkResponse, error) {
 	logger.Debug("SYMLINK: creating '%s' -> '%s' in directory %x", req.Name, req.Target, req.DirHandle)
 
@@ -45,19 +73,8 @@ func (h *DefaultNFSHandler) Symlink(repository metadata.Repository, req *Symlink
 		return &SymlinkResponse{Status: NFS3ErrNotDir}, nil
 	}
 
-	// Store pre-op dir attributes for WCC
-	dirFileid := binary.BigEndian.Uint64(req.DirHandle[:8])
-	wccDirAttr := &WccAttr{
-		Size: dirAttr.Size,
-		Mtime: TimeVal{
-			Seconds:  uint32(dirAttr.Mtime.Unix()),
-			Nseconds: uint32(dirAttr.Mtime.Nanosecond()),
-		},
-		Ctime: TimeVal{
-			Seconds:  uint32(dirAttr.Ctime.Unix()),
-			Nseconds: uint32(dirAttr.Ctime.Nanosecond()),
-		},
-	}
+	// Capture pre-operation directory attributes for WCC
+	wccDirAttr := captureWccAttr(dirAttr)
 
 	// Check if file already exists
 	_, err = repository.GetChild(metadata.FileHandle(req.DirHandle), req.Name)
@@ -84,16 +101,8 @@ func (h *DefaultNFSHandler) Symlink(repository metadata.Repository, req *Symlink
 		SymlinkTarget: req.Target, // Store the target path
 	}
 
-	// Apply optional attributes if set
-	if req.Attr.SetMode {
-		symlinkAttr.Mode = req.Attr.Mode
-	}
-	if req.Attr.SetUID {
-		symlinkAttr.UID = req.Attr.UID
-	}
-	if req.Attr.SetGID {
-		symlinkAttr.GID = req.Attr.GID
-	}
+	// Apply optional attributes
+	applySetAttrs(symlinkAttr, &req.Attr)
 
 	// Add symlink to directory
 	symlinkHandle, err := repository.AddFileToDirectory(
@@ -106,17 +115,19 @@ func (h *DefaultNFSHandler) Symlink(repository metadata.Repository, req *Symlink
 		return &SymlinkResponse{Status: NFS3ErrIO}, nil
 	}
 
-	// Update directory mtime
+	// Update directory timestamps
 	dirAttr.Mtime = now
 	dirAttr.Ctime = now
 	if err := repository.UpdateFile(metadata.FileHandle(req.DirHandle), dirAttr); err != nil {
-		logger.Error("Failed to update directory: %v", err)
+		logger.Warn("Failed to update directory: %v", err)
 	}
 
 	// Generate response
-	symlinkFileid := binary.BigEndian.Uint64(symlinkHandle[:8])
-	nfsSymlinkAttr := MetadataToNFSAttr(symlinkAttr, symlinkFileid)
-	nfsDirAttr := MetadataToNFSAttr(dirAttr, dirFileid)
+	symlinkID := extractFileID(symlinkHandle)
+	nfsSymlinkAttr := MetadataToNFSAttr(symlinkAttr, symlinkID)
+
+	dirID := extractFileID(metadata.FileHandle(req.DirHandle))
+	nfsDirAttr := MetadataToNFSAttr(dirAttr, dirID)
 
 	logger.Info("SYMLINK created: %s -> %s", req.Name, req.Target)
 
@@ -129,281 +140,89 @@ func (h *DefaultNFSHandler) Symlink(repository metadata.Repository, req *Symlink
 	}, nil
 }
 
+// DecodeSymlinkRequest decodes an XDR-encoded SYMLINK request.
+//
+// The request format (RFC 1813 Section 3.3.10):
+//
+//	struct SYMLINK3args {
+//	    diropargs3   where;
+//	    symlinkdata3 symlink;
+//	};
 func DecodeSymlinkRequest(data []byte) (*SymlinkRequest, error) {
 	if len(data) < 4 {
-		return nil, fmt.Errorf("data too short")
+		return nil, fmt.Errorf("data too short: %d bytes", len(data))
 	}
 
 	reader := bytes.NewReader(data)
 
-	// Read directory handle length
-	var handleLen uint32
-	if err := binary.Read(reader, binary.BigEndian, &handleLen); err != nil {
-		return nil, fmt.Errorf("read handle length: %w", err)
+	// Decode directory handle
+	dirHandle, err := decodeOpaque(reader)
+	if err != nil {
+		return nil, fmt.Errorf("decode directory handle: %w", err)
 	}
 
-	// Read directory handle
-	dirHandle := make([]byte, handleLen)
-	if err := binary.Read(reader, binary.BigEndian, &dirHandle); err != nil {
-		return nil, fmt.Errorf("read handle: %w", err)
+	// Decode symlink name
+	name, err := decodeString(reader)
+	if err != nil {
+		return nil, fmt.Errorf("decode name: %w", err)
 	}
 
-	// Skip padding
-	padding := (4 - (handleLen % 4)) % 4
-	for i := uint32(0); i < padding; i++ {
-		reader.ReadByte()
+	// Decode attributes using the shared helper
+	attr, err := decodeSetAttrs(reader)
+	if err != nil {
+		return nil, fmt.Errorf("decode attributes: %w", err)
 	}
 
-	// Read symlink name
-	var nameLen uint32
-	if err := binary.Read(reader, binary.BigEndian, &nameLen); err != nil {
-		return nil, fmt.Errorf("read name length: %w", err)
-	}
-
-	nameBytes := make([]byte, nameLen)
-	if err := binary.Read(reader, binary.BigEndian, &nameBytes); err != nil {
-		return nil, fmt.Errorf("read name: %w", err)
-	}
-
-	// Skip padding
-	padding = (4 - (nameLen % 4)) % 4
-	for i := uint32(0); i < padding; i++ {
-		reader.ReadByte()
-	}
-
-	// Read attributes (sattr3)
-	attr := SetAttrs{}
-
-	// Mode
-	var setMode uint32
-	if err := binary.Read(reader, binary.BigEndian, &setMode); err != nil {
-		return nil, fmt.Errorf("read set_mode: %w", err)
-	}
-	attr.SetMode = (setMode == 1)
-	if attr.SetMode {
-		if err := binary.Read(reader, binary.BigEndian, &attr.Mode); err != nil {
-			return nil, fmt.Errorf("read mode: %w", err)
-		}
-	}
-
-	// UID
-	var setUID uint32
-	if err := binary.Read(reader, binary.BigEndian, &setUID); err != nil {
-		return nil, fmt.Errorf("read set_uid: %w", err)
-	}
-	attr.SetUID = (setUID == 1)
-	if attr.SetUID {
-		if err := binary.Read(reader, binary.BigEndian, &attr.UID); err != nil {
-			return nil, fmt.Errorf("read uid: %w", err)
-		}
-	}
-
-	// GID
-	var setGID uint32
-	if err := binary.Read(reader, binary.BigEndian, &setGID); err != nil {
-		return nil, fmt.Errorf("read set_gid: %w", err)
-	}
-	attr.SetGID = (setGID == 1)
-	if attr.SetGID {
-		if err := binary.Read(reader, binary.BigEndian, &attr.GID); err != nil {
-			return nil, fmt.Errorf("read gid: %w", err)
-		}
-	}
-
-	// Size (usually not set for symlinks)
-	var setSize uint32
-	if err := binary.Read(reader, binary.BigEndian, &setSize); err != nil {
-		return nil, fmt.Errorf("read set_size: %w", err)
-	}
-	attr.SetSize = (setSize == 1)
-	if attr.SetSize {
-		if err := binary.Read(reader, binary.BigEndian, &attr.Size); err != nil {
-			return nil, fmt.Errorf("read size: %w", err)
-		}
-	}
-
-	// Atime
-	var setAtime uint32
-	if err := binary.Read(reader, binary.BigEndian, &setAtime); err != nil {
-		return nil, fmt.Errorf("read set_atime: %w", err)
-	}
-	if setAtime == 1 {
-		attr.SetAtime = true
-		if err := binary.Read(reader, binary.BigEndian, &attr.Atime.Seconds); err != nil {
-			return nil, fmt.Errorf("read atime seconds: %w", err)
-		}
-		if err := binary.Read(reader, binary.BigEndian, &attr.Atime.Nseconds); err != nil {
-			return nil, fmt.Errorf("read atime nseconds: %w", err)
-		}
-	} else if setAtime == 2 {
-		// SET_TO_SERVER_TIME
-		attr.SetAtime = true
-		now := time.Now()
-		attr.Atime = TimeVal{
-			Seconds:  uint32(now.Unix()),
-			Nseconds: uint32(now.Nanosecond()),
-		}
-	}
-
-	// Mtime
-	var setMtime uint32
-	if err := binary.Read(reader, binary.BigEndian, &setMtime); err != nil {
-		return nil, fmt.Errorf("read set_mtime: %w", err)
-	}
-	if setMtime == 1 {
-		attr.SetMtime = true
-		if err := binary.Read(reader, binary.BigEndian, &attr.Mtime.Seconds); err != nil {
-			return nil, fmt.Errorf("read mtime seconds: %w", err)
-		}
-		if err := binary.Read(reader, binary.BigEndian, &attr.Mtime.Nseconds); err != nil {
-			return nil, fmt.Errorf("read mtime nseconds: %w", err)
-		}
-	} else if setMtime == 2 {
-		// SET_TO_SERVER_TIME
-		attr.SetMtime = true
-		now := time.Now()
-		attr.Mtime = TimeVal{
-			Seconds:  uint32(now.Unix()),
-			Nseconds: uint32(now.Nanosecond()),
-		}
-	}
-
-	// Read target path
-	var targetLen uint32
-	if err := binary.Read(reader, binary.BigEndian, &targetLen); err != nil {
-		return nil, fmt.Errorf("read target length: %w", err)
-	}
-
-	targetBytes := make([]byte, targetLen)
-	if err := binary.Read(reader, binary.BigEndian, &targetBytes); err != nil {
-		return nil, fmt.Errorf("read target: %w", err)
+	// Decode target path
+	target, err := decodeString(reader)
+	if err != nil {
+		return nil, fmt.Errorf("decode target: %w", err)
 	}
 
 	return &SymlinkRequest{
 		DirHandle: dirHandle,
-		Name:      string(nameBytes),
-		Target:    string(targetBytes),
-		Attr:      attr,
+		Name:      name,
+		Target:    target,
+		Attr:      *attr,
 	}, nil
 }
 
+// Encode encodes a SYMLINK response to XDR format.
+//
+// The response format (RFC 1813 Section 3.3.10):
+//
+//	struct SYMLINK3resok {
+//	    post_op_fh3   obj;
+//	    post_op_attr  obj_attributes;
+//	    wcc_data      dir_wcc;
+//	};
+//
+//	struct SYMLINK3resfail {
+//	    wcc_data      dir_wcc;
+//	};
 func (resp *SymlinkResponse) Encode() ([]byte, error) {
-	var buf bytes.Buffer
+	buf := new(bytes.Buffer)
 
-	// Write status
-	if err := binary.Write(&buf, binary.BigEndian, resp.Status); err != nil {
-		return nil, fmt.Errorf("write status: %w", err)
+	// Encode status
+	if err := binary.Write(buf, binary.BigEndian, resp.Status); err != nil {
+		return nil, fmt.Errorf("encode status: %w", err)
 	}
 
-	if resp.Status != NFS3OK {
-		// Write WCC data even on failure
-		if resp.DirAttrBefore != nil {
-			if err := binary.Write(&buf, binary.BigEndian, uint32(1)); err != nil {
-				return nil, err
-			}
-			if err := binary.Write(&buf, binary.BigEndian, resp.DirAttrBefore.Size); err != nil {
-				return nil, err
-			}
-			if err := binary.Write(&buf, binary.BigEndian, resp.DirAttrBefore.Mtime.Seconds); err != nil {
-				return nil, err
-			}
-			if err := binary.Write(&buf, binary.BigEndian, resp.DirAttrBefore.Mtime.Nseconds); err != nil {
-				return nil, err
-			}
-			if err := binary.Write(&buf, binary.BigEndian, resp.DirAttrBefore.Ctime.Seconds); err != nil {
-				return nil, err
-			}
-			if err := binary.Write(&buf, binary.BigEndian, resp.DirAttrBefore.Ctime.Nseconds); err != nil {
-				return nil, err
-			}
-		} else {
-			if err := binary.Write(&buf, binary.BigEndian, uint32(0)); err != nil {
-				return nil, err
-			}
+	if resp.Status == NFS3OK {
+		// Encode post_op_fh3 (optional file handle)
+		if err := encodeOptionalOpaque(buf, resp.FileHandle); err != nil {
+			return nil, fmt.Errorf("encode file handle: %w", err)
 		}
 
-		// Post-op dir attributes
-		if err := binary.Write(&buf, binary.BigEndian, uint32(0)); err != nil {
-			return nil, err
-		}
-
-		return buf.Bytes(), nil
-	}
-
-	// Write post-op file handle
-	if resp.FileHandle != nil {
-		if err := binary.Write(&buf, binary.BigEndian, uint32(1)); err != nil {
-			return nil, err
-		}
-		handleLen := uint32(len(resp.FileHandle))
-		if err := binary.Write(&buf, binary.BigEndian, handleLen); err != nil {
-			return nil, err
-		}
-		buf.Write(resp.FileHandle)
-		// Add padding
-		padding := (4 - (handleLen % 4)) % 4
-		for i := uint32(0); i < padding; i++ {
-			buf.WriteByte(0)
-		}
-	} else {
-		if err := binary.Write(&buf, binary.BigEndian, uint32(0)); err != nil {
-			return nil, err
+		// Encode post_op_attr (optional attributes)
+		if err := encodeOptionalFileAttr(buf, resp.Attr); err != nil {
+			return nil, fmt.Errorf("encode file attributes: %w", err)
 		}
 	}
 
-	// Write post-op attributes
-	if resp.Attr != nil {
-		if err := binary.Write(&buf, binary.BigEndian, uint32(1)); err != nil {
-			return nil, err
-		}
-		if err := encodeFileAttr(&buf, resp.Attr); err != nil {
-			return nil, err
-		}
-	} else {
-		if err := binary.Write(&buf, binary.BigEndian, uint32(0)); err != nil {
-			return nil, err
-		}
-	}
-
-	// Write WCC data for directory
-	// Pre-op attributes
-	if resp.DirAttrBefore != nil {
-		if err := binary.Write(&buf, binary.BigEndian, uint32(1)); err != nil {
-			return nil, err
-		}
-		if err := binary.Write(&buf, binary.BigEndian, resp.DirAttrBefore.Size); err != nil {
-			return nil, err
-		}
-		if err := binary.Write(&buf, binary.BigEndian, resp.DirAttrBefore.Mtime.Seconds); err != nil {
-			return nil, err
-		}
-		if err := binary.Write(&buf, binary.BigEndian, resp.DirAttrBefore.Mtime.Nseconds); err != nil {
-			return nil, err
-		}
-		if err := binary.Write(&buf, binary.BigEndian, resp.DirAttrBefore.Ctime.Seconds); err != nil {
-			return nil, err
-		}
-		if err := binary.Write(&buf, binary.BigEndian, resp.DirAttrBefore.Ctime.Nseconds); err != nil {
-			return nil, err
-		}
-	} else {
-		if err := binary.Write(&buf, binary.BigEndian, uint32(0)); err != nil {
-			return nil, err
-		}
-	}
-
-	// Post-op dir attributes
-	if resp.DirAttrAfter != nil {
-		if err := binary.Write(&buf, binary.BigEndian, uint32(1)); err != nil {
-			return nil, err
-		}
-		if err := encodeFileAttr(&buf, resp.DirAttrAfter); err != nil {
-			return nil, err
-		}
-	} else {
-		if err := binary.Write(&buf, binary.BigEndian, uint32(0)); err != nil {
-			return nil, err
-		}
+	// Encode wcc_data for directory (always present)
+	if err := encodeWccData(buf, resp.DirAttrBefore, resp.DirAttrAfter); err != nil {
+		return nil, fmt.Errorf("encode directory wcc data: %w", err)
 	}
 
 	return buf.Bytes(), nil

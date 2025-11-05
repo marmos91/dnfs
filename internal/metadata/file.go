@@ -29,6 +29,8 @@ type FileType uint32
 const (
 	FileTypeRegular   FileType = 1
 	FileTypeDirectory FileType = 2
+	FileTypeBlock     FileType = 3
+	FileTypeChar      FileType = 4
 	FileTypeSymlink   FileType = 5
 	FileTypeSocket    FileType = 6
 	FileTypeFifo      FileType = 7
