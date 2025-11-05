@@ -52,9 +52,9 @@ type NFSHandler interface {
 	// RFC 1813 Section 3.3.10
 	Symlink(repository metadata.Repository, req *nfs.SymlinkRequest) (*nfs.SymlinkResponse, error)
 
-	// // MkNod creates a special device file.
-	// // RFC 1813 Section 3.3.11
-	// MkNod(repository metadata.Repository, data []byte) ([]byte, error)
+	// MkNod creates a special device file.
+	// RFC 1813 Section 3.3.11
+	Mknod(repository metadata.Repository, req *nfs.MknodRequest) (*nfs.MknodResponse, error)
 
 	// Remove removes a file.
 	// RFC 1813 Section 3.3.12

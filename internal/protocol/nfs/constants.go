@@ -68,9 +68,6 @@ const (
 
 	// NFSProcCommit - Commit cached data to stable storage
 	NFSProcCommit = 21
-
-	// NFS3ErrInval - Invalid argument
-	NFS3ErrInval = 22
 )
 
 // NFS Status Codes
@@ -101,6 +98,9 @@ const (
 	// NFS3ErrIsDir - Is a directory
 	NFS3ErrIsDir = 21
 
+	// NFS3ErrInval - Invalid argument
+	NFS3ErrInval = 22
+
 	// NFS3ErrFBig - File too large
 	NFS3ErrFBig = 27
 
@@ -121,6 +121,9 @@ const (
 
 	// NFS3ErrNotSync - Update synchronization mismatch
 	NFS3ErrNotSync = 10002
+
+	// NFS3ErrNotSupp - Operation not supported
+	NFS3ErrNotSupp = 10004
 )
 
 // FSInfo property flags (RFC 1813 Section 3.3.19)

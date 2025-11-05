@@ -30,4 +30,6 @@ const (
 	FileTypeRegular   FileType = 1
 	FileTypeDirectory FileType = 2
 	FileTypeSymlink   FileType = 5
+	FileTypeSocket    FileType = 6
+	FileTypeFifo      FileType = 7
 )

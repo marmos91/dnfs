@@ -248,8 +248,18 @@ func (c *conn) handleNFSProcedure(procedure uint32, data []byte) ([]byte, error)
 				return &nfs.SymlinkResponse{Status: status}
 			},
 		)
-		// case NFSProcMknod:
-		// 	return handler.MkNod(repo, data)
+	case nfs.NFSProcMknod:
+		return handleRequest(
+			data,
+			nfs.DecodeMknodRequest,
+			func(req *nfs.MknodRequest) (*nfs.MknodResponse, error) {
+				return handler.Mknod(repo, req)
+			},
+			nfs.NFS3ErrIO,
+			func(status uint32) *nfs.MknodResponse {
+				return &nfs.MknodResponse{Status: status}
+			},
+		)
 	case nfs.NFSProcRemove:
 		return handleRequest(
 			data,
