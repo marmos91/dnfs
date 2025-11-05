@@ -114,7 +114,7 @@ func (h *DefaultNFSHandler) Mknod(repository metadata.Repository, req *MknodRequ
 	now := time.Now()
 	deviceAttr := &metadata.FileAttr{
 		Type:      fileType,
-		Mode:      0644,
+		Mode:      0666,
 		UID:       0,
 		GID:       0,
 		Size:      0, // Special files have zero size

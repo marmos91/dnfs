@@ -91,10 +91,10 @@ type NFSHandler interface {
 	// PathConf returns POSIX information about a file system object.
 	// RFC 1813 Section 3.3.20
 	PathConf(repository metadata.Repository, req *nfs.PathConfRequest) (*nfs.PathConfResponse, error)
-	//
-	// // Commit commits cached data on the server to stable storage.
-	// // RFC 1813 Section 3.3.21
-	// Commit(repository metadata.Repository, data []byte) ([]byte, error)
+
+	// Commit commits cached data on the server to stable storage.
+	// RFC 1813 Section 3.3.21
+	Commit(repository metadata.Repository, req *nfs.CommitRequest) (*nfs.CommitResponse, error)
 }
 
 type MountHandler interface {
@@ -107,19 +107,19 @@ type MountHandler interface {
 	// RFC 1813 Appendix I
 	Mount(repository metadata.Repository, req *mount.MountRequest) (*mount.MountResponse, error)
 
-	// // Dump returns a list of all mounted file systems.
-	// // RFC 1813 Appendix I
-	// Dump(repository metadata.Repository, data []byte) ([]byte, error)
+	// Dump returns a list of all mounted file systems.
+	// RFC 1813 Appendix I
+	Dump(repository metadata.Repository) (*mount.DumpResponse, error)
 
 	// Umnt removes a mount entry from the mount list.
 	// RFC 1813 Appendix I
 	Umnt(repository metadata.Repository, req *mount.UmountRequest) (*mount.UmountResponse, error)
-	//
-	// // UmntAll removes all mount entries for the calling client.
-	// // RFC 1813 Appendix I
-	// UmntAll(repository metadata.Repository, data []byte) ([]byte, error)
-	//
-	// // Export returns a list of all exported file systems.
-	// // RFC 1813 Appendix I
-	// Export(repository metadata.Repository, data []byte) ([]byte, error)
+
+	// UmntAll removes all mount entries for the calling client.
+	// RFC 1813 Appendix I
+	UmntAll(repository metadata.Repository) (*mount.UmntAllResponse, error)
+
+	// Export returns a list of all exported file systems.
+	// RFC 1813 Appendix I
+	Export(repository metadata.Repository) (*mount.ExportResponse, error)
 }

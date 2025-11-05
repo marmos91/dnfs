@@ -370,8 +370,18 @@ func (c *conn) handleNFSProcedure(procedure uint32, data []byte) ([]byte, error)
 			},
 		)
 
-	// case NFSProcCommit:
-	// 	return handler.Commit(repo, data)
+	case nfs.NFSProcCommit:
+		return handleRequest(
+			data,
+			nfs.DecodeCommitRequest,
+			func(req *nfs.CommitRequest) (*nfs.CommitResponse, error) {
+				return handler.Commit(repo, req)
+			},
+			nfs.NFS3ErrIO,
+			func(status uint32) *nfs.CommitResponse {
+				return &nfs.CommitResponse{Status: status}
+			},
+		)
 	default:
 		logger.Debug("Unknown NFS procedure: %d", procedure)
 		return []byte{}, nil
@@ -407,6 +417,44 @@ func (c *conn) handleMountProcedure(procedure uint32, data []byte) ([]byte, erro
 			mount.MountErrIO,
 			func(status uint32) *mount.UmountResponse {
 				return &mount.UmountResponse{}
+			},
+		)
+	case mount.MountProcDump:
+		return handleRequest(
+			data,
+			mount.DecodeDumpRequest,
+			func(req *mount.DumpRequest) (*mount.DumpResponse, error) {
+				return handler.Dump(repo)
+			},
+			mount.MountErrIO,
+			func(status uint32) *mount.DumpResponse {
+				return &mount.DumpResponse{Mounts: []*mount.MountEntry{}}
+			},
+		)
+
+	case mount.MountProcUmntAll:
+		return handleRequest(
+			data,
+			mount.DecodeUmntAllRequest,
+			func(req *mount.UmntAllRequest) (*mount.UmntAllResponse, error) {
+				return handler.UmntAll(repo)
+			},
+			mount.MountErrIO,
+			func(status uint32) *mount.UmntAllResponse {
+				return &mount.UmntAllResponse{}
+			},
+		)
+
+	case mount.MountProcExport:
+		return handleRequest(
+			data,
+			mount.DecodeExportRequest,
+			func(req *mount.ExportRequest) (*mount.ExportResponse, error) {
+				return handler.Export(repo)
+			},
+			mount.MountErrIO,
+			func(status uint32) *mount.ExportResponse {
+				return &mount.ExportResponse{Exports: []*mount.ExportEntry{}}
 			},
 		)
 	default:

@@ -27,8 +27,12 @@ type rpcRequest interface {
 		*nfs.SymlinkRequest |
 		*nfs.ReadLinkRequest |
 		*nfs.MknodRequest |
+		*nfs.CommitRequest |
 		*mount.MountRequest |
-		*mount.UmountRequest
+		*mount.UmountRequest |
+		*mount.DumpRequest |
+		*mount.UmntAllRequest |
+		*mount.ExportRequest
 }
 
 type rpcResponse interface {
@@ -52,8 +56,12 @@ type rpcResponse interface {
 		*nfs.SymlinkResponse |
 		*nfs.ReadLinkResponse |
 		*nfs.MknodResponse |
+		*nfs.CommitResponse |
 		*mount.MountResponse |
-		*mount.UmountResponse
+		*mount.UmountResponse |
+		*mount.DumpResponse |
+		*mount.UmntAllResponse |
+		*mount.ExportResponse
 	Encode() ([]byte, error)
 }
 
