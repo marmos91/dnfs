@@ -130,7 +130,7 @@ func main() {
 		log.Fatalf("Failed to create content repository: %v", err)
 	}
 
-	repo := persistence.NewMemoryRepository()
+	metadataRepo := persistence.NewMemoryRepository()
 
 	// Configure server-wide settings
 	serverConfig := metadata.ServerConfig{}
@@ -142,7 +142,7 @@ func main() {
 		logger.Info("DUMP access unrestricted (default)")
 	}
 
-	if err := repo.SetServerConfig(serverConfig); err != nil {
+	if err := metadataRepo.SetServerConfig(serverConfig); err != nil {
 		log.Fatalf("Failed to set server config: %v", err)
 	}
 
@@ -160,7 +160,7 @@ func main() {
 		ContentID: "", // Root directory has no content
 	}
 
-	if err := repo.AddExport("/export", metadata.ExportOptions{
+	if err := metadataRepo.AddExport("/export", metadata.ExportOptions{
 		ReadOnly: false,
 		Async:    true,
 	}, rootAttr); err != nil {
@@ -168,7 +168,7 @@ func main() {
 	}
 	logger.Info("Export added: /export")
 
-	repo.AddExport("/nolocalhost", metadata.ExportOptions{
+	metadataRepo.AddExport("/nolocalhost", metadata.ExportOptions{
 		ReadOnly:           false,
 		AllowedClients:     []string{"192.168.1.0/24"},
 		DeniedClients:      []string{"192.168.1.50", "::1"},
@@ -179,17 +179,17 @@ func main() {
 	logger.Info("Export added: /nolocalhost")
 
 	// Get root handle
-	rootHandle, err := repo.GetRootHandle("/export")
+	rootHandle, err := metadataRepo.GetRootHandle("/export")
 	if err != nil {
 		log.Fatalf("Failed to get root handle: %v", err)
 	}
 
 	// Create initial file structure
-	if err := createInitialStructure(repo, contentRepo, rootHandle); err != nil {
+	if err := createInitialStructure(metadataRepo, contentRepo, rootHandle); err != nil {
 		log.Fatalf("Failed to create initial structure: %v", err)
 	}
 
-	srv := nfsServer.New(*port, repo, contentRepo)
+	srv := nfsServer.New(*port, metadataRepo, contentRepo)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
