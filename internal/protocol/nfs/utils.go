@@ -209,7 +209,8 @@ func decodeSetAttrs(reader io.Reader) (*SetAttrs, error) {
 	if err := binary.Read(reader, binary.BigEndian, &setAtime); err != nil {
 		return nil, fmt.Errorf("read set_atime: %w", err)
 	}
-	if setAtime == 1 { // SET_TO_CLIENT_TIME
+	switch setAtime {
+	case 1: // SET_TO_CLIENT_TIME
 		attr.SetAtime = true
 		var seconds, nseconds uint32
 		if err := binary.Read(reader, binary.BigEndian, &seconds); err != nil {
@@ -219,7 +220,7 @@ func decodeSetAttrs(reader io.Reader) (*SetAttrs, error) {
 			return nil, fmt.Errorf("read atime nseconds: %w", err)
 		}
 		attr.Atime = timeValToTime(seconds, nseconds)
-	} else if setAtime == 2 { // SET_TO_SERVER_TIME
+	case 2: // SET_TO_SERVER_TIME
 		attr.SetAtime = true
 		attr.Atime = getCurrentTime()
 	}
@@ -229,7 +230,8 @@ func decodeSetAttrs(reader io.Reader) (*SetAttrs, error) {
 	if err := binary.Read(reader, binary.BigEndian, &setMtime); err != nil {
 		return nil, fmt.Errorf("read set_mtime: %w", err)
 	}
-	if setMtime == 1 { // SET_TO_CLIENT_TIME
+	switch setMtime {
+	case 1: // SET_TO_CLIENT_TIME
 		attr.SetMtime = true
 		var seconds, nseconds uint32
 		if err := binary.Read(reader, binary.BigEndian, &seconds); err != nil {
@@ -239,7 +241,7 @@ func decodeSetAttrs(reader io.Reader) (*SetAttrs, error) {
 			return nil, fmt.Errorf("read mtime nseconds: %w", err)
 		}
 		attr.Mtime = timeValToTime(seconds, nseconds)
-	} else if setMtime == 2 { // SET_TO_SERVER_TIME
+	case 2: // SET_TO_SERVER_TIME
 		attr.SetMtime = true
 		attr.Mtime = getCurrentTime()
 	}
@@ -278,7 +280,7 @@ func encodeOptionalOpaque(buf *bytes.Buffer, data []byte) error {
 
 	// Padding
 	padding := (4 - (length % 4)) % 4
-	for i := uint32(0); i < padding; i++ {
+	for range padding {
 		if err := buf.WriteByte(0); err != nil {
 			return fmt.Errorf("write padding: %w", err)
 		}

@@ -383,7 +383,7 @@ func (resp *FsInfoResponse) Encode() ([]byte, error) {
 	// Using a slice of structs for cleaner error handling and maintainability
 	fields := []struct {
 		name  string
-		value interface{}
+		value any
 	}{
 		{"rtmax", resp.Rtmax},
 		{"rtpref", resp.Rtpref},
