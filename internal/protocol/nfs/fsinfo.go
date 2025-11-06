@@ -109,10 +109,6 @@ type FsInfoContext struct {
 	// ClientAddr is the network address of the client making the request.
 	// Format: "IP:port" (e.g., "192.168.1.100:1234")
 	ClientAddr string
-
-	// AuthFlavor is the authentication method used by the client.
-	// 0 = AUTH_NULL, 1 = AUTH_UNIX, etc.
-	AuthFlavor uint32
 }
 
 // FsInfo handles the FSINFO procedure, which returns static information about
