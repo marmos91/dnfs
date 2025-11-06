@@ -402,7 +402,7 @@ func (resp *CreateResponse) Encode() ([]byte, error) {
 
 		// Add padding
 		padding := (4 - (handleLen % 4)) % 4
-		for i := uint32(0); i < padding; i++ {
+		for range padding {
 			buf.WriteByte(0)
 		}
 	} else {

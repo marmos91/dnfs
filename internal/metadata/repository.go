@@ -71,4 +71,9 @@ type Repository interface {
 	// This is used by the FSINFO NFS procedure to inform clients about
 	// server limits and preferences (max transfer sizes, properties, etc.)
 	GetFSInfo(handle FileHandle) (*FSInfo, error)
+
+	// GetFSStats returns the dynamic filesystem statistics
+	// This is used by the FSSTAT NFS procedure to inform clients about
+	// current filesystem capacity, usage, and available space/inodes
+	GetFSStats(handle FileHandle) (*FSStat, error)
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"net"
+	"slices"
 	"sync"
 	"time"
 
@@ -109,13 +110,7 @@ func (r *MemoryRepository) CheckExportAccess(exportPath string, clientAddr strin
 
 	// Check if auth flavor is allowed
 	if len(opts.AllowedAuthFlavors) > 0 {
-		allowed := false
-		for _, flavor := range opts.AllowedAuthFlavors {
-			if flavor == authFlavor {
-				allowed = true
-				break
-			}
-		}
+		allowed := slices.Contains(opts.AllowedAuthFlavors, authFlavor)
 		if !allowed {
 			return nil, &metadata.ExportError{
 				Code:    metadata.ExportErrAuthRequired,
@@ -593,4 +588,23 @@ func (r *MemoryRepository) CheckDumpAccess(clientAddr string) error {
 
 	// Access granted
 	return nil
+}
+
+// GetFSStats returns the dynamic filesystem statistics
+func (r *MemoryRepository) GetFSStats(handle metadata.FileHandle) (*metadata.FSStat, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	// Return filesystem statistics
+	// These are reasonable defaults for a virtual/in-memory filesystem
+	// Real implementations should query actual backend storage
+	return &metadata.FSStat{
+		TotalBytes: 1024 * 1024 * 1024 * 1024, // 1TB
+		FreeBytes:  512 * 1024 * 1024 * 1024,  // 512GB
+		AvailBytes: 512 * 1024 * 1024 * 1024,  // 512GB (same as free for non-root)
+		TotalFiles: 1000000,                   // 1M inodes
+		FreeFiles:  900000,                    // 900K free inodes
+		AvailFiles: 900000,                    // 900K available (same as free for non-root)
+		Invarsec:   0,                         // Filesystem can change at any time
+	}, nil
 }

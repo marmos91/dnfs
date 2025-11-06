@@ -82,7 +82,7 @@ type NFSHandler interface {
 
 	// // FsStat returns dynamic information about a file system.
 	// // RFC 1813 Section 3.3.18
-	FsStat(repository metadata.Repository, req *nfs.FsStatRequest) (*nfs.FsStatResponse, error)
+	FsStat(repository metadata.Repository, req *nfs.FsStatRequest, ctx *nfs.FsStatContext) (*nfs.FsStatResponse, error)
 
 	// FsInfo returns static information about a file system.
 	// RFC 1813 Section 3.3.19

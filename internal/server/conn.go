@@ -350,11 +350,15 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 			},
 		)
 	case nfs.NFSProcFsStat:
+		ctx := &nfs.FsStatContext{
+			ClientAddr: c.conn.RemoteAddr().String(),
+			AuthFlavor: authFlavor,
+		}
 		return handleRequest(
 			data,
 			nfs.DecodeFsStatRequest,
 			func(req *nfs.FsStatRequest) (*nfs.FsStatResponse, error) {
-				return handler.FsStat(repo, req)
+				return handler.FsStat(repo, req, ctx)
 			},
 			nfs.NFS3ErrIO,
 			func(status uint32) *nfs.FsStatResponse {
