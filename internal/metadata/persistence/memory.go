@@ -528,12 +528,6 @@ func (r *MemoryRepository) GetFSInfo(handle metadata.FileHandle) (*metadata.FSIn
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	// Verify the handle exists
-	key := handleToKey(handle)
-	if _, exists := r.files[key]; !exists {
-		return nil, fmt.Errorf("file handle not found")
-	}
-
 	// Return filesystem information
 	// These are reasonable defaults that can be customized via ServerConfig in the future
 	return &metadata.FSInfo{
