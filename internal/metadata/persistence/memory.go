@@ -2,6 +2,7 @@ package persistence
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 	"maps"
 	"net"
@@ -1254,6 +1255,222 @@ func (r *MemoryRepository) CreateSpecialFile(
 	r.files[parentKey] = parentAttr
 
 	return fileHandle, nil
+}
+
+// ReadDir reads directory entries with pagination support.
+//
+// This implementation:
+//  1. Verifies the directory handle exists and is a directory
+//  2. Checks read/execute permission on the directory (if auth context provided)
+//  3. Builds "." entry (cookie 1)
+//  4. Builds ".." entry (cookie 2)
+//  5. Iterates through regular children (cookies 3+)
+//  6. Handles cookie-based pagination
+//  7. Respects count limits (approximate)
+//
+// Cookie semantics:
+//   - 0: Start of directory
+//   - 1: After "." entry
+//   - 2: After ".." entry
+//   - 3+: After regular entries (one cookie per entry)
+//
+// The count parameter is used as a hint to limit response size. The actual
+// number of entries returned may be more or less than would fit in count bytes.
+//
+// Parameters:
+//   - dirHandle: Directory to read
+//   - cookie: Starting position (0 = beginning)
+//   - count: Maximum response size in bytes (approximate)
+//   - ctx: Authentication context for access control
+//
+// Returns:
+//   - []DirEntry: List of entries starting from cookie
+//   - bool: EOF flag (true if all entries returned)
+//   - error: Access denied or I/O errors
+func (r *MemoryRepository) ReadDir(dirHandle metadata.FileHandle, cookie uint64, count uint32, ctx *metadata.AuthContext) ([]metadata.DirEntry, bool, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	// ========================================================================
+	// Step 1: Verify directory exists and is a directory
+	// ========================================================================
+
+	dirKey := handleToKey(dirHandle)
+	dirAttr, exists := r.files[dirKey]
+	if !exists {
+		return nil, false, &metadata.ExportError{
+			Code:    metadata.ExportErrNotFound,
+			Message: "directory not found",
+		}
+	}
+
+	// Verify it's actually a directory
+	if dirAttr.Type != metadata.FileTypeDirectory {
+		return nil, false, &metadata.ExportError{
+			Code:    metadata.ExportErrServerFault,
+			Message: "not a directory",
+		}
+	}
+
+	// ========================================================================
+	// Step 2: Check read/execute permission on directory (if auth provided)
+	// ========================================================================
+	// Execute (search) permission is required to read directory contents
+	// Read permission is required to list the directory
+
+	if ctx != nil && ctx.AuthFlavor != 0 && ctx.UID != nil {
+		uid := *ctx.UID
+		gid := *ctx.GID
+
+		var hasRead, hasExecute bool
+
+		// Owner permissions
+		if uid == dirAttr.UID {
+			hasRead = (dirAttr.Mode & 0400) != 0    // Owner read bit
+			hasExecute = (dirAttr.Mode & 0100) != 0 // Owner execute bit
+		} else if gid == dirAttr.GID || containsGID(ctx.GIDs, dirAttr.GID) {
+			// Group permissions
+			hasRead = (dirAttr.Mode & 0040) != 0    // Group read bit
+			hasExecute = (dirAttr.Mode & 0010) != 0 // Group execute bit
+		} else {
+			// Other permissions
+			hasRead = (dirAttr.Mode & 0004) != 0    // Other read bit
+			hasExecute = (dirAttr.Mode & 0001) != 0 // Other execute bit
+		}
+
+		// Need both read and execute to list directory
+		if !hasRead || !hasExecute {
+			return nil, false, &metadata.ExportError{
+				Code:    metadata.ExportErrAccessDenied,
+				Message: "read/execute permission denied on directory",
+			}
+		}
+	}
+
+	// ========================================================================
+	// Step 3: Build entries list with pagination
+	// ========================================================================
+
+	entries := make([]metadata.DirEntry, 0)
+	currentCookie := uint64(1)
+
+	// Extract directory file ID for "." entry
+	dirFileid := extractFileIDFromHandle(dirHandle)
+
+	// ========================================================================
+	// Add "." entry (cookie 1)
+	// ========================================================================
+
+	if cookie == 0 {
+		entries = append(entries, metadata.DirEntry{
+			Fileid: dirFileid,
+			Name:   ".",
+			Cookie: currentCookie,
+		})
+	}
+	currentCookie++
+
+	// ========================================================================
+	// Add ".." entry (cookie 2)
+	// ========================================================================
+
+	if cookie <= 1 {
+		// Get parent file ID
+		parentFileid := dirFileid // Default to self if no parent
+		if parentHandle, err := r.GetParent(dirHandle); err == nil {
+			parentFileid = extractFileIDFromHandle(parentHandle)
+		}
+
+		entries = append(entries, metadata.DirEntry{
+			Fileid: parentFileid,
+			Name:   "..",
+			Cookie: currentCookie,
+		})
+	}
+	currentCookie++
+
+	// ========================================================================
+	// Add regular entries (cookies 3+)
+	// ========================================================================
+
+	// Get all children
+	children := r.children[dirKey]
+	if children != nil {
+		// We need a stable ordering for pagination to work correctly
+		// Sort names alphabetically for consistent iteration
+		names := make([]string, 0, len(children))
+		for name := range children {
+			names = append(names, name)
+		}
+
+		// Sort for stable ordering
+		sortStrings(names)
+
+		// Iterate through children, skipping entries before cookie
+		for _, name := range names {
+			handle := children[name]
+
+			// Skip entries before the requested cookie
+			if currentCookie <= cookie {
+				currentCookie++
+				continue
+			}
+
+			// Extract file ID from handle
+			fileid := extractFileIDFromHandle(handle)
+
+			entries = append(entries, metadata.DirEntry{
+				Fileid: fileid,
+				Name:   name,
+				Cookie: currentCookie,
+			})
+
+			currentCookie++
+
+			// Check if we've exceeded the count limit
+			// Estimate: ~32 bytes per entry on average (overhead + name)
+			estimatedSize := len(entries) * 32
+			for _, e := range entries {
+				estimatedSize += len(e.Name)
+			}
+
+			if uint32(estimatedSize) >= count {
+				// We've reached the count limit, but we haven't seen all entries
+				return entries, false, nil
+			}
+		}
+	}
+
+	// ========================================================================
+	// Step 4: Return results with EOF flag
+	// ========================================================================
+
+	// We've returned all entries
+	return entries, true, nil
+}
+
+// extractFileIDFromHandle extracts a file ID from a handle.
+// Uses the first 8 bytes as the file ID.
+func extractFileIDFromHandle(handle metadata.FileHandle) uint64 {
+	if len(handle) < 8 {
+		return 0
+	}
+	return binary.BigEndian.Uint64(handle[:8])
+}
+
+// sortStrings performs an in-place sort of a string slice.
+// This provides stable ordering for directory entries.
+func sortStrings(slice []string) {
+	// Simple insertion sort - good enough for most directories
+	for i := 1; i < len(slice); i++ {
+		key := slice[i]
+		j := i - 1
+		for j >= 0 && slice[j] > key {
+			slice[j+1] = slice[j]
+			j--
+		}
+		slice[j+1] = key
+	}
 }
 
 // Helper function to check if a GID is in a list

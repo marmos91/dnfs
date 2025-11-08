@@ -74,7 +74,7 @@ type NFSHandler interface {
 
 	// ReadDir reads entries from a directory.
 	// RFC 1813 Section 3.3.16
-	ReadDir(repository metadata.Repository, req *nfs.ReadDirRequest) (*nfs.ReadDirResponse, error)
+	ReadDir(repository metadata.Repository, req *nfs.ReadDirRequest, ctx *nfs.ReadDirContext) (*nfs.ReadDirResponse, error)
 
 	// ReadDirPlus reads entries from a directory with their attributes.
 	// RFC 1813 Section 3.3.17
