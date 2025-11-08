@@ -435,3 +435,71 @@ func encodeFileAttr(buf *bytes.Buffer, attr *FileAttr) error {
 	}
 	return nil
 }
+
+// ============================================================================
+// Attribute Conversion Helpers
+// ============================================================================
+
+// convertSetAttrsToMetadata converts SetAttrs to metadata.FileAttr format
+// for the repository, applying authentication context defaults.
+//
+// This helper prepares the attributes structure that the repository expects,
+// ensuring all required fields are populated with sensible defaults.
+//
+// Parameters:
+//   - fileType: The type of file being created (Directory, Regular, Char, Block, etc.)
+//   - setAttrs: Client-requested attributes (may be partial)
+//   - authCtx: Authentication context for default ownership
+//
+// Returns:
+//   - *metadata.FileAttr: Partial attributes for repository (type, mode, uid, gid)
+//     The repository will complete the attributes with timestamps and other fields.
+func convertSetAttrsToMetadata(fileType metadata.FileType, setAttrs *SetAttrs, authCtx *metadata.AuthContext) *metadata.FileAttr {
+	attr := &metadata.FileAttr{
+		Type: fileType,
+	}
+
+	// Apply mode (with sensible defaults based on file type)
+	if setAttrs.SetMode {
+		attr.Mode = setAttrs.Mode
+	} else {
+		// Set default mode based on file type
+		switch fileType {
+		case metadata.FileTypeDirectory:
+			attr.Mode = 0755 // Default: rwxr-xr-x
+		case metadata.FileTypeRegular:
+			attr.Mode = 0644 // Default: rw-r--r--
+		case metadata.FileTypeChar, metadata.FileTypeBlock:
+			attr.Mode = 0644 // Default: rw-r--r--
+		case metadata.FileTypeSocket, metadata.FileTypeFifo:
+			attr.Mode = 0644 // Default: rw-r--r--
+		case metadata.FileTypeSymlink:
+			attr.Mode = 0777 // Default: rwxrwxrwx (symlinks typically have 777)
+		default:
+			attr.Mode = 0644 // Safe default
+		}
+	}
+
+	// Apply UID (default: authenticated user or 0)
+	if setAttrs.SetUID {
+		attr.UID = setAttrs.UID
+	} else if authCtx.UID != nil {
+		attr.UID = *authCtx.UID
+	} else {
+		attr.UID = 0 // Default: root
+	}
+
+	// Apply GID (default: authenticated group or 0)
+	if setAttrs.SetGID {
+		attr.GID = setAttrs.GID
+	} else if authCtx.GID != nil {
+		attr.GID = *authCtx.GID
+	} else {
+		attr.GID = 0 // Default: root
+	}
+
+	// Note: Size, timestamps, and ContentID are set by the repository
+	// based on implementation requirements
+
+	return attr
+}

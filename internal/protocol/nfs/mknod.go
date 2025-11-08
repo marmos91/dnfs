@@ -388,7 +388,7 @@ func (h *DefaultNFSHandler) Mknod(
 	}
 
 	// Convert SetAttrs to metadata format for repository
-	fileAttr := convertSetAttrsToMetadata(&req.Attr, authCtx)
+	fileAttr := convertSetAttrsToMetadata(nfsTypeToMetadataType(req.Type), &req.Attr, authCtx)
 	fileAttr.Type = nfsTypeToMetadataType(req.Type)
 
 	// Create the special file
@@ -530,7 +530,7 @@ func validateMknodRequest(req *MknodRequest) *mknodValidationError {
 	}
 
 	// Check for null bytes (string terminator, invalid in filenames)
-	if bytes.ContainsAny([]byte(req.Name), "\x00") {
+	if bytes.Contains([]byte(req.Name), []byte{0}) {
 		return &mknodValidationError{
 			message:   "special file name contains null byte",
 			nfsStatus: NFS3ErrInval,
@@ -538,7 +538,7 @@ func validateMknodRequest(req *MknodRequest) *mknodValidationError {
 	}
 
 	// Check for path separators (prevents directory traversal attacks)
-	if bytes.ContainsAny([]byte(req.Name), "/") {
+	if bytes.Contains([]byte(req.Name), []byte{'/'}) {
 		return &mknodValidationError{
 			message:   "special file name contains path separator",
 			nfsStatus: NFS3ErrInval,
