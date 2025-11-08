@@ -619,7 +619,7 @@ func (r *MemoryRepository) GetFSStats(handle metadata.FileHandle) (*metadata.FSS
 //  4. Otherwise, check other permission bits
 //
 // Returns a bitmap of granted permissions (subset of requested).
-func (r *MemoryRepository) CheckAccess(handle FileHandle, requested uint32, ctx *AccessCheckContext) (uint32, error) {
+func (r *MemoryRepository) CheckAccess(handle metadata.FileHandle, requested uint32, ctx *metadata.AccessCheckContext) (uint32, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -640,7 +640,7 @@ func (r *MemoryRepository) CheckAccess(handle FileHandle, requested uint32, ctx 
 				granted |= 0x0001
 			}
 		}
-		if attr.Type == FileTypeDirectory && attr.Mode&0001 != 0 { // Other execute (search)
+		if attr.Type == metadata.FileTypeDirectory && attr.Mode&0001 != 0 { // Other execute (search)
 			if requested&0x0002 != 0 { // AccessLookup
 				granted |= 0x0002
 			}
@@ -673,7 +673,7 @@ func (r *MemoryRepository) CheckAccess(handle FileHandle, requested uint32, ctx 
 	hasExecute := (permBits & 0x1) != 0
 
 	// For directories
-	if attr.Type == FileTypeDirectory {
+	if attr.Type == metadata.FileTypeDirectory {
 		if hasRead && (requested&0x0001 != 0) { // AccessRead
 			granted |= 0x0001 // Can list directory
 		}
@@ -725,10 +725,5 @@ func (r *MemoryRepository) CheckAccess(handle FileHandle, requested uint32, ctx 
 
 // Helper function to check if a GID is in a list
 func containsGID(gids []uint32, target uint32) bool {
-	for _, gid := range gids {
-		if gid == target {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(gids, target)
 }

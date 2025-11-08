@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"net"
 
 	"github.com/marmos91/dittofs/internal/logger"
 	"github.com/marmos91/dittofs/internal/metadata"
@@ -305,7 +304,7 @@ func (e *accessValidationError) Error() string {
 //   - *accessValidationError with NFS status if invalid
 func validateAccessRequest(req *AccessRequest) *accessValidationError {
 	// Validate file handle
-	if req.Handle == nil || len(req.Handle) == 0 {
+	if len(req.Handle) == 0 {
 		return &accessValidationError{
 			message:   "file handle is empty",
 			nfsStatus: NFS3ErrBadHandle,
@@ -410,7 +409,7 @@ func DecodeAccessRequest(data []byte) (*AccessRequest, error) {
 
 	// Skip padding to 4-byte boundary
 	padding := (4 - (handleLen % 4)) % 4
-	for i := uint32(0); i < padding; i++ {
+	for i := range padding {
 		if _, err := reader.ReadByte(); err != nil {
 			return nil, fmt.Errorf("failed to read padding byte %d: %w", i, err)
 		}

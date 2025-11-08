@@ -62,11 +62,16 @@ type AuthContext struct {
 	ClientAddr string
 }
 
-// Common error types for export operations
+// ExportError represents an error that occurred during export operations
 type ExportError struct {
 	Code    ExportErrorCode
 	Message string
 	Export  string
+}
+
+// Error implements the error interface for ExportError
+func (e *ExportError) Error() string {
+	return e.Message
 }
 
 type ExportErrorCode int
