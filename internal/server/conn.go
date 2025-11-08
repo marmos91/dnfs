@@ -500,11 +500,16 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 		)
 
 	case nfs.NFSProcPathConf:
+		pathConfCtx := &nfs.PathConfContext{
+			ClientAddr: c.conn.RemoteAddr().String(),
+			AuthFlavor: authFlavor,
+		}
+
 		return handleRequest(
 			data,
 			nfs.DecodePathConfRequest,
 			func(req *nfs.PathConfRequest) (*nfs.PathConfResponse, error) {
-				return handler.PathConf(repo, req)
+				return handler.PathConf(repo, req, pathConfCtx)
 			},
 			nfs.NFS3ErrIO,
 			func(status uint32) *nfs.PathConfResponse {
