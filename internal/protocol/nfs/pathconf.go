@@ -257,8 +257,9 @@ func (h *DefaultNFSHandler) PathConf(repository metadata.Repository, req *PathCo
 	// Convert metadata attributes to NFS wire format
 	nfsAttr := MetadataToNFSAttr(attr, fileid)
 
-	logger.Info("PATHCONF successful: client=%s linkmax=%d namemax=%d no_trunc=%v chown_restricted=%v case_insensitive=%v case_preserving=%v",
-		ctx.ClientAddr, pathConf.Linkmax, pathConf.NameMax, pathConf.NoTrunc,
+	logger.Info("PATHCONF successful: client=%s handle=%x", ctx.ClientAddr, req.Handle)
+	logger.Debug("PATHCONF properties: linkmax=%d namemax=%d no_trunc=%v chown_restricted=%v case_insensitive=%v case_preserving=%v",
+		pathConf.Linkmax, pathConf.NameMax, pathConf.NoTrunc,
 		pathConf.ChownRestricted, pathConf.CaseInsensitive, pathConf.CasePreserving)
 
 	// ========================================================================
