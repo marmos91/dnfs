@@ -14,7 +14,7 @@ type NFSHandler interface {
 
 	// GetAttr returns the attributes for a file system object.
 	// RFC 1813 Section 3.3.1
-	GetAttr(repository metadata.Repository, req *nfs.GetAttrRequest) (*nfs.GetAttrResponse, error)
+	GetAttr(repository metadata.Repository, req *nfs.GetAttrRequest, ctx *nfs.GetAttrContext) (*nfs.GetAttrResponse, error)
 
 	// SetAttr sets the attributes for a file system object.
 	// RFC 1813 Section 3.3.2

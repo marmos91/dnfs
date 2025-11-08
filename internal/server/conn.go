@@ -128,11 +128,10 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 	contentRepo := c.server.content
 	handler := c.server.nfsHandler
 
-	// Note: NFS procedures also receive auth info through the RPC call
-	// We may want to pass this context to NFS handlers for permission checks
-	// For now, we'll extract it but not use it in most operations
+	// Extract auth flavor for all procedures
 	authFlavor := call.GetAuthFlavor()
 
+	// Log Unix auth details if present
 	if authFlavor == rpc.AuthUnix {
 		authBody := call.GetAuthBody()
 		if len(authBody) > 0 {
@@ -146,11 +145,15 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 	case nfs.NFSProcNull:
 		return handler.Null(repo)
 	case nfs.NFSProcGetAttr:
+		getAttrCtx := &nfs.GetAttrContext{
+			ClientAddr: c.conn.RemoteAddr().String(),
+			AuthFlavor: authFlavor,
+		}
 		return handleRequest(
 			data,
 			nfs.DecodeGetAttrRequest,
 			func(req *nfs.GetAttrRequest) (*nfs.GetAttrResponse, error) {
-				return handler.GetAttr(repo, req)
+				return handler.GetAttr(repo, req, getAttrCtx)
 			},
 			nfs.NFS3ErrAcces,
 			func(status uint32) *nfs.GetAttrResponse {
@@ -182,7 +185,6 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 			},
 		)
 	case nfs.NFSProcAccess:
-		authFlavor := call.GetAuthFlavor()
 		var uid, gid *uint32
 		var gids []uint32
 
@@ -255,9 +257,6 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 		)
 	case nfs.NFSProcCreate:
 		// Extract authentication from RPC call
-		authFlavor := call.GetAuthFlavor()
-
-		// Parse Unix credentials if present
 		var uid, gid *uint32
 		if authFlavor == rpc.AuthUnix {
 			authBody := call.GetAuthBody()

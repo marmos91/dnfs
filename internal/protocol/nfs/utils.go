@@ -383,3 +383,55 @@ func timeToTimeVal(t time.Time) TimeVal {
 		Nseconds: uint32(t.Nanosecond()),
 	}
 }
+
+func encodeFileAttr(buf *bytes.Buffer, attr *FileAttr) error {
+	if err := binary.Write(buf, binary.BigEndian, attr.Type); err != nil {
+		return err
+	}
+	if err := binary.Write(buf, binary.BigEndian, attr.Mode); err != nil {
+		return err
+	}
+	if err := binary.Write(buf, binary.BigEndian, attr.Nlink); err != nil {
+		return err
+	}
+	if err := binary.Write(buf, binary.BigEndian, attr.UID); err != nil {
+		return err
+	}
+	if err := binary.Write(buf, binary.BigEndian, attr.GID); err != nil {
+		return err
+	}
+	if err := binary.Write(buf, binary.BigEndian, attr.Size); err != nil {
+		return err
+	}
+	if err := binary.Write(buf, binary.BigEndian, attr.Used); err != nil {
+		return err
+	}
+	if err := binary.Write(buf, binary.BigEndian, attr.Rdev); err != nil {
+		return err
+	}
+	if err := binary.Write(buf, binary.BigEndian, attr.Fsid); err != nil {
+		return err
+	}
+	if err := binary.Write(buf, binary.BigEndian, attr.Fileid); err != nil {
+		return err
+	}
+	if err := binary.Write(buf, binary.BigEndian, attr.Atime.Seconds); err != nil {
+		return err
+	}
+	if err := binary.Write(buf, binary.BigEndian, attr.Atime.Nseconds); err != nil {
+		return err
+	}
+	if err := binary.Write(buf, binary.BigEndian, attr.Mtime.Seconds); err != nil {
+		return err
+	}
+	if err := binary.Write(buf, binary.BigEndian, attr.Mtime.Nseconds); err != nil {
+		return err
+	}
+	if err := binary.Write(buf, binary.BigEndian, attr.Ctime.Seconds); err != nil {
+		return err
+	}
+	if err := binary.Write(buf, binary.BigEndian, attr.Ctime.Nseconds); err != nil {
+		return err
+	}
+	return nil
+}

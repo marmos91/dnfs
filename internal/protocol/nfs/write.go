@@ -141,7 +141,7 @@ func DecodeWriteRequest(data []byte) (*WriteRequest, error) {
 
 	// Skip padding
 	padding := (4 - (handleLen % 4)) % 4
-	for i := uint32(0); i < padding; i++ {
+	for range padding {
 		reader.ReadByte()
 	}
 
