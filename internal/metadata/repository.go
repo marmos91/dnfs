@@ -149,4 +149,9 @@ type Repository interface {
 	//   - Check that the caller has write permission on the parent directory
 	//   - Ensure the directory has proper default attributes if not specified
 	CreateDirectory(parentHandle FileHandle, name string, attr *FileAttr, ctx *AuthContext) (FileHandle, error)
+
+	// GetPathConf returns POSIX-compatible filesystem information.
+	// This is used by the PATHCONF NFS procedure to inform clients about
+	// filesystem properties and limitations (filename lengths, link limits, etc.)
+	GetPathConf(handle FileHandle) (*PathConf, error)
 }

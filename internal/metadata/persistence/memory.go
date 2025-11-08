@@ -1036,6 +1036,29 @@ func (r *MemoryRepository) CheckAccess(handle metadata.FileHandle, requested uin
 	return granted, nil
 }
 
+// GetPathConf returns POSIX-compatible filesystem information and properties.
+func (r *MemoryRepository) GetPathConf(handle metadata.FileHandle) (*metadata.PathConf, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	// Verify handle exists
+	key := handleToKey(handle)
+	if _, exists := r.files[key]; !exists {
+		return nil, fmt.Errorf("file not found")
+	}
+
+	// Return filesystem PATHCONF properties
+	// These are reasonable defaults that match POSIX-compliant filesystems
+	return &metadata.PathConf{
+		Linkmax:         32767, // Max hard links (typical for ext4)
+		NameMax:         255,   // Max filename length in bytes
+		NoTrunc:         true,  // Reject names that are too long
+		ChownRestricted: true,  // Only root can chown (POSIX standard)
+		CaseInsensitive: false, // Case-sensitive filenames (Unix standard)
+		CasePreserving:  true,  // Preserve filename case
+	}, nil
+}
+
 // Helper function to check if a GID is in a list
 func containsGID(gids []uint32, target uint32) bool {
 	return slices.Contains(gids, target)

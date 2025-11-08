@@ -90,7 +90,7 @@ type NFSHandler interface {
 
 	// PathConf returns POSIX information about a file system object.
 	// RFC 1813 Section 3.3.20
-	PathConf(repository metadata.Repository, req *nfs.PathConfRequest) (*nfs.PathConfResponse, error)
+	PathConf(repository metadata.Repository, req *nfs.PathConfRequest, ctx *nfs.PathConfContext) (*nfs.PathConfResponse, error)
 
 	// Commit commits cached data on the server to stable storage.
 	// RFC 1813 Section 3.3.21

@@ -43,3 +43,36 @@ type FSInfo struct {
 	// Indicates supported features (hard links, symlinks, etc.)
 	Properties uint32
 }
+
+// PathConf contains POSIX-compatible filesystem information.
+// This structure is returned by the repository to inform NFS clients
+// about filesystem properties and limitations that may vary per file or filesystem.
+type PathConf struct {
+	// Linkmax is the maximum number of hard links to a file.
+	// Typical values: 32767 (ext4), 65000 (XFS), or higher.
+	Linkmax uint32
+
+	// NameMax is the maximum filename component length in bytes.
+	// Typical value: 255 bytes for most modern filesystems.
+	NameMax uint32
+
+	// NoTrunc indicates if the server rejects names longer than NameMax.
+	//   - true: Server returns error for long names (recommended)
+	//   - false: Server silently truncates long names
+	NoTrunc bool
+
+	// ChownRestricted indicates if chown is restricted to superuser.
+	//   - true: Only root can change file ownership (POSIX standard)
+	//   - false: File owner can give away ownership
+	ChownRestricted bool
+
+	// CaseInsensitive indicates if filename comparisons are case-insensitive.
+	//   - true: "File.txt" and "file.txt" are the same (Windows-style)
+	//   - false: Filenames are case-sensitive (Unix/Linux standard)
+	CaseInsensitive bool
+
+	// CasePreserving indicates if the filesystem preserves filename case.
+	//   - true: Filenames maintain their original case
+	//   - false: Case information may be lost
+	CasePreserving bool
+}
