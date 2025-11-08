@@ -172,11 +172,11 @@ type ReadDirContext struct {
 //
 // **Cookie Verifier:**
 //
-// The cookie verifier helps detect directory modifications:
-//   - Server generates a verifier for the directory state
-//   - Client passes verifier back in subsequent calls
-//   - If directory changes, server may return NFS3ErrBadCookie
-//   - Clients must restart enumeration from cookie=0
+// NOTE: The NFS protocol supports cookie verifiers to help detect directory modifications.
+// In this implementation, cookie verification is NOT supported: the server always returns
+// a cookie verifier value of 0 and does not check for directory changes between calls.
+// If directory modification detection is required, this must be implemented in future versions.
+// Clients should not rely on cookie verification in this implementation.
 //
 // **Authentication:**
 //
