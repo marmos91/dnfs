@@ -1,5 +1,17 @@
 package metadata
 
+// DirEntry represents a directory entry returned by ReadDir.
+type DirEntry struct {
+	// Fileid is the unique file identifier
+	Fileid uint64
+
+	// Name is the filename
+	Name string
+
+	// Cookie is an opaque value for pagination
+	Cookie uint64
+}
+
 // Interface for NFS metadata persistence
 type Repository interface {
 	// Export operations
@@ -192,4 +204,25 @@ type Repository interface {
 	//   - Store device numbers appropriately (implementation-specific)
 	//   - Ensure the special file has proper default attributes if not specified
 	CreateSpecialFile(parentHandle FileHandle, name string, attr *FileAttr, majorDevice uint32, minorDevice uint32, ctx *AuthContext) (FileHandle, error)
+
+	// ReadDir reads directory entries with pagination support.
+	//
+	// This method handles:
+	//  - Checking read/execute permission on the directory
+	//  - Building "." and ".." entries
+	//  - Iterating through regular entries
+	//  - Cookie-based pagination
+	//  - Respecting count limits
+	//
+	// Parameters:
+	//   - dirHandle: Directory to read
+	//   - cookie: Starting position (0 = beginning)
+	//   - count: Maximum response size in bytes (hint)
+	//   - ctx: Authentication context for access control
+	//
+	// Returns:
+	//   - []DirEntry: List of entries starting from cookie
+	//   - bool: EOF flag (true if all entries returned)
+	//   - error: Access denied or I/O errors
+	ReadDir(dirHandle FileHandle, cookie uint64, count uint32, ctx *AuthContext) ([]DirEntry, bool, error)
 }

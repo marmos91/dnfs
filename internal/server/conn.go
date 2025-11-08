@@ -470,11 +470,16 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 			},
 		)
 	case nfs.NFSProcReadDir:
+		readDirCtx := &nfs.ReadDirContext{
+			ClientAddr: c.conn.RemoteAddr().String(),
+			AuthFlavor: authFlavor,
+		}
+
 		return handleRequest(
 			data,
 			nfs.DecodeReadDirRequest,
 			func(req *nfs.ReadDirRequest) (*nfs.ReadDirResponse, error) {
-				return handler.ReadDir(repo, req)
+				return handler.ReadDir(repo, req, readDirCtx)
 			},
 			nfs.NFS3ErrAcces,
 			func(status uint32) *nfs.ReadDirResponse {
