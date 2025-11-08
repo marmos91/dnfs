@@ -350,7 +350,7 @@ func (h *DefaultNFSHandler) Mkdir(
 	}
 
 	// Convert SetAttrs to metadata format for repository
-	dirAttr := convertSetAttrsToMetadata(&req.Attr, authCtx)
+	dirAttr := convertSetAttrsToMetadata(metadata.FileTypeDirectory, &req.Attr, authCtx)
 
 	newHandle, err := repository.CreateDirectory(parentHandle, req.Name, dirAttr, authCtx)
 	if err != nil {
@@ -508,59 +508,6 @@ func validateMkdirRequest(req *MkdirRequest) *mkdirValidationError {
 	}
 
 	return nil
-}
-
-// ============================================================================
-// Helper Functions
-// ============================================================================
-
-// convertSetAttrsToMetadata converts SetAttrs to metadata.FileAttr format
-// for the repository, applying authentication context defaults.
-//
-// This helper prepares the attributes structure that the repository expects,
-// ensuring all required fields are populated with sensible defaults.
-//
-// Parameters:
-//   - setAttrs: Client-requested attributes (may be partial)
-//   - authCtx: Authentication context for default ownership
-//
-// Returns:
-//   - *metadata.FileAttr: Partial attributes for repository (type, mode, uid, gid)
-//     The repository will complete the attributes with timestamps and other fields.
-func convertSetAttrsToMetadata(setAttrs *SetAttrs, authCtx *metadata.AuthContext) *metadata.FileAttr {
-	attr := &metadata.FileAttr{
-		Type: metadata.FileTypeDirectory,
-	}
-
-	// Apply mode (default: 0755 if not specified)
-	if setAttrs.SetMode {
-		attr.Mode = setAttrs.Mode
-	} else {
-		attr.Mode = 0755 // Default: rwxr-xr-x
-	}
-
-	// Apply UID (default: authenticated user or 0)
-	if setAttrs.SetUID {
-		attr.UID = setAttrs.UID
-	} else if authCtx.UID != nil {
-		attr.UID = *authCtx.UID
-	} else {
-		attr.UID = 0 // Default: root
-	}
-
-	// Apply GID (default: authenticated group or 0)
-	if setAttrs.SetGID {
-		attr.GID = setAttrs.GID
-	} else if authCtx.GID != nil {
-		attr.GID = *authCtx.GID
-	} else {
-		attr.GID = 0 // Default: root
-	}
-
-	// Note: Size, timestamps, and ContentID are set by the repository
-	// based on implementation requirements
-
-	return attr
 }
 
 // ============================================================================
