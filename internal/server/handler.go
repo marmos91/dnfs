@@ -46,7 +46,7 @@ type NFSHandler interface {
 
 	// Mkdir creates a directory.
 	// RFC 1813 Section 3.3.9
-	Mkdir(repository metadata.Repository, req *nfs.MkdirRequest) (*nfs.MkdirResponse, error)
+	Mkdir(repository metadata.Repository, req *nfs.MkdirRequest, ctx *nfs.MkdirContext) (*nfs.MkdirResponse, error)
 
 	// Symlink creates a symbolic link.
 	// RFC 1813 Section 3.3.10

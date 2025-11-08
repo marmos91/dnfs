@@ -733,6 +733,155 @@ func (r *MemoryRepository) CreateLink(dirHandle metadata.FileHandle, name string
 	return nil
 }
 
+// CreateDirectory creates a new directory with the specified attributes.
+//
+// This implementation:
+//  1. Verifies the parent directory exists and is a directory
+//  2. Checks write access to the parent directory (if auth context provided)
+//  3. Verifies the name doesn't already exist
+//  4. Completes directory attributes with defaults (size, timestamps)
+//  5. Creates the directory metadata
+//  6. Links it to the parent directory
+//  7. Updates parent directory timestamps
+//
+// Parameters:
+//   - parentHandle: Handle of the parent directory
+//   - name: Name for the new directory
+//   - attr: Partial attributes (type, mode, uid, gid) from protocol layer
+//   - ctx: Authentication context for access control
+//
+// Returns:
+//   - FileHandle: Handle of the newly created directory
+//   - error: Returns error if access denied, name exists, or I/O error
+func (r *MemoryRepository) CreateDirectory(parentHandle metadata.FileHandle, name string, attr *metadata.FileAttr, ctx *metadata.AuthContext) (metadata.FileHandle, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// ========================================================================
+	// Step 1: Verify parent directory exists
+	// ========================================================================
+
+	parentKey := handleToKey(parentHandle)
+	parentAttr, exists := r.files[parentKey]
+	if !exists {
+		return nil, &metadata.ExportError{
+			Code:    metadata.ExportErrNotFound,
+			Message: "parent directory not found",
+		}
+	}
+
+	// Verify parent is a directory
+	if parentAttr.Type != metadata.FileTypeDirectory {
+		return nil, &metadata.ExportError{
+			Code:    metadata.ExportErrServerFault,
+			Message: "parent is not a directory",
+		}
+	}
+
+	// ========================================================================
+	// Step 2: Check write access to parent directory (if auth context provided)
+	// ========================================================================
+
+	if ctx != nil && ctx.AuthFlavor != 0 && ctx.UID != nil {
+		// Check if user has write permission on the parent directory
+		uid := *ctx.UID
+		gid := *ctx.GID
+
+		var hasWrite bool
+
+		// Owner permissions
+		if uid == parentAttr.UID {
+			hasWrite = (parentAttr.Mode & 0200) != 0 // Owner write bit
+		} else if gid == parentAttr.GID || containsGID(ctx.GIDs, parentAttr.GID) {
+			// Group permissions
+			hasWrite = (parentAttr.Mode & 0020) != 0 // Group write bit
+		} else {
+			// Other permissions
+			hasWrite = (parentAttr.Mode & 0002) != 0 // Other write bit
+		}
+
+		if !hasWrite {
+			return nil, &metadata.ExportError{
+				Code:    metadata.ExportErrAccessDenied,
+				Message: "write permission denied on parent directory",
+			}
+		}
+	}
+
+	// ========================================================================
+	// Step 3: Verify name doesn't already exist
+	// ========================================================================
+
+	if r.children[parentKey] == nil {
+		r.children[parentKey] = make(map[string]metadata.FileHandle)
+	}
+
+	if _, exists := r.children[parentKey][name]; exists {
+		return nil, &metadata.ExportError{
+			Code:    metadata.ExportErrServerFault,
+			Message: fmt.Sprintf("directory already exists: %s", name),
+		}
+	}
+
+	// ========================================================================
+	// Step 4: Complete directory attributes with defaults
+	// ========================================================================
+
+	now := time.Now()
+
+	// Start with the attributes provided by the protocol layer
+	completeAttr := &metadata.FileAttr{
+		Type: metadata.FileTypeDirectory, // Always directory
+		Mode: attr.Mode,                  // From protocol layer (or default 0755)
+		UID:  attr.UID,                   // From protocol layer (or authenticated user)
+		GID:  attr.GID,                   // From protocol layer (or authenticated group)
+
+		// Server-assigned attributes
+		Size:      4096, // Standard directory size
+		Atime:     now,
+		Mtime:     now,
+		Ctime:     now,
+		ContentID: "", // Directories don't have content blobs
+	}
+
+	// ========================================================================
+	// Step 5: Generate unique directory handle
+	// ========================================================================
+
+	dirHandle := r.generateFileHandle(name)
+
+	// ========================================================================
+	// Step 6: Create directory metadata
+	// ========================================================================
+
+	dirKey := handleToKey(dirHandle)
+	r.files[dirKey] = completeAttr
+
+	// Initialize empty children map for the new directory
+	r.children[dirKey] = make(map[string]metadata.FileHandle)
+
+	// ========================================================================
+	// Step 7: Link directory to parent
+	// ========================================================================
+
+	r.children[parentKey][name] = dirHandle
+
+	// Set parent relationship
+	r.parents[dirKey] = parentHandle
+
+	// ========================================================================
+	// Step 8: Update parent directory timestamps
+	// ========================================================================
+	// The parent directory's mtime and ctime should be updated when a child
+	// is added, as this modifies the directory's contents.
+
+	parentAttr.Mtime = now
+	parentAttr.Ctime = now
+	r.files[parentKey] = parentAttr
+
+	return dirHandle, nil
+}
+
 // CheckAccess performs Unix-style permission checking for file access.
 // This implements the access control logic for the ACCESS NFS procedure.
 //

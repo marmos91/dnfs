@@ -312,11 +312,35 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 			},
 		)
 	case nfs.NFSProcMkdir:
+		// Extract authentication from RPC call
+		var uid, gid *uint32
+		var gids []uint32
+
+		if authFlavor == rpc.AuthUnix {
+			authBody := call.GetAuthBody()
+			if len(authBody) > 0 {
+				if unixAuth, err := rpc.ParseUnixAuth(authBody); err == nil {
+					uid = &unixAuth.UID
+					gid = &unixAuth.GID
+					gids = unixAuth.GIDs
+				}
+			}
+		}
+
+		// Create context with client information and auth
+		mkdirContext := &nfs.MkdirContext{
+			ClientAddr: c.conn.RemoteAddr().String(),
+			AuthFlavor: authFlavor,
+			UID:        uid,
+			GID:        gid,
+			GIDs:       gids,
+		}
+
 		return handleRequest(
 			data,
 			nfs.DecodeMkdirRequest,
 			func(req *nfs.MkdirRequest) (*nfs.MkdirResponse, error) {
-				return handler.Mkdir(repo, req)
+				return handler.Mkdir(repo, req, mkdirContext)
 			},
 			nfs.NFS3ErrIO,
 			func(status uint32) *nfs.MkdirResponse {

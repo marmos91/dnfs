@@ -4,47 +4,48 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"strings"
-	"time"
 
 	"github.com/marmos91/dittofs/internal/logger"
 	"github.com/marmos91/dittofs/internal/metadata"
 )
 
 // ============================================================================
-// Request/Response Structures
+// Request and Response Structures
 // ============================================================================
 
 // MkdirRequest represents a MKDIR request from an NFS client.
 // The client provides the parent directory handle, the name for the new directory,
 // and optional attributes to set on the newly created directory.
 //
+// This structure is decoded from XDR-encoded data received over the network.
+//
 // RFC 1813 Section 3.3.9 specifies the MKDIR procedure as:
 //
 //	MKDIR3res NFSPROC3_MKDIR(MKDIR3args) = 9;
 //
-// The request includes:
-//   - Parent directory handle (where to create the new directory)
-//   - Directory name (must be valid and not already exist)
-//   - Attributes (mode, uid, gid - other attributes like size and times are ignored)
+// The MKDIR procedure creates a new subdirectory within an existing directory.
+// It is one of the fundamental operations for building directory hierarchies.
 type MkdirRequest struct {
 	// DirHandle is the file handle of the parent directory where the new directory
-	// will be created. This must be a valid directory handle.
+	// will be created. Must be a valid directory handle obtained from MOUNT or LOOKUP.
+	// Maximum length is 64 bytes per RFC 1813.
 	DirHandle []byte
 
-	// Name is the name of the directory to create.
+	// Name is the name of the directory to create within the parent directory.
 	// Must follow NFS naming conventions:
-	//   - Cannot be empty or "." or ".."
-	//   - Maximum length is typically 255 bytes
-	//   - Should not contain null bytes or path separators
+	//   - Cannot be empty, ".", or ".."
+	//   - Maximum length is 255 bytes per NFS specification
+	//   - Should not contain null bytes or path separators (/)
+	//   - Should not contain control characters
 	Name string
 
 	// Attr contains the attributes to set on the new directory.
-	// Only certain fields are relevant for MKDIR:
+	// Only certain fields are meaningful for MKDIR:
 	//   - Mode: Directory permissions (e.g., 0755)
 	//   - UID: Owner user ID
 	//   - GID: Owner group ID
 	// Other fields (size, times) are ignored and set by the server.
+	// If not specified, the server applies defaults (typically 0755, uid=0, gid=0).
 	Attr SetAttrs
 }
 
@@ -52,8 +53,10 @@ type MkdirRequest struct {
 // On success, it returns the new directory's file handle and attributes,
 // plus WCC (Weak Cache Consistency) data for the parent directory.
 //
+// The response is encoded in XDR format before being sent back to the client.
+//
 // The WCC data helps clients maintain cache coherency by providing
-// before-and-after attributes of the parent directory.
+// before-and-after snapshots of the parent directory.
 type MkdirResponse struct {
 	// Status indicates the result of the mkdir operation.
 	// Common values:
@@ -66,6 +69,7 @@ type MkdirResponse struct {
 	//   - NFS3ErrIO (5): I/O error
 	//   - NFS3ErrInval (22): Invalid argument (e.g., bad name)
 	//   - NFS3ErrNameTooLong (63): Directory name too long
+	//   - NFS3ErrBadHandle (10001): Invalid file handle
 	Status uint32
 
 	// Handle is the file handle of the newly created directory.
@@ -80,12 +84,43 @@ type MkdirResponse struct {
 
 	// WccBefore contains pre-operation attributes of the parent directory.
 	// Used for weak cache consistency to help clients detect if the parent
-	// directory changed during the operation.
+	// directory changed during the operation. May be nil.
 	WccBefore *WccAttr
 
 	// WccAfter contains post-operation attributes of the parent directory.
 	// Used for weak cache consistency to provide the updated parent state.
+	// May be nil on error, but should be present on success.
 	WccAfter *FileAttr
+}
+
+// MkdirContext contains the context information needed to process a MKDIR request.
+// This includes client identification and authentication details for access control
+// and auditing purposes.
+type MkdirContext struct {
+	// ClientAddr is the network address of the client making the request.
+	// Format: "IP:port" (e.g., "192.168.1.100:1234")
+	ClientAddr string
+
+	// AuthFlavor is the authentication method used by the client.
+	// Common values:
+	//   - 0: AUTH_NULL (no authentication)
+	//   - 1: AUTH_UNIX (Unix UID/GID authentication)
+	AuthFlavor uint32
+
+	// UID is the authenticated user ID (from AUTH_UNIX).
+	// Used for default directory ownership if not specified in Attr.
+	// Only valid when AuthFlavor == AUTH_UNIX.
+	UID *uint32
+
+	// GID is the authenticated group ID (from AUTH_UNIX).
+	// Used for default directory ownership if not specified in Attr.
+	// Only valid when AuthFlavor == AUTH_UNIX.
+	GID *uint32
+
+	// GIDs is a list of supplementary group IDs (from AUTH_UNIX).
+	// Used for access control checks by the repository.
+	// Only valid when AuthFlavor == AUTH_UNIX.
+	GIDs []uint32
 }
 
 // ============================================================================
@@ -94,40 +129,111 @@ type MkdirResponse struct {
 
 // Mkdir creates a new directory within a parent directory.
 //
-// The mkdir process follows these steps:
-//  1. Validate the parent directory handle exists and is a directory
-//  2. Validate the directory name (length, characters, not "." or "..")
-//  3. Check if a child with the same name already exists
-//  4. Construct directory attributes (mode, ownership, timestamps)
-//  5. Create the directory in the metadata repository
-//  6. Log the operation and return the new directory handle
+// This implements the NFS MKDIR procedure as defined in RFC 1813 Section 3.3.9.
 //
-// Security and validation:
-//   - Validates parent is a directory (not a file or symlink)
-//   - Prevents creating "." or ".." directories
-//   - Checks for duplicate names before creation
-//   - Enforces maximum name length (255 bytes)
-//   - Rejects names with invalid characters (null bytes, path separators)
-//   - Creates directories with safe default permissions (0755) if not specified
+// **Purpose:**
 //
-// Error handling:
-//   - Returns NFS3ErrNoEnt if parent directory doesn't exist
-//   - Returns NFS3ErrNotDir if parent handle is not a directory
-//   - Returns NFS3ErrExist if directory name already exists
-//   - Returns NFS3ErrInval for invalid directory names
-//   - Returns NFS3ErrNameTooLong for names exceeding 255 bytes
-//   - Returns NFS3ErrIO for repository/internal errors
+// MKDIR is used to create new subdirectories in the NFS filesystem. It's essential
+// for building directory hierarchies and organizing files. Common use cases include:
+//   - Creating project directories
+//   - Building nested folder structures
+//   - Setting up workspace directories with specific permissions
 //
-// Parameters:
+// **Process:**
+//
+//  1. Validate request parameters (handle format, name syntax)
+//  2. Extract client IP and authentication credentials from context
+//  3. Verify parent directory exists and is a directory (via repository)
+//  4. Capture pre-operation parent state (for WCC)
+//  5. Delegate directory creation to repository.CreateDirectory()
+//  6. Return new directory handle and attributes with WCC data
+//
+// **Design Principles:**
+//
+//   - Protocol layer handles only XDR encoding/decoding and validation
+//   - All business logic (creation, validation, access control) delegated to repository
+//   - File handle validation performed by repository.GetFile()
+//   - Comprehensive logging at INFO level for operations, DEBUG for details
+//
+// **Authentication:**
+//
+// The context contains authentication credentials from the RPC layer.
+// The protocol layer passes these to the repository, which can implement:
+//   - Write permission checking on the parent directory
+//   - Access control based on UID/GID
+//   - Default ownership assignment for new directories
+//   - Quota enforcement
+//
+// **Directory Attributes:**
+//
+// The client can specify:
+//   - Mode: Directory permissions (e.g., 0755 for rwxr-xr-x)
+//   - UID: Owner user ID
+//   - GID: Owner group ID
+//
+// The server sets:
+//   - Type: Always FileTypeDirectory
+//   - Size: Implementation-dependent (typically 4096 bytes)
+//   - Timestamps: Current time for atime, mtime, ctime
+//   - Nlink: Initially 2 (. and ..)
+//
+// **Naming Restrictions:**
+//
+// Per RFC 1813 and POSIX conventions, directory names:
+//   - Must not be empty
+//   - Must not be "." (current directory)
+//   - Must not be ".." (parent directory)
+//   - Must not exceed 255 bytes
+//   - Must not contain null bytes (string terminator)
+//   - Must not contain '/' (path separator)
+//   - Should not contain control characters (0x00-0x1F, 0x7F)
+//
+// **Error Handling:**
+//
+// Protocol-level errors return appropriate NFS status codes.
+// Repository errors are mapped to NFS status codes:
+//   - Parent not found → NFS3ErrNoEnt
+//   - Parent not directory → NFS3ErrNotDir
+//   - Name already exists → NFS3ErrExist
+//   - Invalid name → NFS3ErrInval
+//   - Name too long → NFS3ErrNameTooLong
+//   - Permission denied → NFS3ErrAcces
+//   - No space → NFS3ErrNoSpc
+//   - I/O error → NFS3ErrIO
+//
+// **Weak Cache Consistency (WCC):**
+//
+// WCC data helps NFS clients detect if the parent directory changed between
+// operations and maintain cache consistency. The server:
+//  1. Captures parent attributes before the operation (WccBefore)
+//  2. Performs the directory creation
+//  3. Captures parent attributes after the operation (WccAfter)
+//
+// Clients use this to:
+//   - Detect concurrent modifications to the parent directory
+//   - Update their cached parent directory attributes
+//   - Invalidate stale cached data
+//
+// **Security Considerations:**
+//
+//   - Handle validation prevents malformed requests
+//   - Repository enforces write permission on parent directory
+//   - Name validation prevents directory traversal attacks
+//   - Client context enables audit logging
+//   - Access control prevents unauthorized directory creation
+//
+// **Parameters:**
 //   - repository: The metadata repository for directory operations
 //   - req: The mkdir request containing parent handle, name, and attributes
+//   - ctx: Context with client address and authentication credentials
 //
-// Returns:
-//   - *MkdirResponse: Response with status, new directory handle (if successful)
+// **Returns:**
+//   - *MkdirResponse: Response with status, new directory handle (if successful),
+//     and WCC data for the parent directory
 //   - error: Returns error only for catastrophic internal failures; protocol-level
 //     errors are indicated via the response Status field
 //
-// RFC 1813 Section 3.3.9: MKDIR Procedure
+// **RFC 1813 Section 3.3.9: MKDIR Procedure**
 //
 // Example:
 //
@@ -137,33 +243,49 @@ type MkdirResponse struct {
 //	    Name:      "documents",
 //	    Attr:      SetAttrs{SetMode: true, Mode: 0755},
 //	}
-//	resp, err := handler.Mkdir(repository, req)
+//	ctx := &MkdirContext{
+//	    ClientAddr: "192.168.1.100:1234",
+//	    AuthFlavor: 1, // AUTH_UNIX
+//	    UID:        &uid,
+//	    GID:        &gid,
+//	}
+//	resp, err := handler.Mkdir(repository, req, ctx)
 //	if err != nil {
 //	    // Internal server error
 //	}
 //	if resp.Status == NFS3OK {
 //	    // Directory created successfully, use resp.Handle
 //	}
-func (h *DefaultNFSHandler) Mkdir(repository metadata.Repository, req *MkdirRequest) (*MkdirResponse, error) {
-	logger.Debug("MKDIR: name='%s' parent=%x mode=%o", req.Name, req.DirHandle, req.Attr.Mode)
+func (h *DefaultNFSHandler) Mkdir(
+	repository metadata.Repository,
+	req *MkdirRequest,
+	ctx *MkdirContext,
+) (*MkdirResponse, error) {
+	// Extract client IP for logging
+	clientIP := extractClientIP(ctx.ClientAddr)
+
+	logger.Info("MKDIR: name='%s' dir=%x mode=%o client=%s auth=%d",
+		req.Name, req.DirHandle, req.Attr.Mode, clientIP, ctx.AuthFlavor)
 
 	// ========================================================================
-	// Step 1: Validate directory name
+	// Step 1: Validate request parameters
 	// ========================================================================
 
-	if err := validateDirectoryName(req.Name); err != nil {
-		logger.Warn("MKDIR failed: invalid directory name '%s': %v", req.Name, err)
-		return &MkdirResponse{Status: err.(*directoryNameError).NFSStatus()}, nil
+	if err := validateMkdirRequest(req); err != nil {
+		logger.Warn("MKDIR validation failed: name='%s' client=%s error=%v",
+			req.Name, clientIP, err)
+		return &MkdirResponse{Status: err.nfsStatus}, nil
 	}
 
 	// ========================================================================
-	// Step 2: Validate parent directory
+	// Step 2: Verify parent directory exists and is valid
 	// ========================================================================
 
 	parentHandle := metadata.FileHandle(req.DirHandle)
 	parentAttr, err := repository.GetFile(parentHandle)
 	if err != nil {
-		logger.Warn("MKDIR failed: parent directory not found: handle=%x error=%v", req.DirHandle, err)
+		logger.Warn("MKDIR failed: parent not found: dir=%x client=%s error=%v",
+			req.DirHandle, clientIP, err)
 		return &MkdirResponse{Status: NFS3ErrNoEnt}, nil
 	}
 
@@ -172,26 +294,34 @@ func (h *DefaultNFSHandler) Mkdir(repository metadata.Repository, req *MkdirRequ
 
 	// Verify parent is actually a directory
 	if parentAttr.Type != metadata.FileTypeDirectory {
-		logger.Warn("MKDIR failed: parent handle is not a directory: handle=%x type=%d", req.DirHandle, parentAttr.Type)
+		logger.Warn("MKDIR failed: parent not a directory: dir=%x type=%d client=%s",
+			req.DirHandle, parentAttr.Type, clientIP)
+
+		// Get current parent state for WCC
+		dirID := extractFileID(parentHandle)
+		wccAfter := MetadataToNFSAttr(parentAttr, dirID)
+
 		return &MkdirResponse{
 			Status:    NFS3ErrNotDir,
 			WccBefore: wccBefore,
+			WccAfter:  wccAfter,
 		}, nil
 	}
 
 	// ========================================================================
-	// Step 3: Check for existing child with same name
+	// Step 3: Check if directory name already exists
 	// ========================================================================
 
 	_, err = repository.GetChild(parentHandle, req.Name)
 	if err == nil {
 		// Child exists
-		logger.Debug("MKDIR failed: directory '%s' already exists in parent %x", req.Name, req.DirHandle)
+		logger.Debug("MKDIR failed: directory '%s' already exists: dir=%x client=%s",
+			req.Name, req.DirHandle, clientIP)
 
 		// Get updated parent attributes for WCC data
 		parentAttr, _ = repository.GetFile(parentHandle)
-		fileid := extractFileID(parentHandle)
-		wccAfter := MetadataToNFSAttr(parentAttr, fileid)
+		dirID := extractFileID(parentHandle)
+		wccAfter := MetadataToNFSAttr(parentAttr, dirID)
 
 		return &MkdirResponse{
 			Status:    NFS3ErrExist,
@@ -201,50 +331,74 @@ func (h *DefaultNFSHandler) Mkdir(repository metadata.Repository, req *MkdirRequ
 	}
 
 	// ========================================================================
-	// Step 4: Construct directory attributes
+	// Step 4: Create directory via repository
 	// ========================================================================
+	// The repository is responsible for:
+	// - Building complete directory attributes with defaults
+	// - Checking write permission on parent directory
+	// - Creating the directory metadata
+	// - Linking it to the parent
+	// - Updating parent directory timestamps
 
-	dirAttr := buildDirectoryAttributes(&req.Attr)
+	// Build authentication context for repository
+	authCtx := &metadata.AuthContext{
+		AuthFlavor: ctx.AuthFlavor,
+		UID:        ctx.UID,
+		GID:        ctx.GID,
+		GIDs:       ctx.GIDs,
+		ClientAddr: clientIP,
+	}
 
-	logger.Debug("MKDIR: creating directory with mode=%o uid=%d gid=%d",
-		dirAttr.Mode, dirAttr.UID, dirAttr.GID)
+	// Convert SetAttrs to metadata format for repository
+	dirAttr := convertSetAttrsToMetadata(&req.Attr, authCtx)
 
-	// ========================================================================
-	// Step 5: Create directory in repository
-	// ========================================================================
-
-	newHandle, err := repository.AddFileToDirectory(parentHandle, req.Name, dirAttr)
+	newHandle, err := repository.CreateDirectory(parentHandle, req.Name, dirAttr, authCtx)
 	if err != nil {
-		logger.Error("MKDIR failed: repository error: name='%s' parent=%x error=%v",
-			req.Name, req.DirHandle, err)
+		logger.Error("MKDIR failed: repository error: name='%s' client=%s error=%v",
+			req.Name, clientIP, err)
 
 		// Get updated parent attributes for WCC data
 		parentAttr, _ = repository.GetFile(parentHandle)
-		fileid := extractFileID(parentHandle)
-		wccAfter := MetadataToNFSAttr(parentAttr, fileid)
+		dirID := extractFileID(parentHandle)
+		wccAfter := MetadataToNFSAttr(parentAttr, dirID)
+
+		// Map repository errors to NFS status codes
+		status := mapRepositoryErrorToNFSStatus(err)
 
 		return &MkdirResponse{
-			Status:    NFS3ErrIO,
+			Status:    status,
 			WccBefore: wccBefore,
 			WccAfter:  wccAfter,
 		}, nil
 	}
 
 	// ========================================================================
-	// Step 6: Build response with new directory attributes
+	// Step 5: Build success response with new directory attributes
 	// ========================================================================
 
+	// Get the newly created directory's attributes
+	newDirAttr, err := repository.GetFile(newHandle)
+	if err != nil {
+		logger.Error("MKDIR: failed to get new directory attributes: handle=%x error=%v",
+			newHandle, err)
+		// This shouldn't happen, but handle gracefully
+		return &MkdirResponse{Status: NFS3ErrIO}, nil
+	}
+
 	// Generate file ID from handle for NFS attributes
-	fileid := binary.BigEndian.Uint64(newHandle[:8])
-	nfsAttr := MetadataToNFSAttr(dirAttr, fileid)
+	fileid := extractFileID(newHandle)
+	nfsAttr := MetadataToNFSAttr(newDirAttr, fileid)
 
 	// Get updated parent attributes for WCC data
 	parentAttr, _ = repository.GetFile(parentHandle)
 	parentFileid := extractFileID(parentHandle)
 	wccAfter := MetadataToNFSAttr(parentAttr, parentFileid)
 
-	logger.Info("MKDIR successful: name='%s' parent=%x new_handle=%x mode=%o",
-		req.Name, req.DirHandle, newHandle, dirAttr.Mode)
+	logger.Info("MKDIR successful: name='%s' handle=%x mode=%o size=%d client=%s",
+		req.Name, newHandle, newDirAttr.Mode, newDirAttr.Size, clientIP)
+
+	logger.Debug("MKDIR details: fileid=%d uid=%d gid=%d parent=%d",
+		fileid, newDirAttr.UID, newDirAttr.GID, parentFileid)
 
 	return &MkdirResponse{
 		Status:    NFS3OK,
@@ -256,140 +410,97 @@ func (h *DefaultNFSHandler) Mkdir(repository metadata.Repository, req *MkdirRequ
 }
 
 // ============================================================================
-// Helper Functions
+// Request Validation
 // ============================================================================
 
-// buildDirectoryAttributes constructs directory attributes from the request,
-// applying defaults for unspecified fields.
-//
-// Directories have specific requirements:
-//   - Type must be FileTypeDirectory
-//   - Size is typically 4096 (standard directory block size)
-//   - ContentID is empty (directories don't have content blobs)
-//   - Timestamps are set to current time
-//
-// Parameters:
-//   - setAttrs: Requested attributes from the client (may be partial)
-//
-// Returns:
-//   - *metadata.FileAttr: Complete directory attributes with defaults applied
-func buildDirectoryAttributes(setAttrs *SetAttrs) *metadata.FileAttr {
-	now := time.Now()
-
-	// Default directory permissions: rwxr-xr-x (0755)
-	mode := uint32(0755)
-	if setAttrs.SetMode {
-		// Ensure directory bit is set if client provided a mode
-		mode = setAttrs.Mode | 0040000 // Add directory type bit
-	}
-
-	// Default ownership: root (UID 0, GID 0)
-	// In production, you might want to use the authenticated user's credentials
-	uid := uint32(0)
-	if setAttrs.SetUID {
-		uid = setAttrs.UID
-	}
-
-	gid := uint32(0)
-	if setAttrs.SetGID {
-		gid = setAttrs.GID
-	}
-
-	return &metadata.FileAttr{
-		Type:      metadata.FileTypeDirectory,
-		Mode:      mode,
-		UID:       uid,
-		GID:       gid,
-		Size:      4096, // Standard directory size
-		Atime:     now,
-		Mtime:     now,
-		Ctime:     now,
-		ContentID: "", // Directories don't have content blobs
-	}
-}
-
-// ============================================================================
-// Directory Name Validation
-// ============================================================================
-
-// directoryNameError represents an invalid directory name error with
-// the corresponding NFS error status.
-type directoryNameError struct {
+// mkdirValidationError represents a MKDIR request validation error.
+type mkdirValidationError struct {
 	message   string
 	nfsStatus uint32
 }
 
-func (e *directoryNameError) Error() string {
+func (e *mkdirValidationError) Error() string {
 	return e.message
 }
 
-func (e *directoryNameError) NFSStatus() uint32 {
-	return e.nfsStatus
-}
-
-// validateDirectoryName checks if a directory name is valid according to
-// NFS and POSIX conventions.
+// validateMkdirRequest validates MKDIR request parameters.
 //
-// Validation rules:
-//   - Must not be empty
-//   - Must not be "." (current directory)
-//   - Must not be ".." (parent directory)
-//   - Must not exceed 255 bytes (NFS filename limit)
-//   - Must not contain null bytes (string terminator)
-//   - Must not contain '/' (path separator)
-//   - Should not contain control characters (0x00-0x1F, 0x7F)
-//
-// Parameters:
-//   - name: The directory name to validate
+// Checks performed:
+//   - Parent directory handle is not empty and within limits
+//   - Directory name is valid (not empty, not "." or "..", length, characters)
 //
 // Returns:
-//   - error: directoryNameError with appropriate NFS status code if invalid, nil if valid
-func validateDirectoryName(name string) error {
-	// Check for empty name
-	if name == "" {
-		return &directoryNameError{
-			message:   "directory name cannot be empty",
+//   - nil if valid
+//   - *mkdirValidationError with NFS status if invalid
+func validateMkdirRequest(req *MkdirRequest) *mkdirValidationError {
+	// Validate parent directory handle
+	if len(req.DirHandle) == 0 {
+		return &mkdirValidationError{
+			message:   "empty parent directory handle",
+			nfsStatus: NFS3ErrBadHandle,
+		}
+	}
+
+	if len(req.DirHandle) > 64 {
+		return &mkdirValidationError{
+			message:   fmt.Sprintf("parent handle too long: %d bytes (max 64)", len(req.DirHandle)),
+			nfsStatus: NFS3ErrBadHandle,
+		}
+	}
+
+	// Handle must be at least 8 bytes for file ID extraction
+	if len(req.DirHandle) < 8 {
+		return &mkdirValidationError{
+			message:   fmt.Sprintf("parent handle too short: %d bytes (min 8)", len(req.DirHandle)),
+			nfsStatus: NFS3ErrBadHandle,
+		}
+	}
+
+	// Validate directory name
+	if req.Name == "" {
+		return &mkdirValidationError{
+			message:   "empty directory name",
 			nfsStatus: NFS3ErrInval,
 		}
 	}
 
 	// Check for reserved names
-	if name == "." || name == ".." {
-		return &directoryNameError{
-			message:   fmt.Sprintf("directory name cannot be '%s'", name),
+	if req.Name == "." || req.Name == ".." {
+		return &mkdirValidationError{
+			message:   fmt.Sprintf("directory name cannot be '%s'", req.Name),
 			nfsStatus: NFS3ErrInval,
 		}
 	}
 
 	// Check name length (NFS limit is typically 255 bytes)
-	if len(name) > 255 {
-		return &directoryNameError{
-			message:   fmt.Sprintf("directory name too long: %d bytes (max 255)", len(name)),
+	if len(req.Name) > 255 {
+		return &mkdirValidationError{
+			message:   fmt.Sprintf("directory name too long: %d bytes (max 255)", len(req.Name)),
 			nfsStatus: NFS3ErrNameTooLong,
 		}
 	}
 
-	// Check for null bytes
-	if strings.Contains(name, "\x00") {
-		return &directoryNameError{
-			message:   "directory name cannot contain null bytes",
+	// Check for null bytes (string terminator, invalid in filenames)
+	if bytes.ContainsAny([]byte(req.Name), "\x00") {
+		return &mkdirValidationError{
+			message:   "directory name contains null byte",
 			nfsStatus: NFS3ErrInval,
 		}
 	}
 
-	// Check for path separators
-	if strings.Contains(name, "/") {
-		return &directoryNameError{
-			message:   "directory name cannot contain path separators",
+	// Check for path separators (prevents directory traversal attacks)
+	if bytes.ContainsAny([]byte(req.Name), "/") {
+		return &mkdirValidationError{
+			message:   "directory name contains path separator",
 			nfsStatus: NFS3ErrInval,
 		}
 	}
 
 	// Check for control characters (including tab, newline, etc.)
 	// This prevents potential issues with terminal output and logs
-	for i, r := range name {
+	for i, r := range req.Name {
 		if r < 0x20 || r == 0x7F {
-			return &directoryNameError{
+			return &mkdirValidationError{
 				message:   fmt.Sprintf("directory name contains control character at position %d", i),
 				nfsStatus: NFS3ErrInval,
 			}
@@ -400,7 +511,60 @@ func validateDirectoryName(name string) error {
 }
 
 // ============================================================================
-// Request Decoder
+// Helper Functions
+// ============================================================================
+
+// convertSetAttrsToMetadata converts SetAttrs to metadata.FileAttr format
+// for the repository, applying authentication context defaults.
+//
+// This helper prepares the attributes structure that the repository expects,
+// ensuring all required fields are populated with sensible defaults.
+//
+// Parameters:
+//   - setAttrs: Client-requested attributes (may be partial)
+//   - authCtx: Authentication context for default ownership
+//
+// Returns:
+//   - *metadata.FileAttr: Partial attributes for repository (type, mode, uid, gid)
+//     The repository will complete the attributes with timestamps and other fields.
+func convertSetAttrsToMetadata(setAttrs *SetAttrs, authCtx *metadata.AuthContext) *metadata.FileAttr {
+	attr := &metadata.FileAttr{
+		Type: metadata.FileTypeDirectory,
+	}
+
+	// Apply mode (default: 0755 if not specified)
+	if setAttrs.SetMode {
+		attr.Mode = setAttrs.Mode
+	} else {
+		attr.Mode = 0755 // Default: rwxr-xr-x
+	}
+
+	// Apply UID (default: authenticated user or 0)
+	if setAttrs.SetUID {
+		attr.UID = setAttrs.UID
+	} else if authCtx.UID != nil {
+		attr.UID = *authCtx.UID
+	} else {
+		attr.UID = 0 // Default: root
+	}
+
+	// Apply GID (default: authenticated group or 0)
+	if setAttrs.SetGID {
+		attr.GID = setAttrs.GID
+	} else if authCtx.GID != nil {
+		attr.GID = *authCtx.GID
+	} else {
+		attr.GID = 0 // Default: root
+	}
+
+	// Note: Size, timestamps, and ContentID are set by the repository
+	// based on implementation requirements
+
+	return attr
+}
+
+// ============================================================================
+// XDR Decoding
 // ============================================================================
 
 // DecodeMkdirRequest decodes a MKDIR request from XDR-encoded bytes.
@@ -428,6 +592,16 @@ func validateDirectoryName(name string) error {
 // Returns:
 //   - *MkdirRequest: The decoded request
 //   - error: Decoding error if data is malformed or incomplete
+//
+// Example:
+//
+//	data := []byte{...} // XDR-encoded MKDIR request from network
+//	req, err := DecodeMkdirRequest(data)
+//	if err != nil {
+//	    // Handle decode error - send error reply to client
+//	    return nil, err
+//	}
+//	// Use req.DirHandle, req.Name, req.Attr in MKDIR procedure
 func DecodeMkdirRequest(data []byte) (*MkdirRequest, error) {
 	if len(data) < 8 {
 		return nil, fmt.Errorf("data too short: need at least 8 bytes, got %d", len(data))
@@ -466,11 +640,14 @@ func DecodeMkdirRequest(data []byte) (*MkdirRequest, error) {
 	}
 	req.Attr = *attr
 
+	logger.Debug("Decoded MKDIR request: handle_len=%d name='%s' set_mode=%v mode=%o",
+		len(handle), name, attr.SetMode, attr.Mode)
+
 	return req, nil
 }
 
 // ============================================================================
-// Response Encoder
+// XDR Encoding
 // ============================================================================
 
 // Encode serializes the MkdirResponse into XDR-encoded bytes suitable for
@@ -501,12 +678,28 @@ func DecodeMkdirRequest(data []byte) (*MkdirRequest, error) {
 //  3. If failure:
 //     a. Write WCC data for parent directory (best effort)
 //
-// Parameters:
-//   - resp: The response structure to encode
+// XDR encoding requires all data to be in big-endian format and aligned
+// to 4-byte boundaries.
 //
 // Returns:
-//   - []byte: XDR-encoded response bytes
-//   - error: Encoding error (should be rare)
+//   - []byte: The XDR-encoded response ready to send to the client
+//   - error: Any error encountered during encoding
+//
+// Example:
+//
+//	resp := &MkdirResponse{
+//	    Status:    NFS3OK,
+//	    Handle:    newDirHandle,
+//	    Attr:      dirAttr,
+//	    WccBefore: wccBefore,
+//	    WccAfter:  wccAfter,
+//	}
+//	data, err := resp.Encode()
+//	if err != nil {
+//	    // Handle encoding error
+//	    return nil, err
+//	}
+//	// Send 'data' to client over network
 func (resp *MkdirResponse) Encode() ([]byte, error) {
 	var buf bytes.Buffer
 
@@ -544,5 +737,6 @@ func (resp *MkdirResponse) Encode() ([]byte, error) {
 		return nil, fmt.Errorf("encode wcc data: %w", err)
 	}
 
+	logger.Debug("Encoded MKDIR response: %d bytes status=%d", buf.Len(), resp.Status)
 	return buf.Bytes(), nil
 }

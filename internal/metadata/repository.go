@@ -108,4 +108,35 @@ type Repository interface {
 	//   - Cross-filesystem link attempted (implementation-specific)
 	//   - fileHandle or dirHandle is invalid
 	CreateLink(dirHandle FileHandle, name string, fileHandle FileHandle, ctx *AuthContext) error
+
+	// CreateDirectory creates a new directory with the specified attributes.
+	//
+	// This method is responsible for:
+	//  1. Checking write permission on the parent directory
+	//  2. Verifying the name doesn't already exist
+	//  3. Building complete directory attributes with defaults
+	//  4. Creating the directory metadata
+	//  5. Linking it to the parent directory
+	//  6. Setting up the parent-child relationship
+	//  7. Updating parent directory timestamps
+	//
+	// Parameters:
+	//   - parentHandle: Handle of the parent directory
+	//   - name: Name for the new directory
+	//   - attr: Partial attributes (type, mode, uid, gid) - may have defaults
+	//   - ctx: Authentication context for access control
+	//
+	// Returns:
+	//   - FileHandle: Handle of the newly created directory
+	//   - error: Returns error if:
+	//     * Access denied (no write permission on parent)
+	//     * Name already exists
+	//     * Parent is not a directory
+	//     * I/O error
+	//
+	// The implementation should:
+	//   - Complete the attr structure with size (typically 4096), timestamps, etc.
+	//   - Check that the caller has write permission on the parent directory
+	//   - Ensure the directory has proper default attributes if not specified
+	CreateDirectory(parentHandle FileHandle, name string, attr *FileAttr, ctx *AuthContext) (FileHandle, error)
 }
