@@ -78,7 +78,7 @@ type NFSHandler interface {
 
 	// ReadDirPlus reads entries from a directory with their attributes.
 	// RFC 1813 Section 3.3.17
-	ReadDirPlus(repository metadata.Repository, req *nfs.ReadDirPlusRequest) (*nfs.ReadDirPlusResponse, error)
+	ReadDirPlus(repository metadata.Repository, req *nfs.ReadDirPlusRequest, ctx *nfs.ReadDirPlusContext) (*nfs.ReadDirPlusResponse, error)
 
 	// // FsStat returns dynamic information about a file system.
 	// // RFC 1813 Section 3.3.18
