@@ -13,11 +13,11 @@ import (
 	"github.com/marmos91/dittofs/internal/content"
 	"github.com/marmos91/dittofs/internal/logger"
 	"github.com/marmos91/dittofs/internal/metadata"
-	"github.com/marmos91/dittofs/internal/metadata/persistence"
+	"github.com/marmos91/dittofs/internal/metadata/persistence/memory"
 	nfsServer "github.com/marmos91/dittofs/internal/server"
 )
 
-func createInitialStructure(repo *persistence.MemoryRepository, contentRepo *content.FSContentRepository, rootHandle metadata.FileHandle) error {
+func createInitialStructure(repo *memory.MemoryRepository, contentRepo *content.FSContentRepository, rootHandle metadata.FileHandle) error {
 	now := time.Now()
 
 	// Create "images" directory
@@ -130,7 +130,7 @@ func main() {
 		log.Fatalf("Failed to create content repository: %v", err)
 	}
 
-	metadataRepo := persistence.NewMemoryRepository()
+	metadataRepo := memory.NewMemoryRepository()
 
 	// Configure server-wide settings
 	serverConfig := metadata.ServerConfig{}
