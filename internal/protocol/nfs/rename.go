@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"strings"
 
 	"github.com/marmos91/dittofs/internal/logger"
 	"github.com/marmos91/dittofs/internal/metadata"
@@ -367,13 +368,17 @@ func (h *DefaultNFSHandler) Rename(
 			req.FromName, req.ToName, clientIP, err)
 
 		// Get updated directory attributes for WCC data
-		fromDirAttr, _ = repository.GetFile(fromDirHandle)
-		fromDirID := extractFileID(fromDirHandle)
-		fromDirWccAfter := MetadataToNFSAttr(fromDirAttr, fromDirID)
+		var fromDirWccAfter *FileAttr
+		if updatedFromDirAttr, getErr := repository.GetFile(fromDirHandle); getErr == nil {
+			fromDirID := extractFileID(fromDirHandle)
+			fromDirWccAfter = MetadataToNFSAttr(updatedFromDirAttr, fromDirID)
+		}
 
-		toDirAttr, _ = repository.GetFile(toDirHandle)
-		toDirID := extractFileID(toDirHandle)
-		toDirWccAfter := MetadataToNFSAttr(toDirAttr, toDirID)
+		var toDirWccAfter *FileAttr
+		if updatedToDirAttr, getErr := repository.GetFile(toDirHandle); getErr == nil {
+			toDirID := extractFileID(toDirHandle)
+			toDirWccAfter = MetadataToNFSAttr(updatedToDirAttr, toDirID)
+		}
 
 		// Map repository errors to NFS status codes
 		status := mapRepositoryErrorToNFSStatus(err, clientIP, "rename")
@@ -392,18 +397,33 @@ func (h *DefaultNFSHandler) Rename(
 	// ========================================================================
 
 	// Get updated source directory attributes
-	fromDirAttr, _ = repository.GetFile(fromDirHandle)
-	fromDirID := extractFileID(fromDirHandle)
-	fromDirWccAfter := MetadataToNFSAttr(fromDirAttr, fromDirID)
+	var fromDirWccAfter *FileAttr
+	if updatedFromDirAttr, getErr := repository.GetFile(fromDirHandle); getErr != nil {
+		logger.Warn("RENAME: successful but cannot get updated source directory attributes: dir=%x error=%v",
+			req.FromDirHandle, getErr)
+		// fromDirWccAfter will be nil
+	} else {
+		fromDirID := extractFileID(fromDirHandle)
+		fromDirWccAfter = MetadataToNFSAttr(updatedFromDirAttr, fromDirID)
+	}
 
 	// Get updated destination directory attributes
-	toDirAttr, _ = repository.GetFile(toDirHandle)
-	toDirID := extractFileID(toDirHandle)
-	toDirWccAfter := MetadataToNFSAttr(toDirAttr, toDirID)
+	var toDirWccAfter *FileAttr
+	if updatedToDirAttr, getErr := repository.GetFile(toDirHandle); getErr != nil {
+		logger.Warn("RENAME: successful but cannot get updated destination directory attributes: dir=%x error=%v",
+			req.ToDirHandle, getErr)
+		// toDirWccAfter will be nil
+	} else {
+		toDirID := extractFileID(toDirHandle)
+		toDirWccAfter = MetadataToNFSAttr(updatedToDirAttr, toDirID)
+	}
 
 	logger.Info("RENAME successful: from='%s' to='%s' client=%s",
 		req.FromName, req.ToName, clientIP)
 
+	// Extract IDs for debug logging
+	fromDirID := extractFileID(fromDirHandle)
+	toDirID := extractFileID(toDirHandle)
 	logger.Debug("RENAME details: from_dir=%d to_dir=%d same_dir=%v",
 		fromDirID, toDirID, bytes.Equal(req.FromDirHandle, req.ToDirHandle))
 
@@ -496,7 +516,7 @@ func validateRenameRequest(req *RenameRequest) *renameValidationError {
 	}
 
 	// Check for invalid characters in source name
-	if bytes.ContainsAny([]byte(req.FromName), "/\x00") {
+	if strings.ContainsAny(req.FromName, "/\x00") {
 		return &renameValidationError{
 			message:   "source name contains invalid characters (null or path separator)",
 			nfsStatus: NFS3ErrInval,
@@ -527,7 +547,7 @@ func validateRenameRequest(req *RenameRequest) *renameValidationError {
 	}
 
 	// Check for invalid characters in destination name
-	if bytes.ContainsAny([]byte(req.ToName), "/\x00") {
+	if strings.ContainsAny(req.ToName, "/\x00") {
 		return &renameValidationError{
 			message:   "destination name contains invalid characters (null or path separator)",
 			nfsStatus: NFS3ErrInval,
