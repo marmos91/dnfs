@@ -1593,7 +1593,7 @@ func (r *MemoryRepository) RemoveDirectory(parentHandle metadata.FileHandle, nam
 	// Step 5: Check write permission on parent directory (if auth context provided)
 	// ========================================================================
 
-	if ctx != nil && ctx.AuthFlavor != 0 && ctx.UID != nil {
+	if ctx != nil && ctx.AuthFlavor != 0 && ctx.UID != nil && ctx.GID != nil {
 		// Check if user has write permission on the parent directory
 		uid := *ctx.UID
 		gid := *ctx.GID
