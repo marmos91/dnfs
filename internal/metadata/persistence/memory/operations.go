@@ -1875,7 +1875,7 @@ func (r *MemoryRepository) CreateSymlink(
 	// Step 2: Check write access to parent directory (if auth context provided)
 	// ========================================================================
 
-	if ctx != nil && ctx.AuthFlavor != 0 && ctx.UID != nil {
+	if ctx != nil && ctx.AuthFlavor != 0 && ctx.UID != nil && ctx.GID != nil {
 		uid := *ctx.UID
 		gid := *ctx.GID
 
