@@ -50,7 +50,7 @@ type NFSHandler interface {
 
 	// Symlink creates a symbolic link.
 	// RFC 1813 Section 3.3.10
-	Symlink(repository metadata.Repository, req *nfs.SymlinkRequest) (*nfs.SymlinkResponse, error)
+	Symlink(repository metadata.Repository, req *nfs.SymlinkRequest, ctx *nfs.SymlinkContext) (*nfs.SymlinkResponse, error)
 
 	// MkNod creates a special device file.
 	// RFC 1813 Section 3.3.11
