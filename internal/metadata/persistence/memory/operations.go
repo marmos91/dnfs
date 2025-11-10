@@ -1816,7 +1816,7 @@ func (r *MemoryRepository) RenameFile(
 // Implementation Notes:
 //   - The target path is stored in attr.SymlinkTarget without validation
 //   - The symlink size is set to the length of the target path
-//   - Default permissions are 0777 (lrwxrwxrwx) as symlinks typically grant all
+//   - The protocol layer provides attributes with proper defaults via convertSetAttrsToMetadata
 //   - Actual access control is applied when following the symlink, not on the symlink itself
 //
 // RFC 1813 Requirements:
@@ -1830,7 +1830,7 @@ func (r *MemoryRepository) RenameFile(
 //   - parentHandle: Handle of the parent directory
 //   - name: Name for the new symbolic link
 //   - target: Path that the symlink will point to
-//   - attr: Partial attributes (mode, uid, gid may be set by client)
+//   - attr: Partial attributes (mode, uid, gid) from protocol layer with proper defaults
 //   - ctx: Authentication context for access control
 //
 // Returns:
@@ -1875,7 +1875,7 @@ func (r *MemoryRepository) CreateSymlink(
 	// Step 2: Check write access to parent directory (if auth context provided)
 	// ========================================================================
 
-	if ctx != nil && ctx.AuthFlavor != 0 && ctx.UID != nil && ctx.GID != nil {
+	if ctx != nil && ctx.AuthFlavor != 0 && ctx.UID != nil {
 		uid := *ctx.UID
 		gid := *ctx.GID
 
@@ -1910,7 +1910,7 @@ func (r *MemoryRepository) CreateSymlink(
 
 	if _, exists := r.children[parentKey][name]; exists {
 		return nil, &metadata.ExportError{
-			Code:    metadata.ExportErrExists,
+			Code:    metadata.ExportErrServerFault,
 			Message: fmt.Sprintf("file already exists: %s", name),
 		}
 	}
@@ -1921,13 +1921,13 @@ func (r *MemoryRepository) CreateSymlink(
 
 	now := time.Now()
 
-	// Start with the attributes provided by the protocol layer
-	// If UID/GID not set, use authenticated user's credentials
+	// The protocol layer has already applied proper defaults via convertSetAttrsToMetadata,
+	// including UID/GID from auth context. We just need to complete the remaining fields.
 	completeAttr := &metadata.FileAttr{
 		Type: metadata.FileTypeSymlink, // Always symlink
-		Mode: attr.Mode,                // From protocol layer (or default 0777)
-		UID:  attr.UID,                 // From protocol layer or default
-		GID:  attr.GID,                 // From protocol layer or default
+		Mode: attr.Mode,                // From protocol layer (default 0777 already applied)
+		UID:  attr.UID,                 // From protocol layer (auth context UID or client-provided)
+		GID:  attr.GID,                 // From protocol layer (auth context GID or client-provided)
 
 		// Server-assigned attributes
 		Size:          uint64(len(target)), // Size is length of target path
@@ -1936,21 +1936,6 @@ func (r *MemoryRepository) CreateSymlink(
 		Ctime:         now,
 		ContentID:     "",     // Symlinks don't have content blobs
 		SymlinkTarget: target, // Store the target path
-	}
-
-	// If UID not set, use authenticated user's UID
-	if completeAttr.UID == 0 && ctx != nil && ctx.UID != nil {
-		completeAttr.UID = *ctx.UID
-	}
-
-	// If GID not set, use authenticated user's GID
-	if completeAttr.GID == 0 && ctx != nil && ctx.GID != nil {
-		completeAttr.GID = *ctx.GID
-	}
-
-	// Apply default mode if not specified (0777 for symlinks)
-	if completeAttr.Mode == 0 {
-		completeAttr.Mode = 0777 // Default: rwxrwxrwx
 	}
 
 	// ========================================================================
