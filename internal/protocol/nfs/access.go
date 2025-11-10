@@ -7,6 +7,8 @@ import (
 
 	"github.com/marmos91/dittofs/internal/logger"
 	"github.com/marmos91/dittofs/internal/metadata"
+	"github.com/marmos91/dittofs/internal/protocol/nfs/types"
+	"github.com/marmos91/dittofs/internal/protocol/nfs/xdr"
 )
 
 // ============================================================================
@@ -57,7 +59,7 @@ type AccessResponse struct {
 	// Attr contains the post-operation attributes for the file handle.
 	// This is optional and may be nil.
 	// Including attributes helps clients maintain cache consistency.
-	Attr *FileAttr
+	Attr *types.FileAttr
 
 	// Access is a bitmap of granted access permissions.
 	// Only present when Status == NFS3OK.
@@ -205,7 +207,7 @@ func (h *DefaultNFSHandler) Access(
 	ctx *AccessContext,
 ) (*AccessResponse, error) {
 	// Extract client IP for logging
-	clientIP := extractClientIP(ctx.ClientAddr)
+	clientIP := xdr.ExtractClientIP(ctx.ClientAddr)
 
 	logger.Info("ACCESS: handle=%x requested=0x%x client=%s auth=%d",
 		req.Handle, req.Access, clientIP, ctx.AuthFlavor)
@@ -229,7 +231,7 @@ func (h *DefaultNFSHandler) Access(
 	if err != nil {
 		logger.Debug("ACCESS failed: handle not found: handle=%x client=%s error=%v",
 			req.Handle, clientIP, err)
-		return &AccessResponse{Status: NFS3ErrStale}, nil
+		return &AccessResponse{Status: types.NFS3ErrStale}, nil
 	}
 
 	// ========================================================================
@@ -253,7 +255,7 @@ func (h *DefaultNFSHandler) Access(
 	if err != nil {
 		logger.Error("ACCESS failed: permission check error: handle=%x client=%s error=%v",
 			req.Handle, clientIP, err)
-		return &AccessResponse{Status: NFS3ErrIO}, nil
+		return &AccessResponse{Status: types.NFS3ErrIO}, nil
 	}
 
 	// ========================================================================
@@ -261,8 +263,8 @@ func (h *DefaultNFSHandler) Access(
 	// ========================================================================
 
 	// Generate file ID from handle for NFS attributes
-	fileid := extractFileID(fileHandle)
-	nfsAttr := MetadataToNFSAttr(attr, fileid)
+	fileid := xdr.ExtractFileID(fileHandle)
+	nfsAttr := xdr.MetadataToNFSAttr(attr, fileid)
 
 	logger.Info("ACCESS successful: handle=%x granted=0x%x requested=0x%x client=%s",
 		req.Handle, grantedAccess, req.Access, clientIP)
@@ -271,7 +273,7 @@ func (h *DefaultNFSHandler) Access(
 		attr.Type, attr.Mode, attr.UID, attr.GID, ctx.UID, ctx.GID)
 
 	return &AccessResponse{
-		Status: NFS3OK,
+		Status: types.NFS3OK,
 		Attr:   nfsAttr,
 		Access: grantedAccess,
 	}, nil
@@ -307,7 +309,7 @@ func validateAccessRequest(req *AccessRequest) *accessValidationError {
 	if len(req.Handle) == 0 {
 		return &accessValidationError{
 			message:   "file handle is empty",
-			nfsStatus: NFS3ErrBadHandle,
+			nfsStatus: types.NFS3ErrBadHandle,
 		}
 	}
 
@@ -315,7 +317,7 @@ func validateAccessRequest(req *AccessRequest) *accessValidationError {
 	if len(req.Handle) > 64 {
 		return &accessValidationError{
 			message:   fmt.Sprintf("file handle too long: %d bytes (max 64)", len(req.Handle)),
-			nfsStatus: NFS3ErrBadHandle,
+			nfsStatus: types.NFS3ErrBadHandle,
 		}
 	}
 
@@ -323,7 +325,7 @@ func validateAccessRequest(req *AccessRequest) *accessValidationError {
 	if len(req.Handle) < 8 {
 		return &accessValidationError{
 			message:   fmt.Sprintf("file handle too short: %d bytes (min 8)", len(req.Handle)),
-			nfsStatus: NFS3ErrBadHandle,
+			nfsStatus: types.NFS3ErrBadHandle,
 		}
 	}
 
@@ -333,7 +335,7 @@ func validateAccessRequest(req *AccessRequest) *accessValidationError {
 	if req.Access&^validBits != 0 {
 		return &accessValidationError{
 			message:   fmt.Sprintf("invalid access bitmap: 0x%x (invalid bits set)", req.Access),
-			nfsStatus: NFS3ErrInval,
+			nfsStatus: types.NFS3ErrInval,
 		}
 	}
 
@@ -480,7 +482,7 @@ func (resp *AccessResponse) Encode() ([]byte, error) {
 			return nil, fmt.Errorf("failed to write attr present flag: %w", err)
 		}
 		// Encode file attributes using helper function
-		if err := encodeFileAttr(&buf, resp.Attr); err != nil {
+		if err := xdr.EncodeFileAttr(&buf, resp.Attr); err != nil {
 			return nil, fmt.Errorf("failed to encode attributes: %w", err)
 		}
 	} else {
@@ -491,7 +493,7 @@ func (resp *AccessResponse) Encode() ([]byte, error) {
 	}
 
 	// If status is not OK, we're done - no access bitmap on error
-	if resp.Status != NFS3OK {
+	if resp.Status != types.NFS3OK {
 		return buf.Bytes(), nil
 	}
 

@@ -1,4 +1,4 @@
-package nfs
+package types
 
 // NFSv3 Procedure Numbers
 // These identify the different NFS operations as defined in RFC 1813.
