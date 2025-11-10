@@ -10,6 +10,222 @@ import (
 	"github.com/marmos91/dittofs/internal/metadata"
 )
 
+// ============================================================================
+// Permission Helper Functions
+// ============================================================================
+
+// hasWritePermission checks if the user has write permission on a file/directory.
+//
+// Permission check logic:
+//   - Root (UID 0): Always granted
+//   - Owner: Check owner write bit (mode & 0200)
+//   - Group member: Check group write bit (mode & 0020)
+//   - Other: Check other write bit (mode & 0002)
+//   - AUTH_NULL: Only if world-writable (mode & 0002)
+//
+// Parameters:
+//   - attr: File attributes containing mode, uid, gid
+//   - ctx: Authentication context (may be nil for unauthenticated access)
+//
+// Returns:
+//   - bool: true if write permission granted, false otherwise
+func hasWritePermission(attr *metadata.FileAttr, ctx *metadata.AuthContext) bool {
+	// No authentication context: deny by default
+	if ctx == nil {
+		return false
+	}
+
+	// AUTH_NULL: only grant write if world-writable
+	if ctx.AuthFlavor == 0 {
+		return (attr.Mode & 0002) != 0
+	}
+
+	// Authenticated access requires both UID and GID
+	if ctx.UID == nil || ctx.GID == nil {
+		return false
+	}
+
+	uid := *ctx.UID
+	gid := *ctx.GID
+
+	// Root user bypasses all permission checks
+	if uid == 0 {
+		return true
+	}
+
+	// Owner permissions
+	if uid == attr.UID {
+		return (attr.Mode & 0200) != 0
+	}
+
+	// Group permissions
+	if gid == attr.GID || containsGID(ctx.GIDs, attr.GID) {
+		return (attr.Mode & 0020) != 0
+	}
+
+	// Other permissions
+	return (attr.Mode & 0002) != 0
+}
+
+// hasReadPermission checks if the user has read permission on a file/directory.
+//
+// Permission check logic follows the same pattern as hasWritePermission
+// but checks read bits (0400/0040/0004) instead of write bits.
+//
+// Parameters:
+//   - attr: File attributes containing mode, uid, gid
+//   - ctx: Authentication context (may be nil for unauthenticated access)
+//
+// Returns:
+//   - bool: true if read permission granted, false otherwise
+func hasReadPermission(attr *metadata.FileAttr, ctx *metadata.AuthContext) bool {
+	// No authentication context: deny by default
+	if ctx == nil {
+		return false
+	}
+
+	// AUTH_NULL: only grant read if world-readable
+	if ctx.AuthFlavor == 0 {
+		return (attr.Mode & 0004) != 0
+	}
+
+	// Authenticated access requires both UID and GID
+	if ctx.UID == nil || ctx.GID == nil {
+		return false
+	}
+
+	uid := *ctx.UID
+	gid := *ctx.GID
+
+	// Root user bypasses all permission checks
+	if uid == 0 {
+		return true
+	}
+
+	// Owner permissions
+	if uid == attr.UID {
+		return (attr.Mode & 0400) != 0
+	}
+
+	// Group permissions
+	if gid == attr.GID || containsGID(ctx.GIDs, attr.GID) {
+		return (attr.Mode & 0040) != 0
+	}
+
+	// Other permissions
+	return (attr.Mode & 0004) != 0
+}
+
+// hasExecutePermission checks if the user has execute permission on a directory.
+//
+// Execute permission on directories (also called "search" permission) is required
+// to access files within the directory or traverse through it.
+//
+// Parameters:
+//   - attr: Directory attributes containing mode, uid, gid
+//   - ctx: Authentication context (may be nil for unauthenticated access)
+//
+// Returns:
+//   - bool: true if execute permission granted, false otherwise
+func hasExecutePermission(attr *metadata.FileAttr, ctx *metadata.AuthContext) bool {
+	// No authentication context: deny by default
+	if ctx == nil {
+		return false
+	}
+
+	// AUTH_NULL: only grant execute if world-executable
+	if ctx.AuthFlavor == 0 {
+		return (attr.Mode & 0001) != 0
+	}
+
+	// Authenticated access requires both UID and GID
+	if ctx.UID == nil || ctx.GID == nil {
+		return false
+	}
+
+	uid := *ctx.UID
+	gid := *ctx.GID
+
+	// Root user bypasses all permission checks
+	if uid == 0 {
+		return true
+	}
+
+	// Owner permissions
+	if uid == attr.UID {
+		return (attr.Mode & 0100) != 0
+	}
+
+	// Group permissions
+	if gid == attr.GID || containsGID(ctx.GIDs, attr.GID) {
+		return (attr.Mode & 0010) != 0
+	}
+
+	// Other permissions
+	return (attr.Mode & 0001) != 0
+}
+
+// isOwnerOrRoot checks if the authenticated user is the file owner or root.
+//
+// This is commonly used for operations that require ownership, such as:
+//   - Changing file permissions (chmod)
+//   - Changing file timestamps
+//   - Setting extended attributes
+//
+// Parameters:
+//   - attr: File attributes containing uid
+//   - ctx: Authentication context (may be nil)
+//
+// Returns:
+//   - bool: true if user is owner or root, false otherwise
+func isOwnerOrRoot(attr *metadata.FileAttr, ctx *metadata.AuthContext) bool {
+	if ctx == nil || ctx.AuthFlavor == 0 || ctx.UID == nil {
+		return false
+	}
+
+	uid := *ctx.UID
+	return uid == 0 || uid == attr.UID
+}
+
+// canChangeGroup checks if the user can change a file's group to the specified GID.
+//
+// Group changes are allowed if:
+//   - User is root (UID 0)
+//   - User is owner AND is a member of the target group
+//
+// Parameters:
+//   - attr: File attributes containing uid
+//   - targetGID: The new group ID being set
+//   - ctx: Authentication context (may be nil)
+//
+// Returns:
+//   - bool: true if group change is allowed, false otherwise
+func canChangeGroup(attr *metadata.FileAttr, targetGID uint32, ctx *metadata.AuthContext) bool {
+	if ctx == nil || ctx.AuthFlavor == 0 || ctx.UID == nil || ctx.GID == nil {
+		return false
+	}
+
+	uid := *ctx.UID
+	gid := *ctx.GID
+
+	// Root can always change group
+	if uid == 0 {
+		return true
+	}
+
+	// Owner can change if they're in the target group
+	if uid != attr.UID {
+		return false
+	}
+
+	// Check if user is in the target group
+	return gid == targetGID || containsGID(ctx.GIDs, targetGID)
+}
+
+// ============================================================================
+// File Operations
+// ============================================================================
+
 // SetFileAttributes updates file attributes with access control.
 //
 // This implements support for the SETATTR NFS procedure (RFC 1813 section 3.3.2).
@@ -18,7 +234,8 @@ import (
 //
 // Permission Requirements:
 //   - Mode changes: Only owner or root
-//   - UID/GID changes: Only root (or owner for GID if in supplementary groups)
+//   - UID changes: Only root
+//   - GID changes: Only root (or owner if in supplementary groups)
 //   - Size changes: Write permission required
 //   - Time changes: Write permission or owner
 //
@@ -75,25 +292,16 @@ func (r *MemoryRepository) SetFileAttributes(
 	// Step 2: Check permissions and apply attribute updates
 	// ========================================================================
 
-	// Get effective UID/GID for permission checks
-	var uid, gid uint32
-	if ctx != nil && ctx.UID != nil && ctx.GID != nil {
-		uid = *ctx.UID
-		gid = *ctx.GID
-	}
-
 	// ------------------------------------------------------------------------
 	// Mode (permissions) - only owner or root can change
 	// ------------------------------------------------------------------------
 
 	if attrs.SetMode {
 		// Check if user is owner or root
-		if ctx != nil && ctx.AuthFlavor != 0 && ctx.UID != nil {
-			if uid != 0 && uid != fileAttr.UID {
-				return &metadata.ExportError{
-					Code:    metadata.ExportErrAccessDenied,
-					Message: "only owner or root can change permissions",
-				}
+		if !isOwnerOrRoot(fileAttr, ctx) {
+			return &metadata.ExportError{
+				Code:    metadata.ExportErrAccessDenied,
+				Message: "only owner or root can change permissions",
 			}
 		}
 
@@ -108,7 +316,7 @@ func (r *MemoryRepository) SetFileAttributes(
 		fileAttr.Mode = attrs.Mode
 		modified = true
 
-		logger.Debug("SetFileAttributes: mode changed to 0%o", attrs.Mode)
+		logger.Debug("SetFileAttributes: mode changed to 0%o for handle %x", attrs.Mode, handle)
 	}
 
 	// ------------------------------------------------------------------------
@@ -117,19 +325,17 @@ func (r *MemoryRepository) SetFileAttributes(
 
 	if attrs.SetUID {
 		// Only root can change file ownership
-		if ctx != nil && ctx.AuthFlavor != 0 && ctx.UID != nil {
-			if uid != 0 {
-				return &metadata.ExportError{
-					Code:    metadata.ExportErrAccessDenied,
-					Message: "only root can change file ownership",
-				}
+		if ctx == nil || ctx.AuthFlavor == 0 || ctx.UID == nil || *ctx.UID != 0 {
+			return &metadata.ExportError{
+				Code:    metadata.ExportErrAccessDenied,
+				Message: "only root can change file ownership",
 			}
 		}
 
 		fileAttr.UID = attrs.UID
 		modified = true
 
-		logger.Debug("SetFileAttributes: uid changed to %d", attrs.UID)
+		logger.Debug("SetFileAttributes: uid changed to %d for handle %x", attrs.UID, handle)
 	}
 
 	// ------------------------------------------------------------------------
@@ -138,31 +344,17 @@ func (r *MemoryRepository) SetFileAttributes(
 
 	if attrs.SetGID {
 		// Check if user can change group
-		if ctx != nil && ctx.AuthFlavor != 0 && ctx.UID != nil {
-			if uid != 0 { // Root can always change
-				// Owner can change if they're in the target group
-				if uid != fileAttr.UID {
-					return &metadata.ExportError{
-						Code:    metadata.ExportErrAccessDenied,
-						Message: "only root or owner can change group",
-					}
-				}
-
-				// Check if user is in the target group
-				inGroup := gid == attrs.GID || containsGID(ctx.GIDs, attrs.GID)
-				if !inGroup {
-					return &metadata.ExportError{
-						Code:    metadata.ExportErrAccessDenied,
-						Message: "user not in target group",
-					}
-				}
+		if !canChangeGroup(fileAttr, attrs.GID, ctx) {
+			return &metadata.ExportError{
+				Code:    metadata.ExportErrAccessDenied,
+				Message: "only root or owner (if in target group) can change group",
 			}
 		}
 
 		fileAttr.GID = attrs.GID
 		modified = true
 
-		logger.Debug("SetFileAttributes: gid changed to %d", attrs.GID)
+		logger.Debug("SetFileAttributes: gid changed to %d for handle %x", attrs.GID, handle)
 	}
 
 	// ------------------------------------------------------------------------
@@ -179,28 +371,10 @@ func (r *MemoryRepository) SetFileAttributes(
 		}
 
 		// Check write permission
-		if ctx != nil && ctx.AuthFlavor != 0 && ctx.UID != nil {
-			var hasWrite bool
-
-			// Root user bypasses permission checks
-			if uid == 0 {
-				hasWrite = true
-			} else if uid == fileAttr.UID {
-				// Owner permissions
-				hasWrite = (fileAttr.Mode & 0200) != 0 // Owner write bit
-			} else if gid == fileAttr.GID || containsGID(ctx.GIDs, fileAttr.GID) {
-				// Group permissions
-				hasWrite = (fileAttr.Mode & 0020) != 0 // Group write bit
-			} else {
-				// Other permissions
-				hasWrite = (fileAttr.Mode & 0002) != 0 // Other write bit
-			}
-
-			if !hasWrite {
-				return &metadata.ExportError{
-					Code:    metadata.ExportErrAccessDenied,
-					Message: "write permission denied for size change",
-				}
+		if !hasWritePermission(fileAttr, ctx) {
+			return &metadata.ExportError{
+				Code:    metadata.ExportErrAccessDenied,
+				Message: "write permission denied for size change",
 			}
 		}
 
@@ -214,7 +388,7 @@ func (r *MemoryRepository) SetFileAttributes(
 		fileAttr.Size = attrs.Size
 		modified = true
 
-		logger.Debug("SetFileAttributes: size changed from %d to %d", oldSize, attrs.Size)
+		logger.Debug("SetFileAttributes: size changed from %d to %d for handle %x", oldSize, attrs.Size, handle)
 
 		// Update mtime when size changes (POSIX semantics)
 		fileAttr.Mtime = time.Now()
@@ -225,32 +399,18 @@ func (r *MemoryRepository) SetFileAttributes(
 	// ------------------------------------------------------------------------
 
 	if attrs.SetAtime {
-		// Check if user can set atime
-		// Owner can always set, or write permission is required
-		if ctx != nil && ctx.AuthFlavor != 0 && ctx.UID != nil {
-			if uid != fileAttr.UID {
-				// Not owner, check write permission
-				var hasWrite bool
-
-				if gid == fileAttr.GID || containsGID(ctx.GIDs, fileAttr.GID) {
-					hasWrite = (fileAttr.Mode & 0020) != 0 // Group write bit
-				} else {
-					hasWrite = (fileAttr.Mode & 0002) != 0 // Other write bit
-				}
-
-				if !hasWrite {
-					return &metadata.ExportError{
-						Code:    metadata.ExportErrAccessDenied,
-						Message: "insufficient permission to set atime",
-					}
-				}
+		// Check if user can set atime (owner or write permission)
+		if !isOwnerOrRoot(fileAttr, ctx) && !hasWritePermission(fileAttr, ctx) {
+			return &metadata.ExportError{
+				Code:    metadata.ExportErrAccessDenied,
+				Message: "insufficient permission to set atime",
 			}
 		}
 
 		fileAttr.Atime = attrs.Atime
 		modified = true
 
-		logger.Debug("SetFileAttributes: atime changed to %v", attrs.Atime)
+		logger.Debug("SetFileAttributes: atime changed to %v for handle %x", attrs.Atime, handle)
 	}
 
 	// ------------------------------------------------------------------------
@@ -258,32 +418,18 @@ func (r *MemoryRepository) SetFileAttributes(
 	// ------------------------------------------------------------------------
 
 	if attrs.SetMtime {
-		// Check if user can set mtime
-		// Owner can always set, or write permission is required
-		if ctx != nil && ctx.AuthFlavor != 0 && ctx.UID != nil {
-			if uid != fileAttr.UID {
-				// Not owner, check write permission
-				var hasWrite bool
-
-				if gid == fileAttr.GID || containsGID(ctx.GIDs, fileAttr.GID) {
-					hasWrite = (fileAttr.Mode & 0020) != 0 // Group write bit
-				} else {
-					hasWrite = (fileAttr.Mode & 0002) != 0 // Other write bit
-				}
-
-				if !hasWrite {
-					return &metadata.ExportError{
-						Code:    metadata.ExportErrAccessDenied,
-						Message: "insufficient permission to set mtime",
-					}
-				}
+		// Check if user can set mtime (owner or write permission)
+		if !isOwnerOrRoot(fileAttr, ctx) && !hasWritePermission(fileAttr, ctx) {
+			return &metadata.ExportError{
+				Code:    metadata.ExportErrAccessDenied,
+				Message: "insufficient permission to set mtime",
 			}
 		}
 
 		fileAttr.Mtime = attrs.Mtime
 		modified = true
 
-		logger.Debug("SetFileAttributes: mtime changed to %v", attrs.Mtime)
+		logger.Debug("SetFileAttributes: mtime changed to %v for handle %x", attrs.Mtime, handle)
 	}
 
 	// ========================================================================
@@ -294,7 +440,7 @@ func (r *MemoryRepository) SetFileAttributes(
 
 	if modified {
 		fileAttr.Ctime = time.Now()
-		logger.Debug("SetFileAttributes: ctime updated to %v", fileAttr.Ctime)
+		logger.Debug("SetFileAttributes: ctime updated to %v for handle %x", fileAttr.Ctime, handle)
 	}
 
 	// ========================================================================
@@ -330,14 +476,18 @@ func (r *MemoryRepository) SetFileAttributes(
 //   - fileHandle: File to link to
 //   - ctx: Authentication context for access control
 //
-// Returns:
-//   - error: Returns error if:
+// Returns error if:
 //   - Source file not found
 //   - Target directory not found or not a directory
 //   - Access denied (no write permission on directory)
 //   - Name already exists in directory
 //   - Cross-filesystem link attempted (implementation-specific)
-func (r *MemoryRepository) CreateLink(dirHandle metadata.FileHandle, name string, fileHandle metadata.FileHandle, ctx *metadata.AuthContext) error {
+func (r *MemoryRepository) CreateLink(
+	dirHandle metadata.FileHandle,
+	name string,
+	fileHandle metadata.FileHandle,
+	ctx *metadata.AuthContext,
+) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -375,31 +525,13 @@ func (r *MemoryRepository) CreateLink(dirHandle metadata.FileHandle, name string
 	}
 
 	// ========================================================================
-	// Step 3: Check write access to directory (if auth context provided)
+	// Step 3: Check write access to directory
 	// ========================================================================
 
-	if ctx != nil && ctx.AuthFlavor != 0 && ctx.UID != nil {
-		uid := *ctx.UID
-		gid := *ctx.GID
-
-		var hasWrite bool
-
-		// Owner permissions
-		if uid == dirAttr.UID {
-			hasWrite = (dirAttr.Mode & 0200) != 0 // Owner write bit
-		} else if gid == dirAttr.GID || containsGID(ctx.GIDs, dirAttr.GID) {
-			// Group permissions
-			hasWrite = (dirAttr.Mode & 0020) != 0 // Group write bit
-		} else {
-			// Other permissions
-			hasWrite = (dirAttr.Mode & 0002) != 0 // Other write bit
-		}
-
-		if !hasWrite {
-			return &metadata.ExportError{
-				Code:    metadata.ExportErrAccessDenied,
-				Message: "write permission denied on target directory",
-			}
+	if !hasWritePermission(dirAttr, ctx) {
+		return &metadata.ExportError{
+			Code:    metadata.ExportErrAccessDenied,
+			Message: "write permission denied on target directory",
 		}
 	}
 
@@ -440,6 +572,8 @@ func (r *MemoryRepository) CreateLink(dirHandle metadata.FileHandle, name string
 	fileAttr.Ctime = now
 	r.files[fileKey] = fileAttr
 
+	logger.Debug("CreateLink: created link '%s' in directory %x to file %x", name, dirHandle, fileHandle)
+
 	// Note: In a real implementation with link counting, you would also
 	// increment fileAttr.Nlink here. However, in this handle-based system,
 	// the link count is computed dynamically when needed.
@@ -479,7 +613,12 @@ func (r *MemoryRepository) CreateLink(dirHandle metadata.FileHandle, name string
 //   - Name already exists
 //   - Parent is not a directory
 //   - I/O error
-func (r *MemoryRepository) CreateDirectory(parentHandle metadata.FileHandle, name string, attr *metadata.FileAttr, ctx *metadata.AuthContext) (metadata.FileHandle, error) {
+func (r *MemoryRepository) CreateDirectory(
+	parentHandle metadata.FileHandle,
+	name string,
+	attr *metadata.FileAttr,
+	ctx *metadata.AuthContext,
+) (metadata.FileHandle, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -505,31 +644,13 @@ func (r *MemoryRepository) CreateDirectory(parentHandle metadata.FileHandle, nam
 	}
 
 	// ========================================================================
-	// Step 2: Check write access to parent directory (if auth context provided)
+	// Step 2: Check write access to parent directory
 	// ========================================================================
 
-	if ctx != nil && ctx.AuthFlavor != 0 && ctx.UID != nil {
-		uid := *ctx.UID
-		gid := *ctx.GID
-
-		var hasWrite bool
-
-		// Owner permissions
-		if uid == parentAttr.UID {
-			hasWrite = (parentAttr.Mode & 0200) != 0 // Owner write bit
-		} else if gid == parentAttr.GID || containsGID(ctx.GIDs, parentAttr.GID) {
-			// Group permissions
-			hasWrite = (parentAttr.Mode & 0020) != 0 // Group write bit
-		} else {
-			// Other permissions
-			hasWrite = (parentAttr.Mode & 0002) != 0 // Other write bit
-		}
-
-		if !hasWrite {
-			return nil, &metadata.ExportError{
-				Code:    metadata.ExportErrAccessDenied,
-				Message: "write permission denied on parent directory",
-			}
+	if !hasWritePermission(parentAttr, ctx) {
+		return nil, &metadata.ExportError{
+			Code:    metadata.ExportErrAccessDenied,
+			Message: "write permission denied on parent directory",
 		}
 	}
 
@@ -603,6 +724,8 @@ func (r *MemoryRepository) CreateDirectory(parentHandle metadata.FileHandle, nam
 	parentAttr.Mtime = now
 	parentAttr.Ctime = now
 	r.files[parentKey] = parentAttr
+
+	logger.Debug("CreateDirectory: created directory '%s' in parent %x with handle %x", name, parentHandle, dirHandle)
 
 	return dirHandle, nil
 }
@@ -683,31 +806,13 @@ func (r *MemoryRepository) CreateSpecialFile(
 	}
 
 	// ========================================================================
-	// Step 2: Check write access to parent directory (if auth context provided)
+	// Step 2: Check write access to parent directory
 	// ========================================================================
 
-	if ctx != nil && ctx.AuthFlavor != 0 && ctx.UID != nil {
-		uid := *ctx.UID
-		gid := *ctx.GID
-
-		var hasWrite bool
-
-		// Owner permissions
-		if uid == parentAttr.UID {
-			hasWrite = (parentAttr.Mode & 0200) != 0 // Owner write bit
-		} else if gid == parentAttr.GID || containsGID(ctx.GIDs, parentAttr.GID) {
-			// Group permissions
-			hasWrite = (parentAttr.Mode & 0020) != 0 // Group write bit
-		} else {
-			// Other permissions
-			hasWrite = (parentAttr.Mode & 0002) != 0 // Other write bit
-		}
-
-		if !hasWrite {
-			return nil, &metadata.ExportError{
-				Code:    metadata.ExportErrAccessDenied,
-				Message: "write permission denied on parent directory",
-			}
+	if !hasWritePermission(parentAttr, ctx) {
+		return nil, &metadata.ExportError{
+			Code:    metadata.ExportErrAccessDenied,
+			Message: "write permission denied on parent directory",
 		}
 	}
 
@@ -720,7 +825,7 @@ func (r *MemoryRepository) CreateSpecialFile(
 
 	if attr.Type == metadata.FileTypeChar || attr.Type == metadata.FileTypeBlock {
 		// Check if user has sufficient privileges (root or CAP_MKNOD)
-		if ctx != nil && ctx.UID != nil && *ctx.UID != 0 {
+		if ctx == nil || ctx.UID == nil || *ctx.UID != 0 {
 			// Non-root user attempting to create a device file
 			return nil, &metadata.ExportError{
 				Code:    metadata.ExportErrAccessDenied,
@@ -819,6 +924,9 @@ func (r *MemoryRepository) CreateSpecialFile(
 	parentAttr.Ctime = now
 	r.files[parentKey] = parentAttr
 
+	logger.Debug("CreateSpecialFile: created special file '%s' (type=%d) in parent %x with handle %x",
+		name, attr.Type, parentHandle, fileHandle)
+
 	return fileHandle, nil
 }
 
@@ -867,7 +975,12 @@ func (r *MemoryRepository) CreateSpecialFile(
 //   - []DirEntry: List of entries starting from cookie
 //   - bool: EOF flag (true if all entries returned)
 //   - error: Access denied or I/O errors
-func (r *MemoryRepository) ReadDir(dirHandle metadata.FileHandle, cookie uint64, count uint32, ctx *metadata.AuthContext) ([]metadata.DirEntry, bool, error) {
+func (r *MemoryRepository) ReadDir(
+	dirHandle metadata.FileHandle,
+	cookie uint64,
+	count uint32,
+	ctx *metadata.AuthContext,
+) ([]metadata.DirEntry, bool, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -893,37 +1006,15 @@ func (r *MemoryRepository) ReadDir(dirHandle metadata.FileHandle, cookie uint64,
 	}
 
 	// ========================================================================
-	// Step 2: Check read/execute permission on directory (if auth provided)
+	// Step 2: Check read/execute permission on directory
 	// ========================================================================
 	// Execute (search) permission is required to read directory contents
 	// Read permission is required to list the directory
 
-	if ctx != nil && ctx.AuthFlavor != 0 && ctx.UID != nil {
-		uid := *ctx.UID
-		gid := *ctx.GID
-
-		var hasRead, hasExecute bool
-
-		// Owner permissions
-		if uid == dirAttr.UID {
-			hasRead = (dirAttr.Mode & 0400) != 0    // Owner read bit
-			hasExecute = (dirAttr.Mode & 0100) != 0 // Owner execute bit
-		} else if gid == dirAttr.GID || containsGID(ctx.GIDs, dirAttr.GID) {
-			// Group permissions
-			hasRead = (dirAttr.Mode & 0040) != 0    // Group read bit
-			hasExecute = (dirAttr.Mode & 0010) != 0 // Group execute bit
-		} else {
-			// Other permissions
-			hasRead = (dirAttr.Mode & 0004) != 0    // Other read bit
-			hasExecute = (dirAttr.Mode & 0001) != 0 // Other execute bit
-		}
-
-		// Need both read and execute to list directory
-		if !hasRead || !hasExecute {
-			return nil, false, &metadata.ExportError{
-				Code:    metadata.ExportErrAccessDenied,
-				Message: "read/execute permission denied on directory",
-			}
+	if !hasReadPermission(dirAttr, ctx) || !hasExecutePermission(dirAttr, ctx) {
+		return nil, false, &metadata.ExportError{
+			Code:    metadata.ExportErrAccessDenied,
+			Message: "read/execute permission denied on directory",
 		}
 	}
 
@@ -1032,6 +1123,8 @@ func (r *MemoryRepository) ReadDir(dirHandle metadata.FileHandle, cookie uint64,
 			if estimatedSize+entrySize > count {
 				// We've reached the count limit, but haven't seen all entries
 				// Return what we have so far (EOF = false)
+				logger.Debug("ReadDir: pagination limit reached at entry '%s' (cookie=%d, estimated=%d, count=%d)",
+					name, currentCookie, estimatedSize+entrySize, count)
 				return entries, false, nil
 			}
 
@@ -1055,6 +1148,8 @@ func (r *MemoryRepository) ReadDir(dirHandle metadata.FileHandle, cookie uint64,
 	// ========================================================================
 	// Step 4: Return results with EOF flag
 	// ========================================================================
+
+	logger.Debug("ReadDir: completed listing directory %x (entries=%d, eof=true)", dirHandle, len(entries))
 
 	// We've returned all entries - EOF = true
 	return entries, true, nil
@@ -1093,7 +1188,11 @@ func (r *MemoryRepository) ReadDir(dirHandle metadata.FileHandle, cookie uint64,
 //   - File is a directory (use RemoveDirectory instead)
 //   - Parent is not a directory
 //   - I/O error
-func (r *MemoryRepository) RemoveFile(parentHandle metadata.FileHandle, filename string, ctx *metadata.AuthContext) (*metadata.FileAttr, error) {
+func (r *MemoryRepository) RemoveFile(
+	parentHandle metadata.FileHandle,
+	filename string,
+	ctx *metadata.AuthContext,
+) (*metadata.FileAttr, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -1119,31 +1218,13 @@ func (r *MemoryRepository) RemoveFile(parentHandle metadata.FileHandle, filename
 	}
 
 	// ========================================================================
-	// Step 2: Check write permission on parent directory (if auth context provided)
+	// Step 2: Check write permission on parent directory
 	// ========================================================================
 
-	if ctx != nil && ctx.AuthFlavor != 0 && ctx.UID != nil {
-		uid := *ctx.UID
-		gid := *ctx.GID
-
-		var hasWrite bool
-
-		// Owner permissions
-		if uid == parentAttr.UID {
-			hasWrite = (parentAttr.Mode & 0200) != 0 // Owner write bit
-		} else if gid == parentAttr.GID || containsGID(ctx.GIDs, parentAttr.GID) {
-			// Group permissions
-			hasWrite = (parentAttr.Mode & 0020) != 0 // Group write bit
-		} else {
-			// Other permissions
-			hasWrite = (parentAttr.Mode & 0002) != 0 // Other write bit
-		}
-
-		if !hasWrite {
-			return nil, &metadata.ExportError{
-				Code:    metadata.ExportErrAccessDenied,
-				Message: "write permission denied on parent directory",
-			}
+	if !hasWritePermission(parentAttr, ctx) {
+		return nil, &metadata.ExportError{
+			Code:    metadata.ExportErrAccessDenied,
+			Message: "write permission denied on parent directory",
 		}
 	}
 
@@ -1211,6 +1292,8 @@ func (r *MemoryRepository) RemoveFile(parentHandle metadata.FileHandle, filename
 	parentAttr.Ctime = now
 	r.files[parentKey] = parentAttr
 
+	logger.Debug("RemoveFile: removed file '%s' from parent %x", filename, parentHandle)
+
 	// Return a copy of the file attributes for the response
 	// (we make a copy since we just deleted the original)
 	removedFileAttr := *fileAttr
@@ -1246,15 +1329,18 @@ func (r *MemoryRepository) RemoveFile(parentHandle metadata.FileHandle, filename
 //   - name: Name of the directory to remove
 //   - ctx: Authentication context for access control
 //
-// Returns:
-//   - error: Returns error if:
+// Returns error if:
 //   - Access denied (no write permission on parent)
 //   - Directory not found
 //   - Target is not a directory
 //   - Directory is not empty
 //   - Parent is not a directory
 //   - I/O error
-func (r *MemoryRepository) RemoveDirectory(parentHandle metadata.FileHandle, name string, ctx *metadata.AuthContext) error {
+func (r *MemoryRepository) RemoveDirectory(
+	parentHandle metadata.FileHandle,
+	name string,
+	ctx *metadata.AuthContext,
+) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -1333,32 +1419,13 @@ func (r *MemoryRepository) RemoveDirectory(parentHandle metadata.FileHandle, nam
 	}
 
 	// ========================================================================
-	// Step 5: Check write permission on parent directory (if auth context provided)
+	// Step 5: Check write permission on parent directory
 	// ========================================================================
 
-	if ctx != nil && ctx.AuthFlavor != 0 && ctx.UID != nil && ctx.GID != nil {
-		// Check if user has write permission on the parent directory
-		uid := *ctx.UID
-		gid := *ctx.GID
-
-		var hasWrite bool
-
-		// Owner permissions
-		if uid == parentAttr.UID {
-			hasWrite = (parentAttr.Mode & 0200) != 0 // Owner write bit
-		} else if gid == parentAttr.GID || containsGID(ctx.GIDs, parentAttr.GID) {
-			// Group permissions
-			hasWrite = (parentAttr.Mode & 0020) != 0 // Group write bit
-		} else {
-			// Other permissions
-			hasWrite = (parentAttr.Mode & 0002) != 0 // Other write bit
-		}
-
-		if !hasWrite {
-			return &metadata.ExportError{
-				Code:    metadata.ExportErrAccessDenied,
-				Message: "write permission denied on parent directory",
-			}
+	if !hasWritePermission(parentAttr, ctx) {
+		return &metadata.ExportError{
+			Code:    metadata.ExportErrAccessDenied,
+			Message: "write permission denied on parent directory",
 		}
 	}
 
@@ -1391,6 +1458,8 @@ func (r *MemoryRepository) RemoveDirectory(parentHandle metadata.FileHandle, nam
 	parentAttr.Mtime = now
 	parentAttr.Ctime = now
 	r.files[parentKey] = parentAttr
+
+	logger.Debug("RemoveDirectory: removed directory '%s' from parent %x", name, parentHandle)
 
 	return nil
 }
@@ -1426,7 +1495,10 @@ func (r *MemoryRepository) RemoveDirectory(parentHandle metadata.FileHandle, nam
 //   - Access denied (no read permission)
 //   - Target path is missing or empty
 //   - I/O error
-func (r *MemoryRepository) ReadSymlink(handle metadata.FileHandle, ctx *metadata.AuthContext) (string, *metadata.FileAttr, error) {
+func (r *MemoryRepository) ReadSymlink(
+	handle metadata.FileHandle,
+	ctx *metadata.AuthContext,
+) (string, *metadata.FileAttr, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
@@ -1455,31 +1527,13 @@ func (r *MemoryRepository) ReadSymlink(handle metadata.FileHandle, ctx *metadata
 	}
 
 	// ========================================================================
-	// Step 3: Check read permission (if auth context provided)
+	// Step 3: Check read permission
 	// ========================================================================
 
-	if ctx != nil && ctx.AuthFlavor != 0 && ctx.UID != nil {
-		uid := *ctx.UID
-		gid := *ctx.GID
-
-		var hasRead bool
-
-		// Owner permissions
-		if uid == attr.UID {
-			hasRead = (attr.Mode & 0400) != 0 // Owner read bit
-		} else if gid == attr.GID || containsGID(ctx.GIDs, attr.GID) {
-			// Group permissions
-			hasRead = (attr.Mode & 0040) != 0 // Group read bit
-		} else {
-			// Other permissions
-			hasRead = (attr.Mode & 0004) != 0 // Other read bit
-		}
-
-		if !hasRead {
-			return "", nil, &metadata.ExportError{
-				Code:    metadata.ExportErrAccessDenied,
-				Message: "read permission denied on symbolic link",
-			}
+	if !hasReadPermission(attr, ctx) {
+		return "", nil, &metadata.ExportError{
+			Code:    metadata.ExportErrAccessDenied,
+			Message: "read permission denied on symbolic link",
 		}
 	}
 
@@ -1493,6 +1547,8 @@ func (r *MemoryRepository) ReadSymlink(handle metadata.FileHandle, ctx *metadata
 			Message: "symbolic link has no target",
 		}
 	}
+
+	logger.Debug("ReadSymlink: read symlink %x -> '%s'", handle, attr.SymlinkTarget)
 
 	return attr.SymlinkTarget, attr, nil
 }
@@ -1605,25 +1661,10 @@ func (r *MemoryRepository) RenameFile(
 	// ========================================================================
 	// Need write permission to remove the entry from source directory
 
-	if ctx != nil && ctx.AuthFlavor != 0 && ctx.UID != nil {
-		uid := *ctx.UID
-		gid := *ctx.GID
-
-		var hasWrite bool
-
-		if uid == fromDirAttr.UID {
-			hasWrite = (fromDirAttr.Mode & 0200) != 0 // Owner write bit
-		} else if gid == fromDirAttr.GID || containsGID(ctx.GIDs, fromDirAttr.GID) {
-			hasWrite = (fromDirAttr.Mode & 0020) != 0 // Group write bit
-		} else {
-			hasWrite = (fromDirAttr.Mode & 0002) != 0 // Other write bit
-		}
-
-		if !hasWrite {
-			return &metadata.ExportError{
-				Code:    metadata.ExportErrAccessDenied,
-				Message: "write permission denied on source directory",
-			}
+	if !hasWritePermission(fromDirAttr, ctx) {
+		return &metadata.ExportError{
+			Code:    metadata.ExportErrAccessDenied,
+			Message: "write permission denied on source directory",
 		}
 	}
 
@@ -1632,25 +1673,10 @@ func (r *MemoryRepository) RenameFile(
 	// ========================================================================
 	// Need write permission to add the entry to destination directory
 
-	if ctx != nil && ctx.AuthFlavor != 0 && ctx.UID != nil {
-		uid := *ctx.UID
-		gid := *ctx.GID
-
-		var hasWrite bool
-
-		if uid == toDirAttr.UID {
-			hasWrite = (toDirAttr.Mode & 0200) != 0 // Owner write bit
-		} else if gid == toDirAttr.GID || containsGID(ctx.GIDs, toDirAttr.GID) {
-			hasWrite = (toDirAttr.Mode & 0020) != 0 // Group write bit
-		} else {
-			hasWrite = (toDirAttr.Mode & 0002) != 0 // Other write bit
-		}
-
-		if !hasWrite {
-			return &metadata.ExportError{
-				Code:    metadata.ExportErrAccessDenied,
-				Message: "write permission denied on destination directory",
-			}
+	if !hasWritePermission(toDirAttr, ctx) {
+		return &metadata.ExportError{
+			Code:    metadata.ExportErrAccessDenied,
+			Message: "write permission denied on destination directory",
 		}
 	}
 
@@ -1689,6 +1715,7 @@ func (r *MemoryRepository) RenameFile(
 
 	if fromDirKey == toDirKey && fromName == toName {
 		// Rename to same name in same directory - this is a no-op success
+		logger.Debug("RenameFile: no-op rename (same location) for '%s'", fromName)
 		return nil
 	}
 
@@ -1749,6 +1776,8 @@ func (r *MemoryRepository) RenameFile(
 		// Step 7b: Remove destination (atomic replacement)
 		// ====================================================================
 
+		logger.Debug("RenameFile: replacing existing destination '%s'", toName)
+
 		// Remove destination from parent's children map
 		delete(r.children[toDirKey], toName)
 
@@ -1803,6 +1832,9 @@ func (r *MemoryRepository) RenameFile(
 		toDirAttr.Ctime = now
 		r.files[toDirKey] = toDirAttr
 	}
+
+	logger.Debug("RenameFile: renamed '%s' -> '%s' (from dir %x to dir %x)",
+		fromName, toName, fromDirHandle, toDirHandle)
 
 	return nil
 }
@@ -1873,31 +1905,13 @@ func (r *MemoryRepository) CreateSymlink(
 	}
 
 	// ========================================================================
-	// Step 2: Check write access to parent directory (if auth context provided)
+	// Step 2: Check write access to parent directory
 	// ========================================================================
 
-	if ctx != nil && ctx.AuthFlavor != 0 && ctx.UID != nil {
-		uid := *ctx.UID
-		gid := *ctx.GID
-
-		var hasWrite bool
-
-		// Owner permissions
-		if uid == parentAttr.UID {
-			hasWrite = (parentAttr.Mode & 0200) != 0 // Owner write bit
-		} else if gid == parentAttr.GID || containsGID(ctx.GIDs, parentAttr.GID) {
-			// Group permissions
-			hasWrite = (parentAttr.Mode & 0020) != 0 // Group write bit
-		} else {
-			// Other permissions
-			hasWrite = (parentAttr.Mode & 0002) != 0 // Other write bit
-		}
-
-		if !hasWrite {
-			return nil, &metadata.ExportError{
-				Code:    metadata.ExportErrAccessDenied,
-				Message: "write permission denied on parent directory",
-			}
+	if !hasWritePermission(parentAttr, ctx) {
+		return nil, &metadata.ExportError{
+			Code:    metadata.ExportErrAccessDenied,
+			Message: "write permission denied on parent directory",
 		}
 	}
 
@@ -1971,82 +1985,73 @@ func (r *MemoryRepository) CreateSymlink(
 	parentAttr.Ctime = now
 	r.files[parentKey] = parentAttr
 
+	logger.Debug("CreateSymlink: created symlink '%s' -> '%s' in parent %x with handle %x",
+		name, target, parentHandle, symlinkHandle)
+
 	return symlinkHandle, nil
 }
 
-// WriteFile updates file metadata for a write operation (typically called before the actual data write).
+// WriteFile writes data to a file with proper permission checking and metadata updates.
 //
-// This implements the metadata management for the WRITE NFS procedure
-// (RFC 1813 section 3.3.7). It handles permission checking, size updates,
-// and timestamp management, but does NOT perform the actual data write.
+// This implements the business logic for the WRITE NFS procedure (RFC 1813 section 3.3.7).
+// It handles the complete write workflow including permission validation, size management,
+// and timestamp updates.
 //
-// Design:
-// The caller (protocol handler) is responsible for:
-//  1. Calling this method to capture WCC data, check permissions, and update size and timestamps
-//  2. Writing data via the content repository
+// Write Operation Flow:
+//  1. Verify file exists and is a regular file
+//  2. Check write permission on the file
+//  3. Capture pre-operation attributes (WCC data)
+//  4. Delegate actual data write to content repository
+//  5. Update file size if writing beyond EOF
+//  6. Update file timestamps (mtime always, ctime if size changed)
+//  7. Return updated attributes and WCC data
 //
-// WriteFile handles both WCC capture and metadata updates (size and timestamps) in a single call.
-// This separation ensures that:
-//   - Metadata repository doesn't depend on content repository
-//   - Each repository handles only its own domain
-//   - Caller controls the operation flow and error handling
-//
-// Permission Check Flow:
+// Permission Check:
 // Write permission requires one of:
-//   - Root user (UID 0): Always granted (bypasses permission checks)
 //   - Owner with write bit (mode & 0200)
 //   - Group member with write bit (mode & 0020)
 //   - Other with write bit (mode & 0002)
-//   - AUTH_NULL: Requires world-writable (mode & 0002)
 //
-// Size Extension:
-// When newSize > current size:
-//   - File is extended to newSize
+// File Size Management:
+// When offset + len(data) > current size:
+//   - File is extended to new size
 //   - Bytes between old EOF and write offset are implicitly zero (sparse)
-//   - Change time (ctime) is updated in addition to mtime
+//   - This is standard Unix behavior for positional writes
 //
 // Timestamp Updates:
 // Per POSIX and NFS semantics:
-//   - mtime (modification time): Always updated on write
-//   - ctime (change time): Updated when size changes
+//   - mtime (modification time): Always updated on successful write
+//   - ctime (change time): Updated when metadata changes (e.g., size extension)
 //   - atime (access time): Not updated on write
 //
 // Weak Cache Consistency (WCC):
-// The method returns pre-operation attributes (size, mtime, ctime) before any
-// modifications. This allows clients to detect concurrent changes by comparing
-// with their cached values.
+// The returned WccAttr contains size and timestamps before the operation.
+// Clients use this to detect concurrent modifications by comparing with
+// their cached attributes.
 //
 // Parameters:
-//   - handle: File handle to update
-//   - newSize: File size after write (offset + data length)
+//   - handle: File handle to write to
+//   - newSize: New file size after write operation
 //   - ctx: Authentication context for permission checking
 //
 // Returns:
-//   - *FileAttr: Updated file attributes after the operation
-//   - uint64: Pre-operation file size (for WCC data)
-//   - time.Time: Pre-operation modification time (mtime, for WCC data)
-//   - time.Time: Pre-operation change time (ctime, for WCC data)
+//   - *FileAttr: Updated file attributes after the write
+//   - uint64: Pre-operation size (for WCC)
+//   - time.Time: Pre-operation mtime (for WCC)
+//   - time.Time: Pre-operation ctime (for WCC)
 //   - error: Returns ExportError with specific code if operation fails:
 //   - ExportErrNotFound: File doesn't exist
 //   - ExportErrAccessDenied: No write permission
-//   - ExportErrServerFault: Not a regular file
+//   - ExportErrServerFault: Not a regular file or other validation errors
 //
-// Example usage in protocol handler:
+// Example:
 //
-//	// Get WCC data, check permissions, and update metadata
-//	attr, preSize, preMtime, preCtime, err := repo.WriteFile(handle, offset+dataLen, ctx)
+//	newAttr, preSize, preMtime, preCtime, err := repo.WriteFile(handle, 1024, ctx)
 //	if err != nil {
-//	    return errorResponse(err)
+//	    // Handle error (permission denied, file not found, etc.)
 //	}
-//
-//	// Write actual data to content repository
-//	err = contentRepo.WriteAt(attr.ContentID, data, offset)
-//	if err != nil {
-//	    return errorResponse(err)
-//	}
-//
-//	// Return success with post-op attributes and WCC data
-//	return successResponse(attr, preSize, preMtime, preCtime)
+//	// File size now reflects write
+//	// newAttr.Mtime reflects write time
 func (r *MemoryRepository) WriteFile(
 	handle metadata.FileHandle,
 	newSize uint64,
@@ -2088,40 +2093,13 @@ func (r *MemoryRepository) WriteFile(
 	preCtime := attr.Ctime
 
 	// ========================================================================
-	// Step 4: Check write permission (if auth context provided)
+	// Step 4: Check write permission
 	// ========================================================================
-	if ctx != nil && ctx.AuthFlavor != 0 && ctx.UID != nil && ctx.GID != nil {
-	if ctx != nil && ctx.AuthFlavor != 0 && ctx.UID != nil {
-		var gid int
-		if ctx.GID != nil {
-			gid = *ctx.GID
-		}
 
-		var hasWrite bool
-
-		// Owner permissions
-		if uid == attr.UID {
-			hasWrite = (attr.Mode & 0200) != 0
-		} else if (ctx.GID != nil && gid == attr.GID) || containsGID(ctx.GIDs, attr.GID) {
-		} else if gid == attr.GID || containsGID(ctx.GIDs, attr.GID) {
-			hasWrite = (attr.Mode & 0020) != 0
-		} else {
-			hasWrite = (attr.Mode & 0002) != 0
-		}
-
-		if !hasWrite {
-			return nil, preSize, preMtime, preCtime, &metadata.ExportError{
-				Code:    metadata.ExportErrAccessDenied,
-				Message: "write permission denied",
-			}
-		}
-	} else if ctx != nil && ctx.AuthFlavor == 0 {
-		// AUTH_NULL: only grant write if world-writable
-		if attr.Mode&0002 == 0 {
-			return nil, preSize, preMtime, preCtime, &metadata.ExportError{
-				Code:    metadata.ExportErrAccessDenied,
-				Message: "write permission denied (AUTH_NULL requires world-writable)",
-			}
+	if !hasWritePermission(attr, ctx) {
+		return nil, preSize, preMtime, preCtime, &metadata.ExportError{
+			Code:    metadata.ExportErrAccessDenied,
+			Message: "write permission denied",
 		}
 	}
 
@@ -2130,7 +2108,13 @@ func (r *MemoryRepository) WriteFile(
 	// ========================================================================
 
 	if attr.ContentID == "" {
-		attr.ContentID = content.ContentID(fmt.Sprintf("file-%s", key[:16]))
+		var keyPart []byte
+		if len(key) >= 16 {
+			keyPart = key[:16]
+		} else {
+			keyPart = key
+		}
+		attr.ContentID = content.ContentID(fmt.Sprintf("file-%x", keyPart))
 	}
 
 	// ========================================================================
@@ -2159,6 +2143,9 @@ func (r *MemoryRepository) WriteFile(
 	// ========================================================================
 
 	r.files[key] = attr
+
+	logger.Debug("WriteFile: updated file %x (oldSize=%d, newSize=%d, sizeChanged=%v)",
+		handle, preSize, attr.Size, sizeChanged)
 
 	// Return a copy of the attributes
 	attrCopy := *attr

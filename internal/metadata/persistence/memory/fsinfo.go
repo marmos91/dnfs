@@ -43,6 +43,31 @@ func (r *MemoryRepository) GetServerConfig() (metadata.ServerConfig, error) {
 	return r.serverConfig, nil
 }
 
+// GetMaxWriteSize returns the maximum write size for validation.
+//
+// This returns a value that matches or exceeds the wtmax advertised in FSINFO.
+// The validation limit can be larger than wtmax to provide tolerance for
+// non-compliant clients while still preventing abuse.
+//
+// Current implementation:
+//   - wtmax (advertised to clients): 64KB
+//   - validation limit (enforced): 1MB
+//
+// This allows clients that respect FSINFO to use the optimal 64KB size,
+// while preventing malicious clients from sending excessively large writes.
+//
+// Returns:
+//   - uint32: Maximum write size (1MB = 1048576 bytes)
+func (r *MemoryRepository) GetMaxWriteSize() uint32 {
+	// Return 1MB as a reasonable upper bound for write validation.
+	// This is 16x larger than the advertised wtmax (64KB), providing
+	// significant tolerance while still preventing DoS attacks.
+	//
+	// Note: Most well-behaved NFS clients will limit writes to wtmax (64KB)
+	// based on the FSINFO response, so they will never hit this limit.
+	return 1024 * 1024 // 1MB
+}
+
 // GetFSInfo returns the static filesystem information and capabilities.
 //
 // This implements support for the FSINFO NFS procedure (RFC 1813 section 3.3.19).

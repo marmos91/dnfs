@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"time"
 
 	"github.com/marmos91/dittofs/internal/content"
 	"github.com/marmos91/dittofs/internal/logger"
@@ -34,6 +35,16 @@ const (
 	// Safest option but slowest performance.
 	FileSyncWrite = 2
 )
+
+// ============================================================================
+// Server Instance Tracking
+// ============================================================================
+
+// serverBootTime stores the time when the NFS server started.
+// This is used as the write verifier to help clients detect server restarts.
+// When a server restarts, any unstable writes are lost, so clients must
+// re-send them. The verifier changing indicates a restart occurred.
+var serverBootTime = uint64(time.Now().Unix())
 
 // ============================================================================
 // Request and Response Structures
@@ -144,8 +155,8 @@ type WriteContext struct {
 //  1. Validate request parameters (handle, offset, count, data)
 //  2. Extract client IP and authentication credentials from context
 //  3. Verify file exists and is a regular file (via repository)
-//  4. Check write permissions and update metadata (via repository)
-//  5. Capture pre-operation attributes for WCC
+//  4. Calculate new size (safe after validation)
+//  5. Check write permissions and update metadata (via repository)
 //  6. Write data to content repository
 //  7. Return updated attributes and commit status
 //
@@ -200,7 +211,7 @@ type WriteContext struct {
 //
 // Protocol-level errors return appropriate NFS status codes.
 // Repository/Content errors are mapped to NFS status codes:
-//   - File not found → NFS3ErrNoEnt
+//   - File not found → types.NFS3ErrNoEnt
 //   - Not a regular file → NFS3ErrIsDir
 //   - Permission denied → NFS3ErrAcces
 //   - No space left → NFS3ErrNoSpc
@@ -270,7 +281,7 @@ func (h *DefaultNFSHandler) Write(
 	ctx *WriteContext,
 ) (*WriteResponse, error) {
 	// Extract client IP for logging
-	clientIP := extractClientIP(ctx.ClientAddr)
+	clientIP := xdr.ExtractClientIP(ctx.ClientAddr)
 
 	logger.Info("WRITE: handle=%x offset=%d count=%d stable=%d client=%s auth=%d",
 		req.Handle, req.Offset, req.Count, req.Stable, clientIP, ctx.AuthFlavor)
@@ -279,7 +290,8 @@ func (h *DefaultNFSHandler) Write(
 	// Step 1: Validate request parameters
 	// ========================================================================
 
-	if err := validateWriteRequest(req); err != nil {
+	maxWriteSize := metadataRepo.GetMaxWriteSize()
+	if err := validateWriteRequest(req, maxWriteSize); err != nil {
 		logger.Warn("WRITE validation failed: handle=%x client=%s error=%v",
 			req.Handle, clientIP, err)
 		return &WriteResponse{Status: err.nfsStatus}, nil
@@ -292,26 +304,66 @@ func (h *DefaultNFSHandler) Write(
 	fileHandle := metadata.FileHandle(req.Handle)
 	attr, err := metadataRepo.GetFile(fileHandle)
 	if err != nil {
-		logger.Warn("File not found: %v", err)
+		logger.Warn("WRITE failed: file not found: handle=%x client=%s error=%v",
+			req.Handle, clientIP, err)
 		return &WriteResponse{Status: types.NFS3ErrNoEnt}, nil
 	}
 
 	// Verify it's a regular file (not a directory or special file)
 	if attr.Type != metadata.FileTypeRegular {
-		logger.Warn("Handle is not a regular file")
-		return &WriteResponse{Status: types.NFS3ErrIsDir}, nil
+		logger.Warn("WRITE failed: not a regular file: handle=%x type=%d client=%s",
+			req.Handle, attr.Type, clientIP)
+
+		// Return file attributes even on error for cache consistency
+		fileid := xdr.ExtractFileID(fileHandle)
+		nfsAttr := xdr.MetadataToNFS(attr, fileid)
+
+		return &WriteResponse{
+			Status:    types.NFS3ErrIsDir, // NFS3ErrIsDir used for all non-regular files
+			AttrAfter: nfsAttr,
+		}, nil
 	}
 
-	// Store pre-op attributes for WCC
-	wccAttr := &types.WccAttr{
-		Size: attr.Size,
+	// ========================================================================
+	// Step 3: Calculate new file size
+	// ========================================================================
+
+	dataLen := uint64(len(req.Data))
+	newSize, _ := safeAdd(req.Offset, dataLen)
+
+	// ========================================================================
+	// Step 4: Check permissions and update metadata
+	// ========================================================================
+	// Call repository to:
+	// - Check write permissions
+	// - Capture pre-operation attributes (for WCC)
+	// - Generate content ID if needed
+	// - Update file size and timestamps
+	// - Return updated attributes
+
+	updatedAttr, preSize, preMtime, preCtime, err := metadataRepo.WriteFile(
+		fileHandle,
+		newSize,
+		&metadata.AuthContext{
+			AuthFlavor: ctx.AuthFlavor,
+			UID:        ctx.UID,
+			GID:        ctx.GID,
+			GIDs:       ctx.GIDs,
+			ClientAddr: clientIP,
+		},
+	)
+
+	// Build WCC attributes from pre-operation values
+	// This is done early so we can include it in error responses
+	nfsWccAttr := &types.WccAttr{
+		Size: preSize,
 		Mtime: types.TimeVal{
-			Seconds:  uint32(attr.Mtime.Unix()),
-			Nseconds: uint32(attr.Mtime.Nanosecond()),
+			Seconds:  uint32(preMtime.Unix()),
+			Nseconds: uint32(preMtime.Nanosecond()),
 		},
 		Ctime: types.TimeVal{
-			Seconds:  uint32(attr.Ctime.Unix()),
-			Nseconds: uint32(attr.Ctime.Nanosecond()),
+			Seconds:  uint32(preCtime.Unix()),
+			Nseconds: uint32(preCtime.Nanosecond()),
 		},
 	}
 
@@ -321,20 +373,20 @@ func (h *DefaultNFSHandler) Write(
 			var status uint32
 			switch exportErr.Code {
 			case metadata.ExportErrNotFound:
-				status = NFS3ErrNoEnt
+				status = types.NFS3ErrNoEnt
 			case metadata.ExportErrAccessDenied:
-				status = NFS3ErrAcces
+				status = types.NFS3ErrAcces
 			case metadata.ExportErrServerFault:
-				status = NFS3ErrIO
+				status = types.NFS3ErrIO
 			default:
-				status = NFS3ErrIO
+				status = types.NFS3ErrIO
 			}
 
 			logger.Warn("WRITE failed: %s: handle=%x offset=%d count=%d client=%s",
 				exportErr.Message, req.Handle, req.Offset, len(req.Data), clientIP)
 
-			fileid := extractFileID(fileHandle)
-			nfsAttr := MetadataToNFSAttr(attr, fileid)
+			fileid := xdr.ExtractFileID(fileHandle)
+			nfsAttr := xdr.MetadataToNFS(attr, fileid)
 
 			return &WriteResponse{
 				Status:     status,
@@ -347,28 +399,37 @@ func (h *DefaultNFSHandler) Write(
 		logger.Error("WRITE failed: repository error: handle=%x offset=%d count=%d client=%s error=%v",
 			req.Handle, req.Offset, len(req.Data), clientIP, err)
 
-		fileid := extractFileID(fileHandle)
-		nfsAttr := MetadataToNFSAttr(attr, fileid)
+		fileid := xdr.ExtractFileID(fileHandle)
+		nfsAttr := xdr.MetadataToNFS(attr, fileid)
 
 		return &WriteResponse{
-			Status:     NFS3ErrIO,
+			Status:     types.NFS3ErrIO,
 			AttrBefore: nfsWccAttr,
 			AttrAfter:  nfsAttr,
 		}, nil
 	}
 
 	// ========================================================================
-	// Step 4: Check if content repository supports writing
+	// Step 5: Check if content repository supports writing
 	// ========================================================================
 
 	writeRepo, ok := contentRepo.(content.WriteRepository)
 	if !ok {
-		logger.Error("Content repository does not support writing")
-		return &WriteResponse{Status: types.NFS3ErrRofs}, nil
+		logger.Error("WRITE failed: content repository does not support writing: handle=%x client=%s",
+			req.Handle, clientIP)
+
+		fileid := xdr.ExtractFileID(fileHandle)
+		nfsAttr := xdr.MetadataToNFS(updatedAttr, fileid)
+
+		return &WriteResponse{
+			Status:     types.NFS3ErrRofs, // Read-only filesystem
+			AttrBefore: nfsWccAttr,
+			AttrAfter:  nfsAttr,
+		}, nil
 	}
 
 	// ========================================================================
-	// Step 5: Write data to content repository
+	// Step 6: Write data to content repository
 	// ========================================================================
 	// The content repository handles:
 	// - Physical storage of data
@@ -378,38 +439,45 @@ func (h *DefaultNFSHandler) Write(
 
 	err = writeRepo.WriteAt(updatedAttr.ContentID, req.Data, int64(req.Offset))
 	if err != nil {
-		logger.Error("Failed to write content: %v", err)
-		return &WriteResponse{Status: types.NFS3ErrIO}, nil
+		logger.Error("WRITE failed: content write error: handle=%x offset=%d count=%d content_id=%s client=%s error=%v",
+			req.Handle, req.Offset, len(req.Data), updatedAttr.ContentID, clientIP, err)
+
+		fileid := xdr.ExtractFileID(fileHandle)
+		nfsAttr := xdr.MetadataToNFS(updatedAttr, fileid)
+
+		// Map content repository errors to NFS status codes
+		// The error is analyzed to provide the most appropriate NFS status
+		status := xdr.MapContentErrorToNFSStatus(err)
+
+		return &WriteResponse{
+			Status:     status,
+			AttrBefore: nfsWccAttr,
+			AttrAfter:  nfsAttr,
+		}, nil
 	}
 
 	// ========================================================================
-	// Step 6: Build success response
+	// Step 7: Build success response
 	// ========================================================================
 	// Metadata is already updated by WriteFile, so we just need to
 	// convert to NFS wire format
 
-	fileid := extractFileID(fileHandle)
-	nfsAttr := MetadataToNFSAttr(updatedAttr, fileid)
+	fileid := xdr.ExtractFileID(fileHandle)
+	nfsAttr := xdr.MetadataToNFS(updatedAttr, fileid)
 
-	// Save updated attributes
-	if err := metadataRepo.UpdateFile(metadata.FileHandle(req.Handle), attr); err != nil {
-		logger.Error("Failed to update file metadata: %v", err)
-		return &WriteResponse{Status: types.NFS3ErrIO}, nil
-	}
+	logger.Info("WRITE successful: handle=%x offset=%d requested=%d written=%d new_size=%d client=%s",
+		req.Handle, req.Offset, req.Count, len(req.Data), updatedAttr.Size, clientIP)
 
-	// Generate file ID
-	fileid := binary.BigEndian.Uint64(req.Handle[:8])
-	nfsAttr := xdr.MetadataToNFS(attr, fileid)
-
-	logger.Info("WRITE successful: wrote %d bytes at offset %d", len(req.Data), req.Offset)
+	logger.Debug("WRITE details: stable_requested=%d committed=%d size=%d type=%d mode=%o",
+		req.Stable, FileSyncWrite, updatedAttr.Size, updatedAttr.Type, updatedAttr.Mode)
 
 	return &WriteResponse{
 		Status:     types.NFS3OK,
-		AttrBefore: wccAttr,
+		AttrBefore: nfsWccAttr,
 		AttrAfter:  nfsAttr,
 		Count:      uint32(len(req.Data)),
-		Committed:  FileSyncWrite, // We commit immediately for simplicity
-		Verf:       0,             // TODO: Use server boot time or instance ID
+		Committed:  FileSyncWrite,  // We commit immediately for simplicity
+		Verf:       serverBootTime, // Server boot time for restart detection
 	}, nil
 }
 
@@ -433,19 +501,23 @@ func (e *writeValidationError) Error() string {
 //   - File handle is not empty and within limits
 //   - File handle is long enough for file ID extraction
 //   - Count matches actual data length
-//   - Count doesn't exceed reasonable limits
+//   - Count doesn't exceed server's maximum write size
 //   - Offset + Count doesn't overflow uint64
 //   - Stability level is valid
+//
+// Parameters:
+//   - req: The write request to validate
+//   - maxWriteSize: Maximum write size from repository configuration
 //
 // Returns:
 //   - nil if valid
 //   - *writeValidationError with NFS status if invalid
-func validateWriteRequest(req *WriteRequest) *writeValidationError {
+func validateWriteRequest(req *WriteRequest, maxWriteSize uint32) *writeValidationError {
 	// Validate file handle
 	if len(req.Handle) == 0 {
 		return &writeValidationError{
 			message:   "empty file handle",
-			nfsStatus: NFS3ErrBadHandle,
+			nfsStatus: types.NFS3ErrBadHandle,
 		}
 	}
 
@@ -453,7 +525,7 @@ func validateWriteRequest(req *WriteRequest) *writeValidationError {
 	if len(req.Handle) > 64 {
 		return &writeValidationError{
 			message:   fmt.Sprintf("file handle too long: %d bytes (max 64)", len(req.Handle)),
-			nfsStatus: NFS3ErrBadHandle,
+			nfsStatus: types.NFS3ErrBadHandle,
 		}
 	}
 
@@ -461,7 +533,7 @@ func validateWriteRequest(req *WriteRequest) *writeValidationError {
 	if len(req.Handle) < 8 {
 		return &writeValidationError{
 			message:   fmt.Sprintf("file handle too short: %d bytes (min 8)", len(req.Handle)),
-			nfsStatus: NFS3ErrBadHandle,
+			nfsStatus: types.NFS3ErrBadHandle,
 		}
 	}
 
@@ -474,22 +546,23 @@ func validateWriteRequest(req *WriteRequest) *writeValidationError {
 		// Not fatal - we'll use actual data length
 	}
 
-	// Validate count doesn't exceed reasonable limits (1GB)
-	// While RFC 1813 doesn't specify a maximum, extremely large writes should be rejected
-	const maxWriteSize = 1024 * 1024 * 1024 // 1GB
+	// Validate count doesn't exceed maximum write size configured by repository
+	// The repository can configure this based on its constraints and the
+	// wtmax value advertised in FSINFO.
 	if dataLen > maxWriteSize {
 		return &writeValidationError{
 			message:   fmt.Sprintf("write data too large: %d bytes (max %d)", dataLen, maxWriteSize),
-			nfsStatus: NFS3ErrFBig,
+			nfsStatus: types.NFS3ErrFBig,
 		}
 	}
 
 	// Validate offset + count doesn't overflow
 	// This prevents integer overflow attacks
+	// CRITICAL: This must be checked BEFORE any calculations use offset + count
 	if req.Offset > ^uint64(0)-uint64(dataLen) {
 		return &writeValidationError{
 			message:   fmt.Sprintf("offset + count would overflow: offset=%d count=%d", req.Offset, dataLen),
-			nfsStatus: NFS3ErrInval,
+			nfsStatus: types.NFS3ErrInval,
 		}
 	}
 
@@ -497,7 +570,7 @@ func validateWriteRequest(req *WriteRequest) *writeValidationError {
 	if req.Stable > FileSyncWrite {
 		return &writeValidationError{
 			message:   fmt.Sprintf("invalid stability level: %d (max %d)", req.Stable, FileSyncWrite),
-			nfsStatus: NFS3ErrInval,
+			nfsStatus: types.NFS3ErrInval,
 		}
 	}
 
@@ -541,10 +614,10 @@ func validateWriteRequest(req *WriteRequest) *writeValidationError {
 //	// Use req.Handle, req.Offset, req.Data in WRITE procedure
 func DecodeWriteRequest(data []byte) (*WriteRequest, error) {
 	// Validate minimum data length
-	// 4 bytes (handle length) + 8 bytes (minimum handle) + 8 bytes (offset) +
-	// 4 bytes (count) + 4 bytes (stable) + 4 bytes (data length) = 32 bytes minimum
-	if len(data) < 32 {
-		return nil, fmt.Errorf("data too short: need at least 32 bytes, got %d", len(data))
+	// 4 bytes (handle length) + 8 bytes (offset) + 4 bytes (count) +
+	// 4 bytes (stable) + 4 bytes (data length) = 24 bytes minimum
+	if len(data) < 24 {
+		return nil, fmt.Errorf("data too short: need at least 24 bytes, got %d", len(data))
 	}
 
 	reader := bytes.NewReader(data)
@@ -577,8 +650,9 @@ func DecodeWriteRequest(data []byte) (*WriteRequest, error) {
 	// Skip padding to 4-byte boundary
 	padding := (4 - (handleLen % 4)) % 4
 	for i := uint32(0); i < padding; i++ {
+		// XDR allows missing trailing padding, so tolerate missing bytes here.
 		if _, err := reader.ReadByte(); err != nil {
-			return nil, fmt.Errorf("failed to read handle padding byte %d: %w", i, err)
+			break
 		}
 	}
 
@@ -619,9 +693,18 @@ func DecodeWriteRequest(data []byte) (*WriteRequest, error) {
 		return nil, fmt.Errorf("failed to read data length: %w", err)
 	}
 
-	// Validate data length is reasonable
-	if dataLen > maxWriteSize { // maxWriteSize limit
-		return nil, fmt.Errorf("data length too large: %d bytes (max %d)", dataLen, maxWriteSize)
+	// Validate data length during decoding to prevent memory exhaustion.
+	// This is a hard-coded safety limit to prevent allocating excessive
+	// memory before we can even validate the request. The actual validation
+	// will use the repository's configured maximum.
+	//
+	// This limit (32MB) is chosen to be:
+	//   - Large enough to accommodate any reasonable repository configuration
+	//   - Small enough to prevent memory exhaustion attacks during XDR decoding
+	//   - Higher than typical NFS write sizes (64KB-1MB)
+	const maxDecodingSize = 32 * 1024 * 1024 // 32MB
+	if dataLen > maxDecodingSize {
+		return nil, fmt.Errorf("data length too large: %d bytes (max %d for decoding)", dataLen, maxDecodingSize)
 	}
 
 	// Read data bytes
@@ -742,21 +825,17 @@ func (resp *WriteResponse) Encode() ([]byte, error) {
 		}
 	}
 
-	// Post-op attributes
-	if resp.AttrAfter != nil {
-		if err := binary.Write(&buf, binary.BigEndian, uint32(1)); err != nil {
-			return nil, err
-		}
-		if err := xdr.EncodeFileAttr(&buf, resp.AttrAfter); err != nil {
-			return nil, err
-		}
-	} else {
-		if err := binary.Write(&buf, binary.BigEndian, uint32(0)); err != nil {
-			return nil, err
-		}
+	// Write post-op attributes
+	if err := xdr.EncodeOptionalFileAttr(&buf, resp.AttrAfter); err != nil {
+		return nil, fmt.Errorf("failed to encode post-op attributes: %w", err)
 	}
 
+	// ========================================================================
+	// Error case: Return early if status is not OK
+	// ========================================================================
+
 	if resp.Status != types.NFS3OK {
+		logger.Debug("Encoding WRITE error response: status=%d", resp.Status)
 		return buf.Bytes(), nil
 	}
 

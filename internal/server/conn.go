@@ -99,6 +99,56 @@ func (c *conn) readRPCMessage(length uint32) ([]byte, error) {
 	return message, nil
 }
 
+// ============================================================================
+// Authentication Extraction Helper
+// ============================================================================
+
+// extractUnixAuth extracts Unix authentication credentials from an RPC call.
+// It returns the UID, GID, and supplementary GIDs if AUTH_UNIX is used.
+// If AUTH_UNIX is not used or parsing fails, it returns nil values.
+//
+// This helper centralizes authentication extraction logic and ensures
+// consistent error logging across all procedures.
+//
+// Parameters:
+//   - call: The RPC call message containing authentication data
+//   - procedure: Name of the procedure (for logging purposes)
+//
+// Returns:
+//   - uid: Pointer to user ID (nil if not AUTH_UNIX or parsing failed)
+//   - gid: Pointer to group ID (nil if not AUTH_UNIX or parsing failed)
+//   - gids: Slice of supplementary group IDs (nil if not AUTH_UNIX or parsing failed)
+func extractUnixAuth(call *rpc.RPCCallMessage, procedure string) (*uint32, *uint32, []uint32) {
+	authFlavor := call.GetAuthFlavor()
+
+	// If not Unix auth, return nil values (this is expected for AUTH_NULL)
+	if authFlavor != rpc.AuthUnix {
+		return nil, nil, nil
+	}
+
+	// Get auth body
+	authBody := call.GetAuthBody()
+	if len(authBody) == 0 {
+		logger.Warn("%s: AUTH_UNIX specified but auth body is empty", procedure)
+		return nil, nil, nil
+	}
+
+	// Parse Unix auth credentials
+	unixAuth, err := rpc.ParseUnixAuth(authBody)
+	if err != nil {
+		// Log the parsing failure - this is unexpected and may indicate
+		// a protocol issue or malicious client
+		logger.Warn("%s: Failed to parse AUTH_UNIX credentials: %v", procedure, err)
+		return nil, nil, nil
+	}
+
+	// Log successful auth parsing at debug level
+	logger.Debug("%s: Parsed Unix auth: uid=%d gid=%d ngids=%d",
+		procedure, unixAuth.UID, unixAuth.GID, len(unixAuth.GIDs))
+
+	return &unixAuth.UID, &unixAuth.GID, unixAuth.GIDs
+}
+
 func (c *conn) handleRPCCall(call *rpc.RPCCallMessage, procedureData []byte) error {
 	var replyData []byte
 	var err error
@@ -132,19 +182,10 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 	// Extract auth flavor for all procedures
 	authFlavor := call.GetAuthFlavor()
 
-	// Log Unix auth details if present
-	if authFlavor == rpc.AuthUnix {
-		authBody := call.GetAuthBody()
-		if len(authBody) > 0 {
-			if unixAuth, err := rpc.ParseUnixAuth(authBody); err == nil {
-				logger.Debug("NFS call with Unix auth: uid=%d gid=%d", unixAuth.UID, unixAuth.GID)
-			}
-		}
-	}
-
 	switch call.Procedure {
 	case types.NFSProcNull:
 		return handler.Null(repo)
+
 	case types.NFSProcGetAttr:
 		getAttrCtx := &nfs.GetAttrContext{
 			ClientAddr: c.conn.RemoteAddr().String(),
@@ -161,23 +202,9 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 				return &nfs.GetAttrResponse{Status: status}
 			},
 		)
+
 	case types.NFSProcSetAttr:
-		// Extract authentication from RPC call
-		var uid, gid *uint32
-		var gids []uint32
-
-		if authFlavor == rpc.AuthUnix {
-			authBody := call.GetAuthBody()
-			if len(authBody) > 0 {
-				if unixAuth, err := rpc.ParseUnixAuth(authBody); err == nil {
-					uid = &unixAuth.UID
-					gid = &unixAuth.GID
-					gids = unixAuth.GIDs
-				}
-			}
-		}
-
-		// Create context with client information and auth
+		uid, gid, gids := extractUnixAuth(call, "SETATTR")
 		setAttrCtx := &nfs.SetAttrContext{
 			ClientAddr: c.conn.RemoteAddr().String(),
 			AuthFlavor: authFlavor,
@@ -185,7 +212,6 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 			GID:        gid,
 			GIDs:       gids,
 		}
-
 		return handleRequest(
 			data,
 			nfs.DecodeSetAttrRequest,
@@ -197,23 +223,9 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 				return &nfs.SetAttrResponse{Status: status}
 			},
 		)
+
 	case types.NFSProcLookup:
-		// Extract authentication from RPC call
-		var uid, gid *uint32
-		var gids []uint32
-
-		if authFlavor == rpc.AuthUnix {
-			authBody := call.GetAuthBody()
-			if len(authBody) > 0 {
-				if unixAuth, err := rpc.ParseUnixAuth(authBody); err == nil {
-					uid = &unixAuth.UID
-					gid = &unixAuth.GID
-					gids = unixAuth.GIDs
-				}
-			}
-		}
-
-		// Create context with client information and auth
+		uid, gid, gids := extractUnixAuth(call, "LOOKUP")
 		lookupCtx := &nfs.LookupContext{
 			ClientAddr: c.conn.RemoteAddr().String(),
 			AuthFlavor: authFlavor,
@@ -221,7 +233,6 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 			GID:        gid,
 			GIDs:       gids,
 		}
-
 		return handleRequest(
 			data,
 			nfs.DecodeLookupRequest,
@@ -233,22 +244,9 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 				return &nfs.LookupResponse{Status: status}
 			},
 		)
+
 	case types.NFSProcAccess:
-		var uid, gid *uint32
-		var gids []uint32
-
-		if authFlavor == rpc.AuthUnix {
-			authBody := call.GetAuthBody()
-			if len(authBody) > 0 {
-				if unixAuth, err := rpc.ParseUnixAuth(authBody); err == nil {
-					uid = &unixAuth.UID
-					gid = &unixAuth.GID
-					gids = unixAuth.GIDs
-				}
-			}
-		}
-
-		// Create context with client information and auth
+		uid, gid, gids := extractUnixAuth(call, "ACCESS")
 		accessCtx := &nfs.AccessContext{
 			ClientAddr: c.conn.RemoteAddr().String(),
 			AuthFlavor: authFlavor,
@@ -256,7 +254,6 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 			GID:        gid,
 			GIDs:       gids,
 		}
-
 		return handleRequest(
 			data,
 			nfs.DecodeAccessRequest,
@@ -268,23 +265,9 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 				return &nfs.AccessResponse{Status: status}
 			},
 		)
+
 	case types.NFSProcReadLink:
-		// Extract authentication from RPC call
-		var uid, gid *uint32
-		var gids []uint32
-
-		if authFlavor == rpc.AuthUnix {
-			authBody := call.GetAuthBody()
-			if len(authBody) > 0 {
-				if unixAuth, err := rpc.ParseUnixAuth(authBody); err == nil {
-					uid = &unixAuth.UID
-					gid = &unixAuth.GID
-					gids = unixAuth.GIDs
-				}
-			}
-		}
-
-		// Create context with client information and auth
+		uid, gid, gids := extractUnixAuth(call, "READLINK")
 		readLinkCtx := &nfs.ReadLinkContext{
 			ClientAddr: c.conn.RemoteAddr().String(),
 			AuthFlavor: authFlavor,
@@ -292,7 +275,6 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 			GID:        gid,
 			GIDs:       gids,
 		}
-
 		return handleRequest(
 			data,
 			nfs.DecodeReadLinkRequest,
@@ -304,21 +286,9 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 				return &nfs.ReadLinkResponse{Status: status}
 			},
 		)
+
 	case types.NFSProcRead:
-		var uid, gid *uint32
-		var gids []uint32
-
-		if authFlavor == rpc.AuthUnix {
-			authBody := call.GetAuthBody()
-			if len(authBody) > 0 {
-				if unixAuth, err := rpc.ParseUnixAuth(authBody); err == nil {
-					uid = &unixAuth.UID
-					gid = &unixAuth.GID
-					gids = unixAuth.GIDs
-				}
-			}
-		}
-
+		uid, gid, gids := extractUnixAuth(call, "READ")
 		readCtx := &nfs.ReadContext{
 			ClientAddr: c.conn.RemoteAddr().String(),
 			AuthFlavor: authFlavor,
@@ -326,7 +296,6 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 			GID:        gid,
 			GIDs:       gids,
 		}
-
 		return handleRequest(
 			data,
 			nfs.DecodeReadRequest,
@@ -338,7 +307,16 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 				return &nfs.ReadResponse{Status: status}
 			},
 		)
+
 	case types.NFSProcWrite:
+		uid, gid, gids := extractUnixAuth(call, "WRITE")
+		writeCtx := &nfs.WriteContext{
+			ClientAddr: c.conn.RemoteAddr().String(),
+			AuthFlavor: authFlavor,
+			UID:        uid,
+			GID:        gid,
+			GIDs:       gids,
+		}
 		return handleRequest(
 			data,
 			nfs.DecodeWriteRequest,
@@ -350,27 +328,15 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 				return &nfs.WriteResponse{Status: status}
 			},
 		)
-	case types.NFSProcCreate:
-		// Extract authentication from RPC call
-		var uid, gid *uint32
-		if authFlavor == rpc.AuthUnix {
-			authBody := call.GetAuthBody()
-			if len(authBody) > 0 {
-				if unixAuth, err := rpc.ParseUnixAuth(authBody); err == nil {
-					uid = &unixAuth.UID
-					gid = &unixAuth.GID
-				}
-			}
-		}
 
-		// Create context with client information and auth
+	case types.NFSProcCreate:
+		uid, gid, _ := extractUnixAuth(call, "CREATE")
 		createCtx := &nfs.CreateContext{
 			ClientAddr: c.conn.RemoteAddr().String(),
 			AuthFlavor: authFlavor,
 			UID:        uid,
 			GID:        gid,
 		}
-
 		return handleRequest(
 			data,
 			nfs.DecodeCreateRequest,
@@ -382,23 +348,9 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 				return &nfs.CreateResponse{Status: status}
 			},
 		)
+
 	case types.NFSProcMkdir:
-		// Extract authentication from RPC call
-		var uid, gid *uint32
-		var gids []uint32
-
-		if authFlavor == rpc.AuthUnix {
-			authBody := call.GetAuthBody()
-			if len(authBody) > 0 {
-				if unixAuth, err := rpc.ParseUnixAuth(authBody); err == nil {
-					uid = &unixAuth.UID
-					gid = &unixAuth.GID
-					gids = unixAuth.GIDs
-				}
-			}
-		}
-
-		// Create context with client information and auth
+		uid, gid, gids := extractUnixAuth(call, "MKDIR")
 		mkdirContext := &nfs.MkdirContext{
 			ClientAddr: c.conn.RemoteAddr().String(),
 			AuthFlavor: authFlavor,
@@ -406,7 +358,6 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 			GID:        gid,
 			GIDs:       gids,
 		}
-
 		return handleRequest(
 			data,
 			nfs.DecodeMkdirRequest,
@@ -418,23 +369,9 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 				return &nfs.MkdirResponse{Status: status}
 			},
 		)
+
 	case types.NFSProcSymlink:
-		// Extract authentication from RPC call
-		var uid, gid *uint32
-		var gids []uint32
-
-		if authFlavor == rpc.AuthUnix {
-			authBody := call.GetAuthBody()
-			if len(authBody) > 0 {
-				if unixAuth, err := rpc.ParseUnixAuth(authBody); err == nil {
-					uid = &unixAuth.UID
-					gid = &unixAuth.GID
-					gids = unixAuth.GIDs
-				}
-			}
-		}
-
-		// Create context with client information and auth
+		uid, gid, gids := extractUnixAuth(call, "SYMLINK")
 		symlinkCtx := &nfs.SymlinkContext{
 			ClientAddr: c.conn.RemoteAddr().String(),
 			AuthFlavor: authFlavor,
@@ -442,7 +379,6 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 			GID:        gid,
 			GIDs:       gids,
 		}
-
 		return handleRequest(
 			data,
 			nfs.DecodeSymlinkRequest,
@@ -454,12 +390,12 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 				return &nfs.SymlinkResponse{Status: status}
 			},
 		)
+
 	case types.NFSProcMknod:
 		mkNodCtx := &nfs.MknodContext{
 			ClientAddr: c.conn.RemoteAddr().String(),
 			AuthFlavor: authFlavor,
 		}
-
 		return handleRequest(
 			data,
 			nfs.DecodeMknodRequest,
@@ -471,23 +407,9 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 				return &nfs.MknodResponse{Status: status}
 			},
 		)
+
 	case types.NFSProcRemove:
-		// Extract authentication from RPC call
-		var uid, gid *uint32
-		var gids []uint32
-
-		if authFlavor == rpc.AuthUnix {
-			authBody := call.GetAuthBody()
-			if len(authBody) > 0 {
-				if unixAuth, err := rpc.ParseUnixAuth(authBody); err == nil {
-					uid = &unixAuth.UID
-					gid = &unixAuth.GID
-					gids = unixAuth.GIDs
-				}
-			}
-		}
-
-		// Create context with client information and auth
+		uid, gid, gids := extractUnixAuth(call, "REMOVE")
 		removeContext := &nfs.RemoveContext{
 			ClientAddr: c.conn.RemoteAddr().String(),
 			AuthFlavor: authFlavor,
@@ -495,7 +417,6 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 			GID:        gid,
 			GIDs:       gids,
 		}
-
 		return handleRequest(
 			data,
 			nfs.DecodeRemoveRequest,
@@ -507,23 +428,9 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 				return &nfs.RemoveResponse{Status: status}
 			},
 		)
+
 	case types.NFSProcRmdir:
-		// Extract authentication from RPC call
-		var uid, gid *uint32
-		var gids []uint32
-
-		if authFlavor == rpc.AuthUnix {
-			authBody := call.GetAuthBody()
-			if len(authBody) > 0 {
-				if unixAuth, err := rpc.ParseUnixAuth(authBody); err == nil {
-					uid = &unixAuth.UID
-					gid = &unixAuth.GID
-					gids = unixAuth.GIDs
-				}
-			}
-		}
-
-		// Create context with client information and auth
+		uid, gid, gids := extractUnixAuth(call, "RMDIR")
 		rmDirCtx := &nfs.RmdirContext{
 			ClientAddr: c.conn.RemoteAddr().String(),
 			AuthFlavor: authFlavor,
@@ -531,7 +438,6 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 			GID:        gid,
 			GIDs:       gids,
 		}
-
 		return handleRequest(
 			data,
 			nfs.DecodeRmdirRequest,
@@ -543,23 +449,9 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 				return &nfs.RmdirResponse{Status: status}
 			},
 		)
+
 	case types.NFSProcRename:
-		// Extract authentication from RPC call
-		var uid, gid *uint32
-		var gids []uint32
-
-		if authFlavor == rpc.AuthUnix {
-			authBody := call.GetAuthBody()
-			if len(authBody) > 0 {
-				if unixAuth, err := rpc.ParseUnixAuth(authBody); err == nil {
-					uid = &unixAuth.UID
-					gid = &unixAuth.GID
-					gids = unixAuth.GIDs
-				}
-			}
-		}
-
-		// Create context with client information and auth
+		uid, gid, gids := extractUnixAuth(call, "RENAME")
 		renameCtx := &nfs.RenameContext{
 			ClientAddr: c.conn.RemoteAddr().String(),
 			AuthFlavor: authFlavor,
@@ -567,7 +459,6 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 			GID:        gid,
 			GIDs:       gids,
 		}
-
 		return handleRequest(
 			data,
 			nfs.DecodeRenameRequest,
@@ -579,23 +470,9 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 				return &nfs.RenameResponse{Status: status}
 			},
 		)
+
 	case types.NFSProcLink:
-		// Extract authentication from RPC call
-		var uid, gid *uint32
-		var gids []uint32
-
-		if authFlavor == rpc.AuthUnix {
-			authBody := call.GetAuthBody()
-			if len(authBody) > 0 {
-				if unixAuth, err := rpc.ParseUnixAuth(authBody); err == nil {
-					uid = &unixAuth.UID
-					gid = &unixAuth.GID
-					gids = unixAuth.GIDs
-				}
-			}
-		}
-
-		// Create context with client information and auth
+		uid, gid, gids := extractUnixAuth(call, "LINK")
 		linkCtx := &nfs.LinkContext{
 			ClientAddr: c.conn.RemoteAddr().String(),
 			AuthFlavor: authFlavor,
@@ -614,22 +491,9 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 				return &nfs.LinkResponse{Status: status}
 			},
 		)
+
 	case types.NFSProcReadDir:
-		// Extract authentication from RPC call
-		var uid, gid *uint32
-		var gids []uint32
-
-		if authFlavor == rpc.AuthUnix {
-			authBody := call.GetAuthBody()
-			if len(authBody) > 0 {
-				if unixAuth, err := rpc.ParseUnixAuth(authBody); err == nil {
-					uid = &unixAuth.UID
-					gid = &unixAuth.GID
-					gids = unixAuth.GIDs
-				}
-			}
-		}
-
+		uid, gid, gids := extractUnixAuth(call, "READDIR")
 		readDirCtx := &nfs.ReadDirContext{
 			ClientAddr: c.conn.RemoteAddr().String(),
 			AuthFlavor: authFlavor,
@@ -637,7 +501,6 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 			GID:        gid,
 			GIDs:       gids,
 		}
-
 		return handleRequest(
 			data,
 			nfs.DecodeReadDirRequest,
@@ -649,23 +512,9 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 				return &nfs.ReadDirResponse{Status: status}
 			},
 		)
+
 	case types.NFSProcReadDirPlus:
-		// Extract authentication from RPC call
-		var uid, gid *uint32
-		var gids []uint32
-
-		if authFlavor == rpc.AuthUnix {
-			authBody := call.GetAuthBody()
-			if len(authBody) > 0 {
-				if unixAuth, err := rpc.ParseUnixAuth(authBody); err == nil {
-					uid = &unixAuth.UID
-					gid = &unixAuth.GID
-					gids = unixAuth.GIDs
-				}
-			}
-		}
-
-		// Create context with client information and auth
+		uid, gid, gids := extractUnixAuth(call, "READDIRPLUS")
 		readDirPlusCtx := &nfs.ReadDirPlusContext{
 			ClientAddr: c.conn.RemoteAddr().String(),
 			AuthFlavor: authFlavor,
@@ -673,7 +522,6 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 			GID:        gid,
 			GIDs:       gids,
 		}
-
 		return handleRequest(
 			data,
 			nfs.DecodeReadDirPlusRequest,
@@ -685,6 +533,7 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 				return &nfs.ReadDirPlusResponse{Status: status}
 			},
 		)
+
 	case types.NFSProcFsStat:
 		ctx := &nfs.FsStatContext{
 			ClientAddr: c.conn.RemoteAddr().String(),
@@ -701,6 +550,7 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 				return &nfs.FsStatResponse{Status: status}
 			},
 		)
+
 	case types.NFSProcFsInfo:
 		return handleRequest(
 			data,
@@ -723,7 +573,6 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 			ClientAddr: c.conn.RemoteAddr().String(),
 			AuthFlavor: authFlavor,
 		}
-
 		return handleRequest(
 			data,
 			nfs.DecodePathConfRequest,
@@ -748,8 +597,9 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 				return &nfs.CommitResponse{Status: status}
 			},
 		)
+
 	default:
-		logger.Debug("Unknown NFS procedure: %d", call)
+		logger.Debug("Unknown NFS procedure: %d", call.Procedure)
 		return []byte{}, nil
 	}
 }
@@ -773,11 +623,11 @@ func (c *conn) handleMountProcedure(call *rpc.RPCCallMessage, data []byte) ([]by
 			if len(authBody) > 0 {
 				parsedAuth, err := rpc.ParseUnixAuth(authBody)
 				if err != nil {
-					logger.Warn("Failed to parse Unix auth credentials: %v", err)
+					logger.Warn("MOUNT: Failed to parse Unix auth credentials: %v", err)
 					// Don't fail the mount, just proceed without detailed auth info
 				} else {
 					unixAuth = parsedAuth
-					logger.Debug("Parsed Unix auth: %s", parsedAuth.String())
+					logger.Debug("MOUNT: Parsed Unix auth: %s", parsedAuth.String())
 				}
 			}
 		}
@@ -800,8 +650,8 @@ func (c *conn) handleMountProcedure(call *rpc.RPCCallMessage, data []byte) ([]by
 				return &mount.MountResponse{Status: status}
 			},
 		)
-	case mount.MountProcExport:
 
+	case mount.MountProcExport:
 		return handleRequest(
 			data,
 			mount.DecodeExportRequest,
@@ -814,6 +664,7 @@ func (c *conn) handleMountProcedure(call *rpc.RPCCallMessage, data []byte) ([]by
 				return &mount.ExportResponse{Entries: []mount.ExportEntry{}}
 			},
 		)
+
 	case mount.MountProcDump:
 		ctx := &mount.DumpContext{
 			ClientAddr: c.conn.RemoteAddr().String(),
@@ -831,6 +682,7 @@ func (c *conn) handleMountProcedure(call *rpc.RPCCallMessage, data []byte) ([]by
 				return &mount.DumpResponse{Entries: []mount.DumpEntry{}}
 			},
 		)
+
 	case mount.MountProcUmnt:
 		ctx := &mount.UmountContext{
 			ClientAddr: c.conn.RemoteAddr().String(),

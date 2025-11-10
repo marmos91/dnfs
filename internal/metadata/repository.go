@@ -476,4 +476,24 @@ type Repository interface {
 	//	}
 	//	err = contentRepo.WriteAt(attr.ContentID, data, offset)
 	WriteFile(handle FileHandle, newSize uint64, ctx *AuthContext) (*FileAttr, uint64, time.Time, time.Time, error)
+
+	// GetMaxWriteSize returns the maximum write size in bytes that the server will accept.
+	// This should match or be slightly larger than the wtmax value returned by GetFSInfo.
+	//
+	// The returned value is used for validation in the WRITE procedure to prevent:
+	//   - Memory exhaustion from oversized requests
+	//   - Protocol violations from malicious clients
+	//   - Resource exhaustion attacks
+	//
+	// Typical values:
+	//   - Production servers: 64KB-1MB (balances performance and safety)
+	//   - High-throughput servers: 1MB-32MB (requires more memory)
+	//   - Conservative servers: 32KB-64KB (matches typical wtmax)
+	//
+	// The value should be at least as large as the wtmax advertised in FSINFO,
+	// but can be larger to provide some tolerance for non-compliant clients.
+	//
+	// Returns:
+	//   - uint32: Maximum write size in bytes
+	GetMaxWriteSize() uint32
 }

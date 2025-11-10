@@ -2,7 +2,7 @@ package xdr
 
 import "net"
 
-// extractClientIP extracts the IP address from a client address string.
+// ExtractClientIP extracts the IP address from a client address string.
 //
 // Expected format: "IP:port" (e.g., "192.168.1.100:45678")
 // Falls back to returning the original string if parsing fails.
