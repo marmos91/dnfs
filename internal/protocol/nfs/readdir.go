@@ -280,7 +280,7 @@ func (h *DefaultNFSHandler) ReadDir(
 	// ========================================================================
 
 	dirHandle := metadata.FileHandle(req.DirHandle)
-	dirAttr, err := repository.GetFile(dirHandle)
+	dirAttr, err := repository.GetFile(ctx.Context, dirHandle)
 	if err != nil {
 		logger.Warn("READDIR failed: directory not found: dir=%x client=%s error=%v",
 			req.DirHandle, clientIP, err)

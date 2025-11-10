@@ -130,7 +130,7 @@ type AccessContext struct {
 //
 //   - Protocol layer handles only XDR encoding/decoding and validation
 //   - All business logic (permission checking) is delegated to repository
-//   - File handle validation is performed by repository.GetFile()
+//   - File handle validation is performed by repository.GetFile(ctx.Context, )
 //   - Comprehensive logging at INFO level for operations, DEBUG for details
 //
 // **Authentication:**
@@ -230,7 +230,7 @@ func (h *DefaultNFSHandler) Access(
 	// ========================================================================
 
 	fileHandle := metadata.FileHandle(req.Handle)
-	attr, err := repository.GetFile(fileHandle)
+	attr, err := repository.GetFile(ctx.Context, fileHandle)
 	if err != nil {
 		logger.Debug("ACCESS failed: handle not found: handle=%x client=%s error=%v",
 			req.Handle, clientIP, err)

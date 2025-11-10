@@ -179,7 +179,7 @@ func (h *DefaultNFSHandler) GetAttr(
 	// ========================================================================
 
 	fileHandle := metadata.FileHandle(req.Handle)
-	attr, err := repository.GetFile(fileHandle)
+	attr, err := repository.GetFile(ctx.Context, fileHandle)
 	if err != nil {
 		logger.Debug("GETATTR failed: handle not found: handle=%x client=%s error=%v",
 			req.Handle, clientIP, err)

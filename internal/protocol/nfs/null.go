@@ -211,7 +211,7 @@ func (h *DefaultNFSHandler) Null(
 	// However, per RFC 1813, NULL must always succeed regardless of
 	// repository state, so we log any issues but don't fail the request.
 
-	if err := repository.Healthcheck(); err != nil {
+	if err := repository.Healthcheck(ctx.Context); err != nil {
 		// Log repository health issue but don't fail NULL request
 		logger.Debug("NULL: repository health check failed (non-fatal): client=%s error=%v",
 			clientIP, err)

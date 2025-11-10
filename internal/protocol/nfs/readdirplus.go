@@ -329,7 +329,7 @@ func (h *DefaultNFSHandler) ReadDirPlus(
 	// ========================================================================
 
 	dirHandle := metadata.FileHandle(req.DirHandle)
-	dirAttr, err := repository.GetFile(dirHandle)
+	dirAttr, err := repository.GetFile(ctx.Context, dirHandle)
 	if err != nil {
 		logger.Warn("READDIRPLUS failed: directory not found: dir=%x client=%s error=%v",
 			req.DirHandle, clientIP, err)
@@ -358,7 +358,7 @@ func (h *DefaultNFSHandler) ReadDirPlus(
 	// This protocol layer is responsible for building the "." and ".." entries (see lines 388-438).
 	// Access control filtering, if required, would also need to be implemented in this layer.
 
-	children, err := repository.GetChildren(dirHandle)
+	children, err := repository.GetChildren(ctx.Context, dirHandle)
 	if err != nil {
 		logger.Error("READDIRPLUS failed: error retrieving children: dir=%x client=%s error=%v",
 			req.DirHandle, clientIP, err)
@@ -412,13 +412,13 @@ func (h *DefaultNFSHandler) ReadDirPlus(
 		parentAttr := nfsDirAttr
 
 		// Try to get actual parent (may not exist for root)
-		ph, err := repository.GetParent(dirHandle)
+		ph, err := repository.GetParent(ctx.Context, dirHandle)
 		if err == nil {
 			parentHandle = ph
 			parentFileid = xdr.ExtractFileID(ph)
 
 			// Get parent attributes
-			if pAttr, err := repository.GetFile(ph); err == nil {
+			if pAttr, err := repository.GetFile(ctx.Context, ph); err == nil {
 				parentAttr = xdr.MetadataToNFS(pAttr, parentFileid)
 			} else {
 				logger.Warn("READDIRPLUS: parent handle exists but attributes missing: parent=%x error=%v",
@@ -457,7 +457,7 @@ func (h *DefaultNFSHandler) ReadDirPlus(
 
 		// Get attributes for this entry
 		var entryAttr *types.NFSFileAttr
-		if attr, err := repository.GetFile(childHandle); err == nil {
+		if attr, err := repository.GetFile(ctx.Context, childHandle); err == nil {
 			entryAttr = xdr.MetadataToNFS(attr, childID)
 		} else {
 			logger.Warn("READDIRPLUS: child handle exists but attributes missing: name='%s' handle=%x error=%v",

@@ -305,7 +305,7 @@ func (h *DefaultNFSHandler) Symlink(
 	// ========================================================================
 
 	dirHandle := metadata.FileHandle(req.DirHandle)
-	dirAttr, err := repository.GetFile(dirHandle)
+	dirAttr, err := repository.GetFile(ctx.Context, dirHandle)
 	if err != nil {
 		logger.Warn("SYMLINK failed: directory not found: dir=%x client=%s error=%v",
 			req.DirHandle, clientIP, err)
@@ -378,7 +378,7 @@ func (h *DefaultNFSHandler) Symlink(
 
 		// Get updated directory attributes for WCC data (best effort)
 		var wccAfter *types.NFSFileAttr
-		if updatedDirAttr, getErr := repository.GetFile(dirHandle); getErr == nil {
+		if updatedDirAttr, getErr := repository.GetFile(ctx.Context, dirHandle); getErr == nil {
 			dirID := xdr.ExtractFileID(dirHandle)
 			wccAfter = xdr.MetadataToNFS(updatedDirAttr, dirID)
 		}
@@ -397,14 +397,14 @@ func (h *DefaultNFSHandler) Symlink(
 	// Step 6: Retrieve symlink attributes for response
 	// ========================================================================
 
-	symlinkAttr, err = repository.GetFile(symlinkHandle)
+	symlinkAttr, err = repository.GetFile(ctx.Context, symlinkHandle)
 	if err != nil {
 		logger.Warn("SYMLINK: created but cannot get symlink attributes: handle=%x error=%v",
 			symlinkHandle, err)
 
 		// Get updated directory attributes for WCC data
 		var wccAfter *types.NFSFileAttr
-		if updatedDirAttr, getErr := repository.GetFile(dirHandle); getErr == nil {
+		if updatedDirAttr, getErr := repository.GetFile(ctx.Context, dirHandle); getErr == nil {
 			dirID := xdr.ExtractFileID(dirHandle)
 			wccAfter = xdr.MetadataToNFS(updatedDirAttr, dirID)
 		}
@@ -428,7 +428,7 @@ func (h *DefaultNFSHandler) Symlink(
 	nfsSymlinkAttr := xdr.MetadataToNFS(symlinkAttr, symlinkID)
 
 	// Get updated directory attributes for WCC data
-	updatedDirAttr, err := repository.GetFile(dirHandle)
+	updatedDirAttr, err := repository.GetFile(ctx.Context, dirHandle)
 	if err != nil {
 		logger.Warn("SYMLINK: successful but cannot get updated directory attributes: dir=%x error=%v",
 			req.DirHandle, err)

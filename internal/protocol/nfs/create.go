@@ -194,7 +194,7 @@ func (h *DefaultNFSHandler) Create(
 	// ========================================================================
 
 	parentHandle := metadata.FileHandle(req.DirHandle)
-	parentAttr, err := metadataRepo.GetFile(parentHandle)
+	parentAttr, err := metadataRepo.GetFile(ctx.Context, parentHandle)
 	if err != nil {
 		logger.Warn("CREATE failed: parent not found: file='%s' dir=%x client=%s error=%v",
 			req.Filename, req.DirHandle, clientIP, err)
@@ -224,7 +224,7 @@ func (h *DefaultNFSHandler) Create(
 	// Step 3: Check if file already exists
 	// ========================================================================
 
-	existingHandle, err := metadataRepo.GetChild(parentHandle, req.Filename)
+	existingHandle, err := metadataRepo.GetChild(ctx.Context, parentHandle, req.Filename)
 	fileExists := (err == nil)
 
 	// ========================================================================
@@ -242,7 +242,7 @@ func (h *DefaultNFSHandler) Create(
 				req.Filename, clientIP)
 
 			// Get current parent state for WCC
-			parentAttr, _ = metadataRepo.GetFile(parentHandle)
+			parentAttr, _ = metadataRepo.GetFile(ctx.Context, parentHandle)
 			dirID := xdr.ExtractFileID(parentHandle)
 			dirWccAfter := xdr.MetadataToNFS(parentAttr, dirID)
 
@@ -264,7 +264,7 @@ func (h *DefaultNFSHandler) Create(
 			logger.Debug("CREATE failed: file exists (exclusive): file='%s' client=%s verifier=%016x",
 				req.Filename, clientIP, req.Verf)
 
-			parentAttr, _ = metadataRepo.GetFile(parentHandle)
+			parentAttr, _ = metadataRepo.GetFile(ctx.Context, parentHandle)
 			dirID := xdr.ExtractFileID(parentHandle)
 			dirWccAfter := xdr.MetadataToNFS(parentAttr, dirID)
 
@@ -283,7 +283,7 @@ func (h *DefaultNFSHandler) Create(
 		if fileExists {
 			// Truncate existing file
 			fileHandle = existingHandle
-			fileAttr, err = truncateExistingFile(contentRepo, metadataRepo, existingHandle, req)
+			fileAttr, err = truncateExistingFile(ctx.Context, contentRepo, metadataRepo, existingHandle, req)
 		} else {
 			// Create new file
 			fileHandle, fileAttr, err = createNewFile(metadataRepo, parentHandle, req, ctx)
@@ -293,7 +293,7 @@ func (h *DefaultNFSHandler) Create(
 		logger.Warn("CREATE failed: invalid mode: file='%s' mode=%d client=%s",
 			req.Filename, req.Mode, clientIP)
 
-		parentAttr, _ = metadataRepo.GetFile(parentHandle)
+		parentAttr, _ = metadataRepo.GetFile(ctx.Context, parentHandle)
 		dirID := xdr.ExtractFileID(parentHandle)
 		dirWccAfter := xdr.MetadataToNFS(parentAttr, dirID)
 
@@ -312,7 +312,7 @@ func (h *DefaultNFSHandler) Create(
 		logger.Error("CREATE failed: repository error: file='%s' client=%s error=%v",
 			req.Filename, clientIP, err)
 
-		parentAttr, _ = metadataRepo.GetFile(parentHandle)
+		parentAttr, _ = metadataRepo.GetFile(ctx.Context, parentHandle)
 		dirID := xdr.ExtractFileID(parentHandle)
 		dirWccAfter := xdr.MetadataToNFS(parentAttr, dirID)
 
@@ -332,7 +332,7 @@ func (h *DefaultNFSHandler) Create(
 	nfsFileAttr := xdr.MetadataToNFS(fileAttr, fileID)
 
 	// Get updated parent directory attributes
-	parentAttr, _ = metadataRepo.GetFile(parentHandle)
+	parentAttr, _ = metadataRepo.GetFile(ctx.Context, parentHandle)
 	dirID := xdr.ExtractFileID(parentHandle)
 	nfsDirAttr := xdr.MetadataToNFS(parentAttr, dirID)
 
@@ -407,31 +407,31 @@ func createNewFile(
 	fileHandle := generateFileHandle(req.DirHandle, req.Filename, now)
 
 	// Create file in metadata repository
-	if err := metadataRepo.CreateFile(fileHandle, fileAttr); err != nil {
+	if err := metadataRepo.CreateFile(ctx.Context, fileHandle, fileAttr); err != nil {
 		return nil, nil, fmt.Errorf("create file metadata: %w", err)
 	}
 
 	// Link file to parent directory
-	if err := metadataRepo.AddChild(parentHandle, req.Filename, fileHandle); err != nil {
+	if err := metadataRepo.AddChild(ctx.Context, parentHandle, req.Filename, fileHandle); err != nil {
 		// Cleanup: delete the file we just created
-		metadataRepo.DeleteFile(fileHandle)
+		metadataRepo.DeleteFile(ctx.Context, fileHandle)
 		return nil, nil, fmt.Errorf("link to parent: %w", err)
 	}
 
 	// Set parent relationship
-	if err := metadataRepo.SetParent(fileHandle, parentHandle); err != nil {
+	if err := metadataRepo.SetParent(ctx.Context, fileHandle, parentHandle); err != nil {
 		// Cleanup: remove from parent and delete file
-		metadataRepo.DeleteChild(parentHandle, req.Filename)
-		metadataRepo.DeleteFile(fileHandle)
+		metadataRepo.DeleteChild(ctx.Context, parentHandle, req.Filename)
+		metadataRepo.DeleteFile(ctx.Context, fileHandle)
 		return nil, nil, fmt.Errorf("set parent: %w", err)
 	}
 
 	// Update parent directory timestamps
-	parentAttr, err := metadataRepo.GetFile(parentHandle)
+	parentAttr, err := metadataRepo.GetFile(ctx.Context, parentHandle)
 	if err == nil {
 		parentAttr.Mtime = now
 		parentAttr.Ctime = now
-		metadataRepo.UpdateFile(parentHandle, parentAttr)
+		metadataRepo.UpdateFile(ctx.Context, parentHandle, parentAttr)
 	}
 
 	return fileHandle, fileAttr, nil
@@ -455,13 +455,14 @@ func createNewFile(
 // Returns:
 //   - Updated file attributes and error
 func truncateExistingFile(
+	ctx context.Context,
 	contentRepo content.Repository,
 	metadataRepo metadata.Repository,
 	fileHandle metadata.FileHandle,
 	req *CreateRequest,
 ) (*metadata.FileAttr, error) {
 	// Get current file attributes
-	fileAttr, err := metadataRepo.GetFile(fileHandle)
+	fileAttr, err := metadataRepo.GetFile(ctx.Context, fileHandle)
 	if err != nil {
 		return nil, fmt.Errorf("get file for truncation: %w", err)
 	}
@@ -485,7 +486,7 @@ func truncateExistingFile(
 	}
 
 	// Update metadata
-	if err := metadataRepo.UpdateFile(fileHandle, fileAttr); err != nil {
+	if err := metadataRepo.UpdateFile(ctx, fileHandle, fileAttr); err != nil {
 		return nil, fmt.Errorf("update file metadata: %w", err)
 	}
 

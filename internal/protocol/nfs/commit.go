@@ -298,7 +298,7 @@ func (h *DefaultNFSHandler) Commit(
 	// ========================================================================
 
 	handle := metadata.FileHandle(req.Handle)
-	fileAttr, err := repository.GetFile(handle)
+	fileAttr, err := repository.GetFile(ctx.Context, handle)
 	if err != nil {
 		logger.Warn("COMMIT failed: file not found: handle=%x client=%s error=%v",
 			req.Handle, clientIP, err)
@@ -349,7 +349,7 @@ func (h *DefaultNFSHandler) Commit(
 	//
 	//     // Get updated attributes for WCC data (best effort)
 	//     var wccAfter *types.NFSFileAttr
-	//     if updatedAttr, getErr := repository.GetFile(handle); getErr == nil {
+	//     if updatedAttr, getErr := repository.GetFile(ctx.Context, handle); getErr == nil {
 	//         fileID := xdr.ExtractFileID(handle)
 	//         wccAfter = xdr.MetadataToNFS(updatedAttr, fileID)
 	//     }
@@ -368,7 +368,7 @@ func (h *DefaultNFSHandler) Commit(
 	// ========================================================================
 
 	// Get updated file attributes for WCC data
-	fileAttr, err = repository.GetFile(handle)
+	fileAttr, err = repository.GetFile(ctx.Context, handle)
 	if err != nil {
 		logger.Warn("COMMIT: successful but cannot get updated file attributes: handle=%x error=%v",
 			req.Handle, err)

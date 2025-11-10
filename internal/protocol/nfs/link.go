@@ -237,7 +237,7 @@ func (h *DefaultNFSHandler) Link(
 	// ========================================================================
 
 	fileHandle := metadata.FileHandle(req.FileHandle)
-	fileAttr, err := repository.GetFile(fileHandle)
+	fileAttr, err := repository.GetFile(ctx.Context, fileHandle)
 	if err != nil {
 		logger.Warn("LINK failed: source file not found: file=%x client=%s error=%v",
 			req.FileHandle, clientIP, err)
@@ -256,7 +256,7 @@ func (h *DefaultNFSHandler) Link(
 	// ========================================================================
 
 	dirHandle := metadata.FileHandle(req.DirHandle)
-	dirAttr, err := repository.GetFile(dirHandle)
+	dirAttr, err := repository.GetFile(ctx.Context, dirHandle)
 	if err != nil {
 		logger.Warn("LINK failed: target directory not found: dir=%x client=%s error=%v",
 			req.DirHandle, clientIP, err)
@@ -286,13 +286,13 @@ func (h *DefaultNFSHandler) Link(
 	// Step 4: Check if name already exists in target directory
 	// ========================================================================
 
-	_, err = repository.GetChild(dirHandle, req.Name)
+	_, err = repository.GetChild(ctx.Context, dirHandle, req.Name)
 	if err == nil {
 		logger.Debug("LINK failed: name already exists: name='%s' dir=%x client=%s",
 			req.Name, req.DirHandle, clientIP)
 
 		// Get updated directory attributes for WCC
-		dirAttr, _ = repository.GetFile(dirHandle)
+		dirAttr, _ = repository.GetFile(ctx.Context, dirHandle)
 		dirID := xdr.ExtractFileID(dirHandle)
 		dirWccAfter := xdr.MetadataToNFS(dirAttr, dirID)
 
@@ -327,7 +327,7 @@ func (h *DefaultNFSHandler) Link(
 			req.Name, clientIP, err)
 
 		// Get updated directory attributes for WCC
-		dirAttr, _ = repository.GetFile(dirHandle)
+		dirAttr, _ = repository.GetFile(ctx.Context, dirHandle)
 		dirID := xdr.ExtractFileID(dirHandle)
 		dirWccAfter := xdr.MetadataToNFS(dirAttr, dirID)
 
@@ -346,7 +346,7 @@ func (h *DefaultNFSHandler) Link(
 	// ========================================================================
 
 	// Get updated file attributes (nlink should be incremented)
-	fileAttr, err = repository.GetFile(fileHandle)
+	fileAttr, err = repository.GetFile(ctx.Context, fileHandle)
 	if err != nil {
 		logger.Error("LINK: failed to get file attributes after link: file=%x error=%v",
 			req.FileHandle, err)
@@ -357,7 +357,7 @@ func (h *DefaultNFSHandler) Link(
 	nfsFileAttr := xdr.MetadataToNFS(fileAttr, fileID)
 
 	// Get updated directory attributes
-	dirAttr, _ = repository.GetFile(dirHandle)
+	dirAttr, _ = repository.GetFile(ctx.Context, dirHandle)
 	dirID := xdr.ExtractFileID(dirHandle)
 	nfsDirAttr := xdr.MetadataToNFS(dirAttr, dirID)
 

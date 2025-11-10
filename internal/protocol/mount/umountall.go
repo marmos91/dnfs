@@ -83,6 +83,12 @@ type UmountAllContext struct {
 //	resp, err := handler.UmntAll(repository, req, ctx)
 //	// Response is always success
 func (h *DefaultMountHandler) UmntAll(repository metadata.Repository, req *UmountAllRequest, ctx *UmountAllContext) (*UmountAllResponse, error) {
+	select {
+	case <-ctx.Context.Done():
+		return &UmountAllResponse{}, ctx.Context.Err()
+	default:
+	}
+
 	// Extract client IP from address (remove port)
 	clientIP, _, err := net.SplitHostPort(ctx.ClientAddr)
 	if err != nil {
@@ -93,7 +99,7 @@ func (h *DefaultMountHandler) UmntAll(repository metadata.Repository, req *Umoun
 	logger.Info("Unmount-all request: client=%s", clientIP)
 
 	// Get all mounts for this client to count them before removal
-	mounts, err := repository.GetMountsByClient(clientIP)
+	mounts, err := repository.GetMountsByClient(ctx.Context, clientIP)
 	if err != nil {
 		// Log the error but continue - we'll try to remove anyway
 		logger.Warn("Failed to get mounts for client: client=%s error=%v", clientIP, err)
@@ -107,7 +113,7 @@ func (h *DefaultMountHandler) UmntAll(repository metadata.Repository, req *Umoun
 	}
 
 	// Remove all mounts for this client
-	err = repository.RemoveAllMounts(clientIP)
+	err = repository.RemoveAllMounts(ctx.Context, clientIP)
 	if err != nil {
 		// Log the error but still return success per RFC 1813
 		// The mount tracking is informational - the client has already unmounted

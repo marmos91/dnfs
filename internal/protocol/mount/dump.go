@@ -125,7 +125,7 @@ func (h *DefaultMountHandler) Dump(repository metadata.Repository, req *DumpRequ
 	logger.Info("Dump request: client=%s", clientIP)
 
 	// Check if client is allowed to call DUMP
-	if err := repository.CheckDumpAccess(clientIP); err != nil {
+	if err := repository.CheckDumpAccess(ctx.Context, clientIP); err != nil {
 		if exportErr, ok := err.(*metadata.ExportError); ok {
 			logger.Warn("Dump access denied: client=%s reason=%s", clientIP, exportErr.Message)
 			// Return empty list instead of error (DUMP has no error status codes)
@@ -140,7 +140,7 @@ func (h *DefaultMountHandler) Dump(repository metadata.Repository, req *DumpRequ
 	}
 
 	// Get all active mounts from the repository
-	mounts, err := repository.GetMounts("")
+	mounts, err := repository.GetMounts(ctx.Context, "")
 	if err != nil {
 		logger.Error("Failed to get mounts: error=%v", err)
 		return nil, fmt.Errorf("failed to retrieve mounts: %w", err)

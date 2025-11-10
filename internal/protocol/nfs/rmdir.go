@@ -264,7 +264,7 @@ func (h *DefaultNFSHandler) Rmdir(
 	// ========================================================================
 
 	parentHandle := metadata.FileHandle(req.DirHandle)
-	parentAttr, err := repository.GetFile(parentHandle)
+	parentAttr, err := repository.GetFile(ctx.Context, parentHandle)
 	if err != nil {
 		logger.Warn("RMDIR failed: parent not found: dir=%x client=%s error=%v",
 			req.DirHandle, clientIP, err)
@@ -318,7 +318,7 @@ func (h *DefaultNFSHandler) Rmdir(
 			req.Name, clientIP, err)
 
 		// Get updated parent attributes for WCC data
-		parentAttr, _ = repository.GetFile(parentHandle)
+		parentAttr, _ = repository.GetFile(ctx.Context, parentHandle)
 		dirID := xdr.ExtractFileID(parentHandle)
 		wccAfter := xdr.MetadataToNFS(parentAttr, dirID)
 
@@ -337,7 +337,7 @@ func (h *DefaultNFSHandler) Rmdir(
 	// ========================================================================
 
 	// Get updated parent directory attributes
-	parentAttr, _ = repository.GetFile(parentHandle)
+	parentAttr, _ = repository.GetFile(ctx.Context, parentHandle)
 	dirID := xdr.ExtractFileID(parentHandle)
 	wccAfter := xdr.MetadataToNFS(parentAttr, dirID)
 

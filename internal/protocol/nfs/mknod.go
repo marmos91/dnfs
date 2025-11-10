@@ -322,7 +322,7 @@ func (h *DefaultNFSHandler) Mknod(
 	// ========================================================================
 
 	parentHandle := metadata.FileHandle(req.DirHandle)
-	parentAttr, err := repository.GetFile(parentHandle)
+	parentAttr, err := repository.GetFile(ctx.Context, parentHandle)
 	if err != nil {
 		logger.Warn("MKNOD failed: parent not found: dir=%x client=%s error=%v",
 			req.DirHandle, clientIP, err)
@@ -352,14 +352,14 @@ func (h *DefaultNFSHandler) Mknod(
 	// Step 3: Check if special file name already exists
 	// ========================================================================
 
-	_, err = repository.GetChild(parentHandle, req.Name)
+	_, err = repository.GetChild(ctx.Context, parentHandle, req.Name)
 	if err == nil {
 		// Child exists
 		logger.Debug("MKNOD failed: file '%s' already exists: dir=%x client=%s",
 			req.Name, req.DirHandle, clientIP)
 
 		// Get updated parent attributes for WCC data
-		parentAttr, _ = repository.GetFile(parentHandle)
+		parentAttr, _ = repository.GetFile(ctx.Context, parentHandle)
 		dirID := xdr.ExtractFileID(parentHandle)
 		wccAfter := xdr.MetadataToNFS(parentAttr, dirID)
 
@@ -410,7 +410,7 @@ func (h *DefaultNFSHandler) Mknod(
 			req.Name, req.Type, clientIP, err)
 
 		// Get updated parent attributes for WCC data
-		parentAttr, _ = repository.GetFile(parentHandle)
+		parentAttr, _ = repository.GetFile(ctx.Context, parentHandle)
 		dirID := xdr.ExtractFileID(parentHandle)
 		wccAfter := xdr.MetadataToNFS(parentAttr, dirID)
 
@@ -429,7 +429,7 @@ func (h *DefaultNFSHandler) Mknod(
 	// ========================================================================
 
 	// Get the newly created file's attributes
-	newFileAttr, err := repository.GetFile(newHandle)
+	newFileAttr, err := repository.GetFile(ctx.Context, newHandle)
 	if err != nil {
 		logger.Error("MKNOD: failed to get new file attributes: handle=%x error=%v",
 			newHandle, err)
@@ -442,7 +442,7 @@ func (h *DefaultNFSHandler) Mknod(
 	nfsAttr := xdr.MetadataToNFS(newFileAttr, fileid)
 
 	// Get updated parent attributes for WCC data
-	parentAttr, _ = repository.GetFile(parentHandle)
+	parentAttr, _ = repository.GetFile(ctx.Context, parentHandle)
 	parentFileid := xdr.ExtractFileID(parentHandle)
 	wccAfter := xdr.MetadataToNFS(parentAttr, parentFileid)
 

@@ -277,7 +277,7 @@ func (h *DefaultNFSHandler) Rename(
 	// ========================================================================
 
 	fromDirHandle := metadata.FileHandle(req.FromDirHandle)
-	fromDirAttr, err := repository.GetFile(fromDirHandle)
+	fromDirAttr, err := repository.GetFile(ctx.Context, fromDirHandle)
 	if err != nil {
 		logger.Warn("RENAME failed: source directory not found: dir=%x client=%s error=%v",
 			req.FromDirHandle, clientIP, err)
@@ -307,7 +307,7 @@ func (h *DefaultNFSHandler) Rename(
 	// ========================================================================
 
 	toDirHandle := metadata.FileHandle(req.ToDirHandle)
-	toDirAttr, err := repository.GetFile(toDirHandle)
+	toDirAttr, err := repository.GetFile(ctx.Context, toDirHandle)
 	if err != nil {
 		logger.Warn("RENAME failed: destination directory not found: dir=%x client=%s error=%v",
 			req.ToDirHandle, clientIP, err)
@@ -374,13 +374,13 @@ func (h *DefaultNFSHandler) Rename(
 
 		// Get updated directory attributes for WCC data
 		var fromDirWccAfter *types.NFSFileAttr
-		if updatedFromDirAttr, getErr := repository.GetFile(fromDirHandle); getErr == nil {
+		if updatedFromDirAttr, getErr := repository.GetFile(ctx.Context, fromDirHandle); getErr == nil {
 			fromDirID := xdr.ExtractFileID(fromDirHandle)
 			fromDirWccAfter = xdr.MetadataToNFS(updatedFromDirAttr, fromDirID)
 		}
 
 		var toDirWccAfter *types.NFSFileAttr
-		if updatedToDirAttr, getErr := repository.GetFile(toDirHandle); getErr == nil {
+		if updatedToDirAttr, getErr := repository.GetFile(ctx.Context, toDirHandle); getErr == nil {
 			toDirID := xdr.ExtractFileID(toDirHandle)
 			toDirWccAfter = xdr.MetadataToNFS(updatedToDirAttr, toDirID)
 		}
@@ -403,7 +403,7 @@ func (h *DefaultNFSHandler) Rename(
 
 	// Get updated source directory attributes
 	var fromDirWccAfter *types.NFSFileAttr
-	if updatedFromDirAttr, getErr := repository.GetFile(fromDirHandle); getErr != nil {
+	if updatedFromDirAttr, getErr := repository.GetFile(ctx.Context, fromDirHandle); getErr != nil {
 		logger.Warn("RENAME: successful but cannot get updated source directory attributes: dir=%x error=%v",
 			req.FromDirHandle, getErr)
 		// fromDirWccAfter will be nil
@@ -414,7 +414,7 @@ func (h *DefaultNFSHandler) Rename(
 
 	// Get updated destination directory attributes
 	var toDirWccAfter *types.NFSFileAttr
-	if updatedToDirAttr, getErr := repository.GetFile(toDirHandle); getErr != nil {
+	if updatedToDirAttr, getErr := repository.GetFile(ctx.Context, toDirHandle); getErr != nil {
 		logger.Warn("RENAME: successful but cannot get updated destination directory attributes: dir=%x error=%v",
 			req.ToDirHandle, getErr)
 		// toDirWccAfter will be nil

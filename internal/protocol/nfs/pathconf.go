@@ -222,7 +222,7 @@ func (h *DefaultNFSHandler) PathConf(repository metadata.Repository, req *PathCo
 	// Step 2: Verify the file handle exists and is valid in the repository
 	// ========================================================================
 
-	attr, err := repository.GetFile(metadata.FileHandle(req.Handle))
+	attr, err := repository.GetFile(ctx.Context, metadata.FileHandle(req.Handle))
 	if err != nil {
 		logger.Debug("PATHCONF failed: handle=%x client=%s error=%v",
 			req.Handle, ctx.ClientAddr, err)
@@ -234,7 +234,7 @@ func (h *DefaultNFSHandler) PathConf(repository metadata.Repository, req *PathCo
 	// ========================================================================
 	// All business logic about filesystem properties is handled by the repository
 
-	pathConf, err := repository.GetPathConf(metadata.FileHandle(req.Handle))
+	pathConf, err := repository.GetPathConf(ctx.Context, metadata.FileHandle(req.Handle))
 	if err != nil {
 		logger.Error("PATHCONF failed: handle=%x client=%s error=failed to retrieve pathconf: %v",
 			req.Handle, ctx.ClientAddr, err)
