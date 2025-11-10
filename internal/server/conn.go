@@ -184,7 +184,26 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 
 	switch call.Procedure {
 	case types.NFSProcNull:
-		return handler.Null(repo)
+		uid, gid, gids := extractUnixAuth(call, "READDIRPLUS")
+		nullCtx := &nfs.NullContext{
+			ClientAddr: c.conn.RemoteAddr().String(),
+			AuthFlavor: authFlavor,
+			UID:        uid,
+			GID:        gid,
+			GIDs:       gids,
+		}
+
+		return handleRequest(
+			data,
+			nfs.DecodeNullRequest,
+			func(req *nfs.NullRequest) (*nfs.NullResponse, error) {
+				return handler.Null(repo, req, nullCtx)
+			},
+			types.NFS3ErrAcces,
+			func(status uint32) *nfs.NullResponse {
+				return &nfs.NullResponse{}
+			},
+		)
 
 	case types.NFSProcGetAttr:
 		getAttrCtx := &nfs.GetAttrContext{
@@ -586,11 +605,20 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 		)
 
 	case types.NFSProcCommit:
+		uid, gid, gids := extractUnixAuth(call, "COMMIT")
+		commitCtx := &nfs.CommitContext{
+			ClientAddr: c.conn.RemoteAddr().String(),
+			AuthFlavor: authFlavor,
+			UID:        uid,
+			GID:        gid,
+			GIDs:       gids,
+		}
+
 		return handleRequest(
 			data,
 			nfs.DecodeCommitRequest,
 			func(req *nfs.CommitRequest) (*nfs.CommitResponse, error) {
-				return handler.Commit(repo, req)
+				return handler.Commit(repo, req, commitCtx)
 			},
 			types.NFS3ErrIO,
 			func(status uint32) *nfs.CommitResponse {

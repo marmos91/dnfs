@@ -2108,13 +2108,13 @@ func (r *MemoryRepository) WriteFile(
 	// ========================================================================
 
 	if attr.ContentID == "" {
-		var keyPart []byte
-		if len(key) >= 16 {
-			keyPart = key[:16]
+		var handlePart []byte
+		if len(handle) >= 16 {
+			handlePart = handle[:16]
 		} else {
-			keyPart = key
+			handlePart = handle
 		}
-		attr.ContentID = content.ContentID(fmt.Sprintf("file-%x", keyPart))
+		attr.ContentID = content.ContentID(fmt.Sprintf("file-%x", handlePart))
 	}
 
 	// ========================================================================
