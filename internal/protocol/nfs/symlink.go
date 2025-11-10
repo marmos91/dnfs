@@ -152,8 +152,9 @@ type SymlinkContext struct {
 //  2. Extract client IP and authentication credentials from context
 //  3. Verify parent directory exists and is a directory (via repository)
 //  4. Capture pre-operation directory state (for WCC)
-//  5. Delegate symlink creation to repository.CreateSymlink()
-//  6. Return symlink handle, attributes, and updated directory WCC data
+//  5. Convert client attributes to metadata format with proper defaults
+//  6. Delegate symlink creation to repository.CreateSymlink()
+//  7. Return symlink handle, attributes, and updated directory WCC data
 //
 // **Design Principles:**
 //
@@ -187,11 +188,16 @@ type SymlinkContext struct {
 //   - UID/GID: Used for ownership (or defaults to authenticated user)
 //   - Size/Times: Ignored, set by server
 //
-// The server is responsible for:
-//   - Setting the file type to symlink
-//   - Applying default or requested permissions
-//   - Setting creation/modification times
-//   - Storing the target path
+// The protocol layer uses `convertSetAttrsToMetadata` to:
+//   - Apply client-provided attributes (mode, uid, gid)
+//   - Set defaults from authentication context when not provided
+//   - Ensure consistent behavior with other file creation operations
+//
+// The repository completes the attributes with:
+//   - File type (symlink)
+//   - Creation/modification times
+//   - Size (length of target path)
+//   - Target path storage
 //
 // **Error Handling:**
 //
@@ -321,23 +327,7 @@ func (h *DefaultNFSHandler) Symlink(
 	}
 
 	// ========================================================================
-	// Step 3: Build symlink attributes from request
-	// ========================================================================
-	// The protocol layer prepares the attributes structure, applying
-	// defaults and incorporating the client's requested attributes.
-	// The repository will complete the attributes with server-assigned values.
-
-	symlinkAttr := &metadata.FileAttr{
-		Type: metadata.FileTypeSymlink,
-		Mode: 0777, // Default symlink permissions (typically rwxrwxrwx)
-	}
-
-	// Apply client-provided attributes
-	// The repository will set UID/GID based on auth context if not provided
-	applySetAttrs(symlinkAttr, &req.Attr)
-
-	// ========================================================================
-	// Step 4: Build authentication context for repository
+	// Step 3: Build authentication context for repository
 	// ========================================================================
 
 	authCtx := &metadata.AuthContext{
@@ -349,13 +339,29 @@ func (h *DefaultNFSHandler) Symlink(
 	}
 
 	// ========================================================================
+	// Step 4: Convert client attributes to metadata format
+	// ========================================================================
+	// Use convertSetAttrsToMetadata to ensure consistent attribute handling
+	// across all file creation operations (MKDIR, MKNOD, SYMLINK, CREATE).
+	// This properly applies:
+	// - Client-provided attributes (mode, uid, gid)
+	// - Defaults from authentication context when not provided by client
+	// - Default permissions (0777 for symlinks)
+	//
+	// The repository will complete the attributes with:
+	// - Timestamps (atime, mtime, ctime)
+	// - Size (length of target path)
+	// - Target path (stored in SymlinkTarget field)
+
+	symlinkAttr := convertSetAttrsToMetadata(metadata.FileTypeSymlink, &req.Attr, authCtx)
+
+	// ========================================================================
 	// Step 5: Create symlink via repository
 	// ========================================================================
 	// The repository is responsible for:
 	// - Checking write permission on parent directory
 	// - Verifying name doesn't already exist
-	// - Completing symlink attributes (timestamps, size, ownership)
-	// - Storing the target path
+	// - Completing symlink attributes (timestamps, size, target path)
 	// - Creating the symlink metadata
 	// - Linking it to the parent directory
 	// - Updating parent directory timestamps
