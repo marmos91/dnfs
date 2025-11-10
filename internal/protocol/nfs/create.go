@@ -10,6 +10,8 @@ import (
 	"github.com/marmos91/dittofs/internal/content"
 	"github.com/marmos91/dittofs/internal/logger"
 	"github.com/marmos91/dittofs/internal/metadata"
+	"github.com/marmos91/dittofs/internal/protocol/nfs/types"
+	"github.com/marmos91/dittofs/internal/protocol/nfs/xdr"
 )
 
 // ============================================================================
@@ -70,15 +72,15 @@ type CreateResponse struct {
 
 	// Attr contains post-operation attributes of the created file.
 	// Only present when Status == NFS3OK.
-	Attr *FileAttr
+	Attr *types.FileAttr
 
 	// DirBefore contains pre-operation attributes of the parent directory.
 	// Used for weak cache consistency.
-	DirBefore *WccAttr
+	DirBefore *types.WccAttr
 
 	// DirAfter contains post-operation attributes of the parent directory.
 	// Used for weak cache consistency.
-	DirAfter *FileAttr
+	DirAfter *types.FileAttr
 }
 
 // CreateContext contains the context information for processing a CREATE request.
@@ -169,7 +171,7 @@ func (h *DefaultNFSHandler) Create(
 	ctx *CreateContext,
 ) (*CreateResponse, error) {
 	// Extract client IP for logging
-	clientIP := extractClientIP(ctx.ClientAddr)
+	clientIP := xdr.ExtractClientIP(ctx.ClientAddr)
 
 	logger.Info("CREATE: file='%s' dir=%x mode=%s client=%s auth=%d",
 		req.Filename, req.DirHandle, createModeName(req.Mode), clientIP, ctx.AuthFlavor)
@@ -193,11 +195,11 @@ func (h *DefaultNFSHandler) Create(
 	if err != nil {
 		logger.Warn("CREATE failed: parent not found: file='%s' dir=%x client=%s error=%v",
 			req.Filename, req.DirHandle, clientIP, err)
-		return &CreateResponse{Status: NFS3ErrNoEnt}, nil
+		return &CreateResponse{Status: types.NFS3ErrNoEnt}, nil
 	}
 
 	// Capture pre-operation directory state for WCC
-	dirWccBefore := captureWccAttr(parentAttr)
+	dirWccBefore := xdr.CaptureWccAttr(parentAttr)
 
 	// Verify parent is a directory
 	if parentAttr.Type != metadata.FileTypeDirectory {
@@ -205,11 +207,11 @@ func (h *DefaultNFSHandler) Create(
 			req.Filename, req.DirHandle, parentAttr.Type, clientIP)
 
 		// Get current parent state for WCC
-		dirID := extractFileID(parentHandle)
-		dirWccAfter := MetadataToNFSAttr(parentAttr, dirID)
+		dirID := xdr.ExtractFileID(parentHandle)
+		dirWccAfter := xdr.MetadataToNFSAttr(parentAttr, dirID)
 
 		return &CreateResponse{
-			Status:    NFS3ErrNotDir,
+			Status:    types.NFS3ErrNotDir,
 			DirBefore: dirWccBefore,
 			DirAfter:  dirWccAfter,
 		}, nil
@@ -230,7 +232,7 @@ func (h *DefaultNFSHandler) Create(
 	var fileAttr *metadata.FileAttr
 
 	switch req.Mode {
-	case CreateGuarded:
+	case types.CreateGuarded:
 		// GUARDED: Fail if file exists
 		if fileExists {
 			logger.Debug("CREATE failed: file exists (guarded): file='%s' client=%s",
@@ -238,11 +240,11 @@ func (h *DefaultNFSHandler) Create(
 
 			// Get current parent state for WCC
 			parentAttr, _ = metadataRepo.GetFile(parentHandle)
-			dirID := extractFileID(parentHandle)
-			dirWccAfter := MetadataToNFSAttr(parentAttr, dirID)
+			dirID := xdr.ExtractFileID(parentHandle)
+			dirWccAfter := xdr.MetadataToNFSAttr(parentAttr, dirID)
 
 			return &CreateResponse{
-				Status:    NFS3ErrExist,
+				Status:    types.NFS3ErrExist,
 				DirBefore: dirWccBefore,
 				DirAfter:  dirWccAfter,
 			}, nil
@@ -251,7 +253,7 @@ func (h *DefaultNFSHandler) Create(
 		// Create new file
 		fileHandle, fileAttr, err = createNewFile(metadataRepo, parentHandle, req, ctx)
 
-	case CreateExclusive:
+	case types.CreateExclusive:
 		// EXCLUSIVE: Check verifier if file exists
 		if fileExists {
 			// TODO: Implement verifier checking for idempotency
@@ -260,11 +262,11 @@ func (h *DefaultNFSHandler) Create(
 				req.Filename, clientIP, req.Verf)
 
 			parentAttr, _ = metadataRepo.GetFile(parentHandle)
-			dirID := extractFileID(parentHandle)
-			dirWccAfter := MetadataToNFSAttr(parentAttr, dirID)
+			dirID := xdr.ExtractFileID(parentHandle)
+			dirWccAfter := xdr.MetadataToNFSAttr(parentAttr, dirID)
 
 			return &CreateResponse{
-				Status:    NFS3ErrExist,
+				Status:    types.NFS3ErrExist,
 				DirBefore: dirWccBefore,
 				DirAfter:  dirWccAfter,
 			}, nil
@@ -273,7 +275,7 @@ func (h *DefaultNFSHandler) Create(
 		// Create new file with verifier
 		fileHandle, fileAttr, err = createNewFile(metadataRepo, parentHandle, req, ctx)
 
-	case CreateUnchecked:
+	case types.CreateUnchecked:
 		// UNCHECKED: Create or truncate existing
 		if fileExists {
 			// Truncate existing file
@@ -289,11 +291,11 @@ func (h *DefaultNFSHandler) Create(
 			req.Filename, req.Mode, clientIP)
 
 		parentAttr, _ = metadataRepo.GetFile(parentHandle)
-		dirID := extractFileID(parentHandle)
-		dirWccAfter := MetadataToNFSAttr(parentAttr, dirID)
+		dirID := xdr.ExtractFileID(parentHandle)
+		dirWccAfter := xdr.MetadataToNFSAttr(parentAttr, dirID)
 
 		return &CreateResponse{
-			Status:    NFS3ErrInval,
+			Status:    types.NFS3ErrInval,
 			DirBefore: dirWccBefore,
 			DirAfter:  dirWccAfter,
 		}, nil
@@ -308,11 +310,11 @@ func (h *DefaultNFSHandler) Create(
 			req.Filename, clientIP, err)
 
 		parentAttr, _ = metadataRepo.GetFile(parentHandle)
-		dirID := extractFileID(parentHandle)
-		dirWccAfter := MetadataToNFSAttr(parentAttr, dirID)
+		dirID := xdr.ExtractFileID(parentHandle)
+		dirWccAfter := xdr.MetadataToNFSAttr(parentAttr, dirID)
 
 		return &CreateResponse{
-			Status:    NFS3ErrIO,
+			Status:    types.NFS3ErrIO,
 			DirBefore: dirWccBefore,
 			DirAfter:  dirWccAfter,
 		}, nil
@@ -323,19 +325,19 @@ func (h *DefaultNFSHandler) Create(
 	// ========================================================================
 
 	// Convert metadata to NFS attributes
-	fileID := extractFileID(fileHandle)
-	nfsFileAttr := MetadataToNFSAttr(fileAttr, fileID)
+	fileID := xdr.ExtractFileID(fileHandle)
+	nfsFileAttr := xdr.MetadataToNFSAttr(fileAttr, fileID)
 
 	// Get updated parent directory attributes
 	parentAttr, _ = metadataRepo.GetFile(parentHandle)
-	dirID := extractFileID(parentHandle)
-	nfsDirAttr := MetadataToNFSAttr(parentAttr, dirID)
+	dirID := xdr.ExtractFileID(parentHandle)
+	nfsDirAttr := xdr.MetadataToNFSAttr(parentAttr, dirID)
 
 	logger.Info("CREATE successful: file='%s' handle=%x mode=%o size=%d client=%s",
 		req.Filename, fileHandle, fileAttr.Mode, fileAttr.Size, clientIP)
 
 	return &CreateResponse{
-		Status:     NFS3OK,
+		Status:     types.NFS3OK,
 		FileHandle: fileHandle,
 		Attr:       nfsFileAttr,
 		DirBefore:  dirWccBefore,
@@ -395,7 +397,7 @@ func createNewFile(
 
 	// Apply explicit attributes from request
 	if req.Attr != nil {
-		applySetAttrs(fileAttr, req.Attr)
+		xdr.ApplySetAttrs(fileAttr, req.Attr)
 	}
 
 	// Generate unique file handle
@@ -476,7 +478,7 @@ func truncateExistingFile(
 
 	// Apply other requested attributes
 	if req.Attr != nil {
-		applySetAttrs(fileAttr, req.Attr)
+		xdr.ApplySetAttrs(fileAttr, req.Attr)
 	}
 
 	// Update metadata
@@ -553,14 +555,14 @@ func validateCreateRequest(req *CreateRequest) *createValidationError {
 	if len(req.DirHandle) == 0 {
 		return &createValidationError{
 			message:   "empty parent directory handle",
-			nfsStatus: NFS3ErrInval,
+			nfsStatus: types.NFS3ErrInval,
 		}
 	}
 
 	if len(req.DirHandle) > 64 {
 		return &createValidationError{
 			message:   fmt.Sprintf("parent handle too long: %d bytes (max 64)", len(req.DirHandle)),
-			nfsStatus: NFS3ErrInval,
+			nfsStatus: types.NFS3ErrInval,
 		}
 	}
 
@@ -568,14 +570,14 @@ func validateCreateRequest(req *CreateRequest) *createValidationError {
 	if req.Filename == "" {
 		return &createValidationError{
 			message:   "empty filename",
-			nfsStatus: NFS3ErrInval,
+			nfsStatus: types.NFS3ErrInval,
 		}
 	}
 
 	if len(req.Filename) > 255 {
 		return &createValidationError{
 			message:   fmt.Sprintf("filename too long: %d bytes (max 255)", len(req.Filename)),
-			nfsStatus: NFS3ErrNameTooLong,
+			nfsStatus: types.NFS3ErrNameTooLong,
 		}
 	}
 
@@ -583,7 +585,7 @@ func validateCreateRequest(req *CreateRequest) *createValidationError {
 	if bytes.ContainsAny([]byte(req.Filename), "/\x00") {
 		return &createValidationError{
 			message:   "filename contains invalid characters (null or path separator)",
-			nfsStatus: NFS3ErrInval,
+			nfsStatus: types.NFS3ErrInval,
 		}
 	}
 
@@ -591,15 +593,15 @@ func validateCreateRequest(req *CreateRequest) *createValidationError {
 	if req.Filename == "." || req.Filename == ".." {
 		return &createValidationError{
 			message:   fmt.Sprintf("filename cannot be '%s'", req.Filename),
-			nfsStatus: NFS3ErrInval,
+			nfsStatus: types.NFS3ErrInval,
 		}
 	}
 
 	// Validate creation mode
-	if req.Mode > CreateExclusive {
+	if req.Mode > types.CreateExclusive {
 		return &createValidationError{
 			message:   fmt.Sprintf("invalid creation mode: %d", req.Mode),
-			nfsStatus: NFS3ErrInval,
+			nfsStatus: types.NFS3ErrInval,
 		}
 	}
 
@@ -609,11 +611,11 @@ func validateCreateRequest(req *CreateRequest) *createValidationError {
 // createModeName returns a human-readable name for a creation mode.
 func createModeName(mode uint32) string {
 	switch mode {
-	case CreateUnchecked:
+	case types.CreateUnchecked:
 		return "UNCHECKED"
-	case CreateGuarded:
+	case types.CreateGuarded:
 		return "GUARDED"
-	case CreateExclusive:
+	case types.CreateExclusive:
 		return "EXCLUSIVE"
 	default:
 		return fmt.Sprintf("UNKNOWN(%d)", mode)
@@ -655,13 +657,13 @@ func DecodeCreateRequest(data []byte) (*CreateRequest, error) {
 	reader := bytes.NewReader(data)
 
 	// Decode directory handle
-	dirHandle, err := decodeOpaque(reader)
+	dirHandle, err := xdr.DecodeOpaque(reader)
 	if err != nil {
 		return nil, fmt.Errorf("decode directory handle: %w", err)
 	}
 
 	// Decode filename
-	filename, err := decodeString(reader)
+	filename, err := xdr.DecodeString(reader)
 	if err != nil {
 		return nil, fmt.Errorf("decode filename: %w", err)
 	}
@@ -680,7 +682,7 @@ func DecodeCreateRequest(data []byte) (*CreateRequest, error) {
 
 	// Decode mode-specific data
 	switch mode {
-	case CreateExclusive:
+	case types.CreateExclusive:
 		// Decode verifier (8 bytes)
 		var verf uint64
 		if err := binary.Read(reader, binary.BigEndian, &verf); err != nil {
@@ -688,9 +690,9 @@ func DecodeCreateRequest(data []byte) (*CreateRequest, error) {
 		}
 		req.Verf = verf
 
-	case CreateUnchecked, CreateGuarded:
+	case types.CreateUnchecked, types.CreateGuarded:
 		// Decode sattr3 (set attributes)
-		attr, err := decodeSetAttrs(reader)
+		attr, err := xdr.DecodeSetAttrs(reader)
 		if err != nil {
 			return nil, fmt.Errorf("decode attributes: %w", err)
 		}
@@ -730,20 +732,20 @@ func (resp *CreateResponse) Encode() ([]byte, error) {
 	}
 
 	// Success case: Write file handle and attributes
-	if resp.Status == NFS3OK {
+	if resp.Status == types.NFS3OK {
 		// Write optional file handle
-		if err := encodeOptionalOpaque(&buf, resp.FileHandle); err != nil {
+		if err := xdr.EncodeOptionalOpaque(&buf, resp.FileHandle); err != nil {
 			return nil, fmt.Errorf("encode file handle: %w", err)
 		}
 
 		// Write optional file attributes
-		if err := encodeOptionalFileAttr(&buf, resp.Attr); err != nil {
+		if err := xdr.EncodeOptionalFileAttr(&buf, resp.Attr); err != nil {
 			return nil, fmt.Errorf("encode file attributes: %w", err)
 		}
 	}
 
 	// Write directory WCC data (both success and failure)
-	if err := encodeWccData(&buf, resp.DirBefore, resp.DirAfter); err != nil {
+	if err := xdr.EncodeWccData(&buf, resp.DirBefore, resp.DirAfter); err != nil {
 		return nil, fmt.Errorf("encode directory wcc data: %w", err)
 	}
 

@@ -7,6 +7,8 @@ import (
 
 	"github.com/marmos91/dittofs/internal/logger"
 	"github.com/marmos91/dittofs/internal/metadata"
+	"github.com/marmos91/dittofs/internal/protocol/nfs/types"
+	"github.com/marmos91/dittofs/internal/protocol/nfs/xdr"
 )
 
 // ============================================================================
@@ -114,15 +116,15 @@ type MknodResponse struct {
 	// Attr contains the attributes of the newly created special file.
 	// Only present when Status == NFS3OK.
 	// Includes mode, ownership, timestamps, etc.
-	Attr *FileAttr
+	Attr *types.FileAttr
 
 	// DirAttrBefore contains pre-operation attributes of the parent directory.
 	// Used for weak cache consistency. May be nil.
-	DirAttrBefore *WccAttr
+	DirAttrBefore *types.WccAttr
 
 	// DirAttrAfter contains post-operation attributes of the parent directory.
 	// Used for weak cache consistency. May be nil on error.
-	DirAttrAfter *FileAttr
+	DirAttrAfter *types.FileAttr
 }
 
 // MknodContext contains the context information needed to process a MKNOD request.
@@ -297,7 +299,7 @@ func (h *DefaultNFSHandler) Mknod(
 	ctx *MknodContext,
 ) (*MknodResponse, error) {
 	// Extract client IP for logging
-	clientIP := extractClientIP(ctx.ClientAddr)
+	clientIP := xdr.ExtractClientIP(ctx.ClientAddr)
 
 	logger.Info("MKNOD: name='%s' type=%s dir=%x mode=%o client=%s auth=%d",
 		req.Name, specialFileTypeName(req.Type), req.DirHandle, req.Attr.Mode, clientIP, ctx.AuthFlavor)
@@ -321,11 +323,11 @@ func (h *DefaultNFSHandler) Mknod(
 	if err != nil {
 		logger.Warn("MKNOD failed: parent not found: dir=%x client=%s error=%v",
 			req.DirHandle, clientIP, err)
-		return &MknodResponse{Status: NFS3ErrNoEnt}, nil
+		return &MknodResponse{Status: types.NFS3ErrNoEnt}, nil
 	}
 
 	// Capture pre-operation attributes for WCC data
-	wccBefore := captureWccAttr(parentAttr)
+	wccBefore := xdr.CaptureWccAttr(parentAttr)
 
 	// Verify parent is actually a directory
 	if parentAttr.Type != metadata.FileTypeDirectory {
@@ -333,11 +335,11 @@ func (h *DefaultNFSHandler) Mknod(
 			req.DirHandle, parentAttr.Type, clientIP)
 
 		// Get current parent state for WCC
-		dirID := extractFileID(parentHandle)
-		wccAfter := MetadataToNFSAttr(parentAttr, dirID)
+		dirID := xdr.ExtractFileID(parentHandle)
+		wccAfter := xdr.MetadataToNFSAttr(parentAttr, dirID)
 
 		return &MknodResponse{
-			Status:        NFS3ErrNotDir,
+			Status:        types.NFS3ErrNotDir,
 			DirAttrBefore: wccBefore,
 			DirAttrAfter:  wccAfter,
 		}, nil
@@ -355,11 +357,11 @@ func (h *DefaultNFSHandler) Mknod(
 
 		// Get updated parent attributes for WCC data
 		parentAttr, _ = repository.GetFile(parentHandle)
-		dirID := extractFileID(parentHandle)
-		wccAfter := MetadataToNFSAttr(parentAttr, dirID)
+		dirID := xdr.ExtractFileID(parentHandle)
+		wccAfter := xdr.MetadataToNFSAttr(parentAttr, dirID)
 
 		return &MknodResponse{
-			Status:        NFS3ErrExist,
+			Status:        types.NFS3ErrExist,
 			DirAttrBefore: wccBefore,
 			DirAttrAfter:  wccAfter,
 		}, nil
@@ -388,7 +390,7 @@ func (h *DefaultNFSHandler) Mknod(
 	}
 
 	// Convert SetAttrs to metadata format for repository
-	fileAttr := convertSetAttrsToMetadata(nfsTypeToMetadataType(req.Type), &req.Attr, authCtx)
+	fileAttr := xdr.ConvertSetAttrsToMetadata(nfsTypeToMetadataType(req.Type), &req.Attr, authCtx)
 	fileAttr.Type = nfsTypeToMetadataType(req.Type)
 
 	// Create the special file
@@ -406,11 +408,11 @@ func (h *DefaultNFSHandler) Mknod(
 
 		// Get updated parent attributes for WCC data
 		parentAttr, _ = repository.GetFile(parentHandle)
-		dirID := extractFileID(parentHandle)
-		wccAfter := MetadataToNFSAttr(parentAttr, dirID)
+		dirID := xdr.ExtractFileID(parentHandle)
+		wccAfter := xdr.MetadataToNFSAttr(parentAttr, dirID)
 
 		// Map repository errors to NFS status codes
-		status := mapRepositoryErrorToNFSStatus(err, clientIP, "mknod")
+		status := xdr.MapRepositoryErrorToNFSStatus(err, clientIP, "mknod")
 
 		return &MknodResponse{
 			Status:        status,
@@ -429,17 +431,17 @@ func (h *DefaultNFSHandler) Mknod(
 		logger.Error("MKNOD: failed to get new file attributes: handle=%x error=%v",
 			newHandle, err)
 		// This shouldn't happen, but handle gracefully
-		return &MknodResponse{Status: NFS3ErrIO}, nil
+		return &MknodResponse{Status: types.NFS3ErrIO}, nil
 	}
 
 	// Generate file ID from handle for NFS attributes
-	fileid := extractFileID(newHandle)
-	nfsAttr := MetadataToNFSAttr(newFileAttr, fileid)
+	fileid := xdr.ExtractFileID(newHandle)
+	nfsAttr := xdr.MetadataToNFSAttr(newFileAttr, fileid)
 
 	// Get updated parent attributes for WCC data
 	parentAttr, _ = repository.GetFile(parentHandle)
-	parentFileid := extractFileID(parentHandle)
-	wccAfter := MetadataToNFSAttr(parentAttr, parentFileid)
+	parentFileid := xdr.ExtractFileID(parentHandle)
+	wccAfter := xdr.MetadataToNFSAttr(parentAttr, parentFileid)
 
 	logger.Info("MKNOD successful: name='%s' type=%s handle=%x mode=%o major=%d minor=%d client=%s",
 		req.Name, specialFileTypeName(req.Type), newHandle, newFileAttr.Mode,
@@ -449,7 +451,7 @@ func (h *DefaultNFSHandler) Mknod(
 		fileid, newFileAttr.UID, newFileAttr.GID, parentFileid)
 
 	return &MknodResponse{
-		Status:        NFS3OK,
+		Status:        types.NFS3OK,
 		FileHandle:    newHandle,
 		Attr:          nfsAttr,
 		DirAttrBefore: wccBefore,
@@ -486,14 +488,14 @@ func validateMknodRequest(req *MknodRequest) *mknodValidationError {
 	if len(req.DirHandle) == 0 {
 		return &mknodValidationError{
 			message:   "empty parent directory handle",
-			nfsStatus: NFS3ErrBadHandle,
+			nfsStatus: types.NFS3ErrBadHandle,
 		}
 	}
 
 	if len(req.DirHandle) > 64 {
 		return &mknodValidationError{
 			message:   fmt.Sprintf("parent handle too long: %d bytes (max 64)", len(req.DirHandle)),
-			nfsStatus: NFS3ErrBadHandle,
+			nfsStatus: types.NFS3ErrBadHandle,
 		}
 	}
 
@@ -501,7 +503,7 @@ func validateMknodRequest(req *MknodRequest) *mknodValidationError {
 	if len(req.DirHandle) < 8 {
 		return &mknodValidationError{
 			message:   fmt.Sprintf("parent handle too short: %d bytes (min 8)", len(req.DirHandle)),
-			nfsStatus: NFS3ErrBadHandle,
+			nfsStatus: types.NFS3ErrBadHandle,
 		}
 	}
 
@@ -509,7 +511,7 @@ func validateMknodRequest(req *MknodRequest) *mknodValidationError {
 	if req.Name == "" {
 		return &mknodValidationError{
 			message:   "empty special file name",
-			nfsStatus: NFS3ErrInval,
+			nfsStatus: types.NFS3ErrInval,
 		}
 	}
 
@@ -517,7 +519,7 @@ func validateMknodRequest(req *MknodRequest) *mknodValidationError {
 	if req.Name == "." || req.Name == ".." {
 		return &mknodValidationError{
 			message:   fmt.Sprintf("special file name cannot be '%s'", req.Name),
-			nfsStatus: NFS3ErrInval,
+			nfsStatus: types.NFS3ErrInval,
 		}
 	}
 
@@ -525,7 +527,7 @@ func validateMknodRequest(req *MknodRequest) *mknodValidationError {
 	if len(req.Name) > 255 {
 		return &mknodValidationError{
 			message:   fmt.Sprintf("special file name too long: %d bytes (max 255)", len(req.Name)),
-			nfsStatus: NFS3ErrNameTooLong,
+			nfsStatus: types.NFS3ErrNameTooLong,
 		}
 	}
 
@@ -533,7 +535,7 @@ func validateMknodRequest(req *MknodRequest) *mknodValidationError {
 	if bytes.Contains([]byte(req.Name), []byte{0}) {
 		return &mknodValidationError{
 			message:   "special file name contains null byte",
-			nfsStatus: NFS3ErrInval,
+			nfsStatus: types.NFS3ErrInval,
 		}
 	}
 
@@ -541,7 +543,7 @@ func validateMknodRequest(req *MknodRequest) *mknodValidationError {
 	if bytes.Contains([]byte(req.Name), []byte{'/'}) {
 		return &mknodValidationError{
 			message:   "special file name contains path separator",
-			nfsStatus: NFS3ErrInval,
+			nfsStatus: types.NFS3ErrInval,
 		}
 	}
 
@@ -550,7 +552,7 @@ func validateMknodRequest(req *MknodRequest) *mknodValidationError {
 		if r < 0x20 || r == 0x7F {
 			return &mknodValidationError{
 				message:   fmt.Sprintf("special file name contains control character at position %d", i),
-				nfsStatus: NFS3ErrInval,
+				nfsStatus: types.NFS3ErrInval,
 			}
 		}
 	}
@@ -558,27 +560,27 @@ func validateMknodRequest(req *MknodRequest) *mknodValidationError {
 	// Validate file type - only special files are allowed
 	// Regular files, directories, and symlinks use other procedures
 	switch req.Type {
-	case NF3CHR, NF3BLK, NF3SOCK, NF3FIFO:
+	case types.NF3CHR, types.NF3BLK, types.NF3SOCK, types.NF3FIFO:
 		// Valid special file types
-	case NF3REG:
+	case types.NF3REG:
 		return &mknodValidationError{
 			message:   "use CREATE procedure for regular files, not MKNOD",
-			nfsStatus: NFS3ErrInval,
+			nfsStatus: types.NFS3ErrInval,
 		}
-	case NF3DIR:
+	case types.NF3DIR:
 		return &mknodValidationError{
 			message:   "use MKDIR procedure for directories, not MKNOD",
-			nfsStatus: NFS3ErrInval,
+			nfsStatus: types.NFS3ErrInval,
 		}
-	case NF3LNK:
+	case types.NF3LNK:
 		return &mknodValidationError{
 			message:   "use SYMLINK procedure for symbolic links, not MKNOD",
-			nfsStatus: NFS3ErrInval,
+			nfsStatus: types.NFS3ErrInval,
 		}
 	default:
 		return &mknodValidationError{
 			message:   fmt.Sprintf("invalid file type for MKNOD: %d", req.Type),
-			nfsStatus: NFS3ErrInval,
+			nfsStatus: types.NFS3ErrInval,
 		}
 	}
 
@@ -592,13 +594,13 @@ func validateMknodRequest(req *MknodRequest) *mknodValidationError {
 // nfsTypeToMetadataType converts NFS file type to metadata file type.
 func nfsTypeToMetadataType(nfsType uint32) metadata.FileType {
 	switch nfsType {
-	case NF3CHR:
+	case types.NF3CHR:
 		return metadata.FileTypeChar
-	case NF3BLK:
+	case types.NF3BLK:
 		return metadata.FileTypeBlock
-	case NF3SOCK:
+	case types.NF3SOCK:
 		return metadata.FileTypeSocket
-	case NF3FIFO:
+	case types.NF3FIFO:
 		return metadata.FileTypeFifo
 	default:
 		// This shouldn't happen due to validation, but handle gracefully
@@ -609,19 +611,19 @@ func nfsTypeToMetadataType(nfsType uint32) metadata.FileType {
 // specialFileTypeName returns a human-readable name for a special file type.
 func specialFileTypeName(fileType uint32) string {
 	switch fileType {
-	case NF3CHR:
+	case types.NF3CHR:
 		return "CHARACTER_DEVICE"
-	case NF3BLK:
+	case types.NF3BLK:
 		return "BLOCK_DEVICE"
-	case NF3SOCK:
+	case types.NF3SOCK:
 		return "SOCKET"
-	case NF3FIFO:
+	case types.NF3FIFO:
 		return "FIFO"
-	case NF3REG:
+	case types.NF3REG:
 		return "REGULAR_FILE"
-	case NF3DIR:
+	case types.NF3DIR:
 		return "DIRECTORY"
-	case NF3LNK:
+	case types.NF3LNK:
 		return "SYMLINK"
 	default:
 		return fmt.Sprintf("UNKNOWN(%d)", fileType)
@@ -697,7 +699,7 @@ func DecodeMknodRequest(data []byte) (*MknodRequest, error) {
 	// Decode parent directory handle
 	// ========================================================================
 
-	handle, err := decodeOpaque(reader)
+	handle, err := xdr.DecodeOpaque(reader)
 	if err != nil {
 		return nil, fmt.Errorf("decode directory handle: %w", err)
 	}
@@ -707,7 +709,7 @@ func DecodeMknodRequest(data []byte) (*MknodRequest, error) {
 	// Decode special file name
 	// ========================================================================
 
-	name, err := decodeString(reader)
+	name, err := xdr.DecodeString(reader)
 	if err != nil {
 		return nil, fmt.Errorf("decode name: %w", err)
 	}
@@ -728,9 +730,9 @@ func DecodeMknodRequest(data []byte) (*MknodRequest, error) {
 	// ========================================================================
 
 	switch fileType {
-	case NF3CHR, NF3BLK:
+	case types.NF3CHR, types.NF3BLK:
 		// Character and block devices: attributes + device spec
-		attr, err := decodeSetAttrs(reader)
+		attr, err := xdr.DecodeSetAttrs(reader)
 		if err != nil {
 			return nil, fmt.Errorf("decode device attributes: %w", err)
 		}
@@ -744,9 +746,9 @@ func DecodeMknodRequest(data []byte) (*MknodRequest, error) {
 			return nil, fmt.Errorf("decode minor device number: %w", err)
 		}
 
-	case NF3SOCK, NF3FIFO:
+	case types.NF3SOCK, types.NF3FIFO:
 		// Sockets and FIFOs: attributes only (no device spec)
-		attr, err := decodeSetAttrs(reader)
+		attr, err := xdr.DecodeSetAttrs(reader)
 		if err != nil {
 			return nil, fmt.Errorf("decode pipe attributes: %w", err)
 		}
@@ -832,14 +834,14 @@ func (resp *MknodResponse) Encode() ([]byte, error) {
 	// Success case: Write handle and attributes
 	// ========================================================================
 
-	if resp.Status == NFS3OK {
+	if resp.Status == types.NFS3OK {
 		// Write new file handle (post_op_fh3 - optional)
-		if err := encodeOptionalOpaque(&buf, resp.FileHandle); err != nil {
+		if err := xdr.EncodeOptionalOpaque(&buf, resp.FileHandle); err != nil {
 			return nil, fmt.Errorf("encode file handle: %w", err)
 		}
 
 		// Write new file attributes (post_op_attr - optional)
-		if err := encodeOptionalFileAttr(&buf, resp.Attr); err != nil {
+		if err := xdr.EncodeOptionalFileAttr(&buf, resp.Attr); err != nil {
 			return nil, fmt.Errorf("encode file attributes: %w", err)
 		}
 	}
@@ -850,7 +852,7 @@ func (resp *MknodResponse) Encode() ([]byte, error) {
 
 	// WCC (Weak Cache Consistency) data helps clients maintain cache coherency
 	// by providing before-and-after snapshots of the parent directory.
-	if err := encodeWccData(&buf, resp.DirAttrBefore, resp.DirAttrAfter); err != nil {
+	if err := xdr.EncodeWccData(&buf, resp.DirAttrBefore, resp.DirAttrAfter); err != nil {
 		return nil, fmt.Errorf("encode directory wcc data: %w", err)
 	}
 

@@ -7,6 +7,8 @@ import (
 
 	"github.com/marmos91/dittofs/internal/logger"
 	"github.com/marmos91/dittofs/internal/metadata"
+	"github.com/marmos91/dittofs/internal/protocol/nfs/types"
+	"github.com/marmos91/dittofs/internal/protocol/nfs/xdr"
 )
 
 // CommitRequest represents a COMMIT request
@@ -19,9 +21,9 @@ type CommitRequest struct {
 // CommitResponse represents a COMMIT response
 type CommitResponse struct {
 	Status        uint32
-	AttrBefore    *WccAttr  // Pre-op attributes (optional)
-	AttrAfter     *FileAttr // Post-op attributes (optional)
-	WriteVerifier uint64    // Write verifier (for detecting server reboots)
+	AttrBefore    *types.WccAttr  // Pre-op attributes (optional)
+	AttrAfter     *types.FileAttr // Post-op attributes (optional)
+	WriteVerifier uint64          // Write verifier (for detecting server reboots)
 }
 
 // Commit commits cached data on the server to stable storage.
@@ -33,17 +35,17 @@ func (h *DefaultNFSHandler) Commit(repository metadata.Repository, req *CommitRe
 	attr, err := repository.GetFile(metadata.FileHandle(req.Handle))
 	if err != nil {
 		logger.Warn("File not found: %v", err)
-		return &CommitResponse{Status: NFS3ErrNoEnt}, nil
+		return &CommitResponse{Status: types.NFS3ErrNoEnt}, nil
 	}
 
 	// Store pre-op attributes for WCC
-	wccAttr := &WccAttr{
+	wccAttr := &types.WccAttr{
 		Size: attr.Size,
-		Mtime: TimeVal{
+		Mtime: types.TimeVal{
 			Seconds:  uint32(attr.Mtime.Unix()),
 			Nseconds: uint32(attr.Mtime.Nanosecond()),
 		},
-		Ctime: TimeVal{
+		Ctime: types.TimeVal{
 			Seconds:  uint32(attr.Ctime.Unix()),
 			Nseconds: uint32(attr.Ctime.Nanosecond()),
 		},
@@ -51,7 +53,7 @@ func (h *DefaultNFSHandler) Commit(repository metadata.Repository, req *CommitRe
 
 	// Generate file ID
 	fileid := binary.BigEndian.Uint64(req.Handle[:8])
-	nfsAttr := MetadataToNFSAttr(attr, fileid)
+	nfsAttr := xdr.MetadataToNFSAttr(attr, fileid)
 
 	// In our simple implementation, we don't have write caching,
 	// so COMMIT is essentially a no-op that always succeeds.
@@ -60,7 +62,7 @@ func (h *DefaultNFSHandler) Commit(repository metadata.Repository, req *CommitRe
 	logger.Info("COMMIT successful (no-op in current implementation)")
 
 	return &CommitResponse{
-		Status:        NFS3OK,
+		Status:        types.NFS3OK,
 		AttrBefore:    wccAttr,
 		AttrAfter:     nfsAttr,
 		WriteVerifier: 0, // Static verifier since we don't track server reboots
@@ -119,7 +121,7 @@ func (resp *CommitResponse) Encode() ([]byte, error) {
 		return nil, fmt.Errorf("write status: %w", err)
 	}
 
-	if resp.Status != NFS3OK {
+	if resp.Status != types.NFS3OK {
 		// Write WCC data even on failure
 		if resp.AttrBefore != nil {
 			if err := binary.Write(&buf, binary.BigEndian, uint32(1)); err != nil {
@@ -186,7 +188,7 @@ func (resp *CommitResponse) Encode() ([]byte, error) {
 		if err := binary.Write(&buf, binary.BigEndian, uint32(1)); err != nil {
 			return nil, err
 		}
-		if err := encodeFileAttr(&buf, resp.AttrAfter); err != nil {
+		if err := xdr.EncodeFileAttr(&buf, resp.AttrAfter); err != nil {
 			return nil, err
 		}
 	} else {
