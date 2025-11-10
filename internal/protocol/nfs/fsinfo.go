@@ -191,7 +191,7 @@ func (h *DefaultNFSHandler) FsInfo(repository metadata.Repository, req *FsInfoRe
 
 	// Verify the file handle exists and is valid in the repository
 	// The repository is responsible for validating handle format and existence
-	attr, err := repository.GetFile(metadata.FileHandle(req.Handle))
+	attr, err := repository.GetFile(ctx.Context, metadata.FileHandle(req.Handle))
 	if err != nil {
 		logger.Debug("FSINFO failed: handle=%x client=%s error=%v",
 			req.Handle, ctx.ClientAddr, err)
@@ -200,7 +200,7 @@ func (h *DefaultNFSHandler) FsInfo(repository metadata.Repository, req *FsInfoRe
 
 	// Retrieve filesystem capabilities from the repository
 	// All business logic about filesystem limits is handled by the repository
-	fsInfo, err := repository.GetFSInfo(metadata.FileHandle(req.Handle))
+	fsInfo, err := repository.GetFSInfo(ctx.Context, metadata.FileHandle(req.Handle))
 	if err != nil {
 		logger.Error("FSINFO failed: handle=%x client=%s error=failed to retrieve fsinfo: %v",
 			req.Handle, ctx.ClientAddr, err)

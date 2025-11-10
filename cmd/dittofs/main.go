@@ -126,6 +126,9 @@ func main() {
 	// Repository configuration flags
 	dumpRestricted := flag.Bool("dump-restricted", false, "Restrict DUMP to localhost only")
 
+	// Metrics flags
+	metricsInterval := flag.Duration("metrics-interval", 5*time.Minute, "Interval for logging metrics (0 to disable)")
+
 	flag.Parse()
 
 	// Configure logger
@@ -214,9 +217,6 @@ func main() {
 	}
 	logger.Info("Initial file structure created")
 
-	// Add to flags section:
-	metricsInterval := flag.Duration("metrics-interval", 5*time.Minute, "Interval for logging metrics (0 to disable)")
-
 	// Update server configuration section:
 	serverConfig := nfsServer.ServerConfig{
 		Port:               *port,
@@ -241,10 +241,6 @@ func main() {
 	logger.Info("  Idle timeout: %v", serverConfig.IdleTimeout)
 	logger.Info("  Shutdown timeout: %v", serverConfig.ShutdownTimeout)
 	logger.Info("  Metrics interval: %v", serverConfig.MetricsLogInterval)
-	logger.Info("  Metrics interval: %v", serverConfig.MetricsLogInterval)
-	if serverConfig.MetricsLogInterval == 0 {
-		logger.Info("  (metrics logging disabled)")
-	}
 
 	if serverConfig.MetricsLogInterval == 0 {
 		logger.Info("  (metrics logging disabled)")

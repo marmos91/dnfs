@@ -261,7 +261,7 @@ func (h *DefaultNFSHandler) Read(
 	// ========================================================================
 
 	fileHandle := metadata.FileHandle(req.Handle)
-	attr, err := metadataRepo.GetFile(fileHandle)
+	attr, err := metadataRepo.GetFile(ctx.Context, fileHandle)
 	if err != nil {
 		logger.Warn("READ failed: file not found: handle=%x client=%s error=%v",
 			req.Handle, clientIP, err)

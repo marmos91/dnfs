@@ -305,7 +305,7 @@ func (h *DefaultNFSHandler) SetAttr(
 	// ========================================================================
 
 	fileHandle := metadata.FileHandle(req.Handle)
-	currentAttr, err := repository.GetFile(fileHandle)
+	currentAttr, err := repository.GetFile(ctx.Context, fileHandle)
 	if err != nil {
 		logger.Warn("SETATTR failed: file not found: handle=%x client=%s error=%v",
 			req.Handle, clientIP, err)
@@ -337,7 +337,7 @@ func (h *DefaultNFSHandler) SetAttr(
 
 			// Get updated attributes for WCC data (best effort)
 			var wccAfter *types.NFSFileAttr
-			if attr, err := repository.GetFile(fileHandle); err == nil {
+			if attr, err := repository.GetFile(ctx.Context, fileHandle); err == nil {
 				fileID := xdr.ExtractFileID(fileHandle)
 				wccAfter = xdr.MetadataToNFS(attr, fileID)
 			}
@@ -386,7 +386,7 @@ func (h *DefaultNFSHandler) SetAttr(
 
 		// Get updated attributes for WCC data (best effort)
 		var wccAfter *types.NFSFileAttr
-		if attr, getErr := repository.GetFile(fileHandle); getErr == nil {
+		if attr, getErr := repository.GetFile(ctx.Context, fileHandle); getErr == nil {
 			fileID := xdr.ExtractFileID(fileHandle)
 			wccAfter = xdr.MetadataToNFS(attr, fileID)
 		}
@@ -406,7 +406,7 @@ func (h *DefaultNFSHandler) SetAttr(
 	// ========================================================================
 
 	// Get updated file attributes for WCC data
-	updatedAttr, err := repository.GetFile(fileHandle)
+	updatedAttr, err := repository.GetFile(ctx.Context, fileHandle)
 	if err != nil {
 		logger.Warn("SETATTR: attributes updated but cannot get new attributes: handle=%x error=%v",
 			req.Handle, err)

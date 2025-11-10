@@ -114,11 +114,11 @@ type ExportEntry struct {
 //	        fmt.Printf("    Available to all clients\n")
 //	    }
 //	}
-func (h *DefaultMountHandler) Export(repository metadata.Repository, req *ExportRequest) (*ExportResponse, error) {
+func (h *DefaultMountHandler) Export(ctx context.Context, repository metadata.Repository, req *ExportRequest) (*ExportResponse, error) {
 	logger.Info("Export request: listing all available exports")
 
 	// Get all configured exports from the repository
-	exports, err := repository.GetExports()
+	exports, err := repository.GetExports(ctx.Context)
 	if err != nil {
 		logger.Error("Failed to get exports: error=%v", err)
 		return nil, fmt.Errorf("failed to retrieve exports: %w", err)

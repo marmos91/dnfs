@@ -282,7 +282,7 @@ func (h *DefaultNFSHandler) Write(
 	// Step 1: Validate request parameters
 	// ========================================================================
 
-	maxWriteSize := metadataRepo.GetMaxWriteSize()
+	maxWriteSize := metadataRepo.GetMaxWriteSize(ctx.Context)
 	if err := validateWriteRequest(req, maxWriteSize); err != nil {
 		logger.Warn("WRITE validation failed: handle=%x client=%s error=%v",
 			req.Handle, clientIP, err)
@@ -294,7 +294,7 @@ func (h *DefaultNFSHandler) Write(
 	// ========================================================================
 
 	fileHandle := metadata.FileHandle(req.Handle)
-	attr, err := metadataRepo.GetFile(fileHandle)
+	attr, err := metadataRepo.GetFile(ctx.Context, fileHandle)
 	if err != nil {
 		logger.Warn("WRITE failed: file not found: handle=%x client=%s error=%v",
 			req.Handle, clientIP, err)

@@ -1067,7 +1067,7 @@ func (r *MemoryRepository) ReadDir(
 	if cookie <= 1 {
 		// Get parent file ID
 		parentFileid := dirFileid // Default to self if no parent
-		if parentHandle, err := r.GetParent(dirHandle); err == nil {
+		if parentHandle, err := r.GetParent(ctx.Context, dirHandle); err == nil {
 			parentFileid = extractFileIDFromHandle(parentHandle)
 		}
 

@@ -90,6 +90,12 @@ type UmountContext struct {
 //	resp, err := handler.Umnt(repository, req, ctx)
 //	// Response is always success
 func (h *DefaultMountHandler) Umnt(repository metadata.Repository, req *UmountRequest, ctx *UmountContext) (*UmountResponse, error) {
+	select {
+	case <-ctx.Context.Done():
+		return &UmountResponse{}, ctx.Context.Err()
+	default:
+	}
+
 	// Extract client IP from address (remove port)
 	clientIP, _, err := net.SplitHostPort(ctx.ClientAddr)
 	if err != nil {
@@ -102,7 +108,7 @@ func (h *DefaultMountHandler) Umnt(repository metadata.Repository, req *UmountRe
 	// Remove the mount record from tracking
 	// Note: We don't check for errors because UMNT always succeeds per RFC 1813
 	// Even if the mount doesn't exist, we acknowledge the unmount
-	err = repository.RemoveMount(req.DirPath, clientIP)
+	err = repository.RemoveMount(ctx.Context, req.DirPath, clientIP)
 	if err != nil {
 		// Log the error but still return success
 		// The mount tracking is informational - the client has already unmounted

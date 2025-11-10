@@ -247,7 +247,7 @@ func (h *DefaultNFSHandler) Lookup(
 	// ========================================================================
 
 	dirHandle := metadata.FileHandle(req.DirHandle)
-	dirAttr, err := repository.GetFile(dirHandle)
+	dirAttr, err := repository.GetFile(ctx.Context, dirHandle)
 	if err != nil {
 		logger.Warn("LOOKUP failed: directory not found: dir=%x client=%s error=%v",
 			req.DirHandle, clientIP, err)
@@ -277,7 +277,7 @@ func (h *DefaultNFSHandler) Lookup(
 	// - Finding the child by name (including "." and "..")
 	// - Enforcing any access control policies
 
-	childHandle, err := repository.GetChild(dirHandle, req.Filename)
+	childHandle, err := repository.GetChild(ctx.Context, dirHandle, req.Filename)
 	if err != nil {
 		logger.Debug("LOOKUP failed: child not found: file='%s' dir=%x client=%s error=%v",
 			req.Filename, req.DirHandle, clientIP, err)
@@ -296,7 +296,7 @@ func (h *DefaultNFSHandler) Lookup(
 	// Step 4: Retrieve child attributes
 	// ========================================================================
 
-	childAttr, err := repository.GetFile(childHandle)
+	childAttr, err := repository.GetFile(ctx.Context, childHandle)
 	if err != nil {
 		logger.Error("LOOKUP failed: child handle exists but attributes missing: file='%s' handle=%x client=%s error=%v",
 			req.Filename, childHandle, clientIP, err)

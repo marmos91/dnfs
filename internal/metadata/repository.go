@@ -1,6 +1,9 @@
 package metadata
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // DirEntry represents a directory entry returned by ReadDir.
 type DirEntry struct {
@@ -17,18 +20,18 @@ type DirEntry struct {
 // Interface for NFS metadata persistence
 type Repository interface {
 	// Export operations
-	AddExport(path string, options ExportOptions, rootAttr *FileAttr) error
-	GetExports() ([]Export, error)
-	FindExport(path string) (*Export, error)
-	DeleteExport(path string) error
+	AddExport(ctx context.Context, path string, options ExportOptions, rootAttr *FileAttr) error
+	GetExports(ctx context.Context) ([]Export, error)
+	FindExport(ctx context.Context, path string) (*Export, error)
+	DeleteExport(ctx context.Context, path string) error
 
 	// GetRootHandle returns the root file handle for an export path
-	GetRootHandle(exportPath string) (FileHandle, error)
+	GetRootHandle(ctx context.Context, exportPath string) (FileHandle, error)
 
 	// File operations
-	CreateFile(handle FileHandle, attr *FileAttr) error
-	GetFile(handle FileHandle) (*FileAttr, error)
-	UpdateFile(handle FileHandle, attr *FileAttr) error
+	CreateFile(ctx context.Context, handle FileHandle, attr *FileAttr) error
+	GetFile(ctx context.Context, handle FileHandle) (*FileAttr, error)
+	UpdateFile(ctx context.Context, handle FileHandle, attr *FileAttr) error
 	// DeleteFile deletes file metadata by handle.
 	//
 	// WARNING: This is a low-level operation that bypasses all safety checks.
@@ -47,33 +50,33 @@ type Repository interface {
 	//   - Operations that have already performed all necessary checks
 	//
 	// Returns error if the handle doesn't exist.
-	DeleteFile(handle FileHandle) error
+	DeleteFile(ctx context.Context, handle FileHandle) error
 
 	// Directory hierarchy operations
-	SetParent(child FileHandle, parent FileHandle) error
-	GetParent(child FileHandle) (FileHandle, error)
+	SetParent(ctx context.Context, child FileHandle, parent FileHandle) error
+	GetParent(ctx context.Context, child FileHandle) (FileHandle, error)
 
-	AddChild(parent FileHandle, name string, child FileHandle) error
-	GetChild(parent FileHandle, name string) (FileHandle, error)
-	GetChildren(parent FileHandle) (map[string]FileHandle, error)
-	DeleteChild(parent FileHandle, name string) error
+	AddChild(ctx context.Context, parent FileHandle, name string, child FileHandle) error
+	GetChild(ctx context.Context, parent FileHandle, name string) (FileHandle, error)
+	GetChildren(ctx context.Context, parent FileHandle) (map[string]FileHandle, error)
+	DeleteChild(ctx context.Context, parent FileHandle, name string) error
 
 	// Helper method to add files/directories to a parent
-	AddFileToDirectory(parentHandle FileHandle, name string, attr *FileAttr) (FileHandle, error)
+	AddFileToDirectory(ctx context.Context, parentHandle FileHandle, name string, attr *FileAttr) (FileHandle, error)
 
 	// Mount tracking operations
 	// RecordMount records an active mount by a client
-	RecordMount(exportPath string, clientAddr string, authFlavor uint32, machineName string, uid *uint32, gid *uint32) error
+	RecordMount(ctx context.Context, exportPath string, clientAddr string, authFlavor uint32, machineName string, uid *uint32, gid *uint32) error
 
 	// RemoveMount removes a mount record when a client unmounts
-	RemoveMount(exportPath string, clientAddr string) error
+	RemoveMount(ctx context.Context, exportPath string, clientAddr string) error
 
 	// GetMounts returns all active mounts, optionally filtered by export path
 	// If exportPath is empty, returns all mounts
-	GetMounts(exportPath string) ([]MountEntry, error)
+	GetMounts(ctx context.Context, exportPath string) ([]MountEntry, error)
 
 	// IsClientMounted checks if a specific client has an active mount
-	IsClientMounted(exportPath string, clientAddr string) (bool, error)
+	IsClientMounted(ctx context.Context, exportPath string, clientAddr string) (bool, error)
 
 	// CheckExportAccess verifies if a client can access an export and returns effective credentials.
 	// Returns an AccessDecision with details about the authorization and an AuthContext with
@@ -82,6 +85,7 @@ type Repository interface {
 	// The returned AuthContext should be used for all subsequent permission checks to ensure
 	// consistent application of squashing rules throughout the mount session.
 	CheckExportAccess(
+		ctx context.Context,
 		exportPath string,
 		clientAddr string,
 		authFlavor uint32,
@@ -106,32 +110,32 @@ type Repository interface {
 
 	// GetMountsByClient returns all active mounts for a specific client
 	// Used by UMNTALL to determine what will be removed
-	GetMountsByClient(clientAddr string) ([]MountEntry, error)
+	GetMountsByClient(ctx context.Context, clientAddr string) ([]MountEntry, error)
 
 	// RemoveAllMounts removes all mount records for a specific client
 	// Used by UMNTALL to clean up all mounts in one operation
-	RemoveAllMounts(clientAddr string) error
+	RemoveAllMounts(ctx context.Context, clientAddr string) error
 
 	// ServerConfig operations
 	// SetServerConfig sets the server-wide configuration
-	SetServerConfig(config ServerConfig) error
+	SetServerConfig(ctx context.Context, config ServerConfig) error
 
 	// GetServerConfig returns the current server configuration
-	GetServerConfig() (ServerConfig, error)
+	GetServerConfig(ctx context.Context) (ServerConfig, error)
 
 	// CheckDumpAccess verifies if a client can call the DUMP procedure
 	// Returns error if access is denied, nil if allowed
-	CheckDumpAccess(clientAddr string) error
+	CheckDumpAccess(ctx context.Context, clientAddr string) error
 
 	// GetFSInfo returns the static filesystem information and capabilities
 	// This is used by the FSINFO NFS procedure to inform clients about
 	// server limits and preferences (max transfer sizes, properties, etc.)
-	GetFSInfo(handle FileHandle) (*FSInfo, error)
+	GetFSInfo(ctx context.Context, handle FileHandle) (*FSInfo, error)
 
 	// GetFSStats returns the dynamic filesystem statistics
 	// This is used by the FSSTAT NFS procedure to inform clients about
 	// current filesystem capacity, usage, and available space/inodes
-	GetFSStats(handle FileHandle) (*FSStat, error)
+	GetFSStats(ctx context.Context, handle FileHandle) (*FSStat, error)
 
 	// CreateLink creates a hard link to an existing file.
 	//
@@ -185,7 +189,7 @@ type Repository interface {
 	// GetPathConf returns POSIX-compatible filesystem information.
 	// This is used by the PATHCONF NFS procedure to inform clients about
 	// filesystem properties and limitations (filename lengths, link limits, etc.)
-	GetPathConf(handle FileHandle) (*PathConf, error)
+	GetPathConf(ctx context.Context, handle FileHandle) (*PathConf, error)
 
 	// CreateSpecialFile creates a special file (device, socket, or FIFO).
 	//
@@ -495,10 +499,10 @@ type Repository interface {
 	//
 	// Returns:
 	//   - uint32: Maximum write size in bytes
-	GetMaxWriteSize() uint32
+	GetMaxWriteSize(ctx context.Context) uint32
 
 	// Healthcheck performs a health check on the repository.
 	// Returns nil if the repository is healthy and accessible.
 	// This is used by the NULL procedure for optional health monitoring.
-	Healthcheck() error
+	Healthcheck(ctx context.Context) error
 }

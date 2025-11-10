@@ -122,6 +122,11 @@ type MountContext struct {
 //	    // Use resp.FileHandle for NFS operations
 //	}
 func (h *DefaultMountHandler) Mount(repository metadata.Repository, req *MountRequest, ctx *MountContext) (*MountResponse, error) {
+	select {
+	case <-ctx.Context.Done():
+		return &MountResponse{Status: MountErrServerFault}, ctx.Context.Err()
+	default:
+	}
 	// Extract client IP from address (remove port)
 	clientIP, _, err := net.SplitHostPort(ctx.ClientAddr)
 	if err != nil {
@@ -148,6 +153,7 @@ func (h *DefaultMountHandler) Mount(repository metadata.Repository, req *MountRe
 	// Check export access and apply squashing
 	// The repository will apply AllSquash/RootSquash and return effective credentials
 	accessDecision, authCtx, err := repository.CheckExportAccess(
+		ctx.Context,
 		req.DirPath,
 		clientIP,
 		ctx.AuthFlavor,
@@ -211,7 +217,7 @@ func (h *DefaultMountHandler) Mount(repository metadata.Repository, req *MountRe
 		)
 	}
 
-	handleBytes, err := repository.GetRootHandle(req.DirPath)
+	handleBytes, err := repository.GetRootHandle(ctx.Context, req.DirPath)
 	if err != nil {
 		logger.Error("Failed to get root handle: path=%s error=%v", req.DirPath, err)
 		return &MountResponse{Status: MountErrServerFault}, nil
@@ -227,7 +233,7 @@ func (h *DefaultMountHandler) Mount(repository metadata.Repository, req *MountRe
 		machineName = ctx.UnixAuth.MachineName
 	}
 
-	if err := repository.RecordMount(req.DirPath, clientIP, ctx.AuthFlavor, machineName, recordUID, recordGID); err != nil {
+	if err := repository.RecordMount(ctx.Context, req.DirPath, clientIP, ctx.AuthFlavor, machineName, recordUID, recordGID); err != nil {
 		logger.Warn("Failed to record mount: path=%s client=%s error=%v",
 			req.DirPath, clientIP, err)
 	}

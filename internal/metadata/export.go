@@ -1,6 +1,9 @@
 package metadata
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 type Export struct {
 	Path    string
@@ -72,6 +75,8 @@ type AccessDecision struct {
 // squashing options (AllSquash, RootSquash) and should be used for all
 // permission checks. The original credentials are not preserved here.
 type AuthContext struct {
+	Context context.Context
+
 	// AuthFlavor is the authentication method used
 	// 0 = AUTH_NULL, 1 = AUTH_UNIX, etc.
 	AuthFlavor uint32

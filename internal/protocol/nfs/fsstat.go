@@ -185,14 +185,14 @@ func (h *DefaultNFSHandler) FsStat(repository metadata.Repository, req *FsStatRe
 	}
 
 	// Verify the file handle exists and is valid
-	attr, err := repository.GetFile(metadata.FileHandle(req.Handle))
+	attr, err := repository.GetFile(ctx.Context, metadata.FileHandle(req.Handle))
 	if err != nil {
 		logger.Debug("FSSTAT failed: handle not found: %v client=%s", err, ctx.ClientAddr)
 		return &FsStatResponse{Status: types.NFS3ErrStale}, nil
 	}
 
 	// Retrieve filesystem statistics from the repository
-	fsStats, err := repository.GetFSStats(metadata.FileHandle(req.Handle))
+	fsStats, err := repository.GetFSStats(ctx.Context, metadata.FileHandle(req.Handle))
 	if err != nil {
 		logger.Error("FSSTAT failed: error retrieving statistics: %v client=%s", err, ctx.ClientAddr)
 		return &FsStatResponse{Status: types.NFS3ErrIO}, nil

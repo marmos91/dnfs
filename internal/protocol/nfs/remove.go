@@ -249,7 +249,7 @@ func (h *DefaultNFSHandler) Remove(
 	// ========================================================================
 
 	dirHandle := metadata.FileHandle(req.DirHandle)
-	dirAttr, err := repository.GetFile(dirHandle)
+	dirAttr, err := repository.GetFile(ctx.Context, dirHandle)
 	if err != nil {
 		logger.Warn("REMOVE failed: directory not found: dir=%x client=%s error=%v",
 			req.DirHandle, clientIP, err)
@@ -290,7 +290,7 @@ func (h *DefaultNFSHandler) Remove(
 
 		// Get updated directory attributes for WCC data (best effort)
 		var wccAfter *types.NFSFileAttr
-		if dirAttr, err := repository.GetFile(dirHandle); err == nil {
+		if dirAttr, err := repository.GetFile(ctx.Context, dirHandle); err == nil {
 			dirID := xdr.ExtractFileID(dirHandle)
 			wccAfter = xdr.MetadataToNFS(dirAttr, dirID)
 		}
@@ -307,7 +307,7 @@ func (h *DefaultNFSHandler) Remove(
 	// ========================================================================
 
 	// Get updated directory attributes for WCC data
-	dirAttr, err = repository.GetFile(dirHandle)
+	dirAttr, err = repository.GetFile(ctx.Context, dirHandle)
 	if err != nil {
 		logger.Warn("REMOVE: file removed but cannot get updated directory attributes: dir=%x error=%v",
 			req.DirHandle, err)
