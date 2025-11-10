@@ -393,4 +393,43 @@ type Repository interface {
 	//   - Read-only filesystem
 	//   - I/O error
 	SetFileAttributes(handle FileHandle, attrs *SetAttrs, ctx *AuthContext) error
+
+	// CreateSymlink creates a symbolic link with the specified target path.
+	//
+	// This method is responsible for:
+	//  1. Verifying the parent directory exists and is a directory
+	//  2. Checking write permission on the parent directory
+	//  3. Verifying the name doesn't already exist
+	//  4. Completing symlink attributes with server-assigned values:
+	//     - Type: FileTypeSymlink
+	//     - Size: Length of target path
+	//     - Timestamps: Current time for atime, mtime, ctime
+	//     - UID/GID: From auth context or request attributes
+	//     - Mode: Default 0777 or from request attributes
+	//  5. Storing the target path in the symlink metadata
+	//  6. Creating the symlink metadata
+	//  7. Linking it to the parent directory
+	//  8. Updating parent directory timestamps
+	//
+	// Parameters:
+	//   - parentHandle: Handle of the parent directory
+	//   - name: Name for the new symbolic link
+	//   - target: Path that the symlink will point to
+	//   - attr: Partial attributes (mode, uid, gid may be set)
+	//   - ctx: Authentication context for access control
+	//
+	// Returns:
+	//   - FileHandle: Handle of the newly created symlink
+	//   - error: Returns error if:
+	//     * Access denied (no write permission on parent)
+	//     * Name already exists
+	//     * Parent is not a directory
+	//     * I/O error
+	//
+	// The implementation should:
+	//   - Complete the attr structure with server-assigned values
+	//   - Check that the caller has write permission on the parent directory
+	//   - Store the target path in attr.SymlinkTarget
+	//   - Ensure the symlink has proper default attributes if not specified
+	CreateSymlink(parentHandle FileHandle, name string, target string, attr *FileAttr, ctx *AuthContext) (FileHandle, error)
 }

@@ -418,11 +418,35 @@ func (c *conn) handleNFSProcedure(call *rpc.RPCCallMessage, data []byte) ([]byte
 			},
 		)
 	case nfs.NFSProcSymlink:
+		// Extract authentication from RPC call
+		var uid, gid *uint32
+		var gids []uint32
+
+		if authFlavor == rpc.AuthUnix {
+			authBody := call.GetAuthBody()
+			if len(authBody) > 0 {
+				if unixAuth, err := rpc.ParseUnixAuth(authBody); err == nil {
+					uid = &unixAuth.UID
+					gid = &unixAuth.GID
+					gids = unixAuth.GIDs
+				}
+			}
+		}
+
+		// Create context with client information and auth
+		symlinkCtx := &nfs.SymlinkContext{
+			ClientAddr: c.conn.RemoteAddr().String(),
+			AuthFlavor: authFlavor,
+			UID:        uid,
+			GID:        gid,
+			GIDs:       gids,
+		}
+
 		return handleRequest(
 			data,
 			nfs.DecodeSymlinkRequest,
 			func(req *nfs.SymlinkRequest) (*nfs.SymlinkResponse, error) {
-				return handler.Symlink(repo, req)
+				return handler.Symlink(repo, req, symlinkCtx)
 			},
 			nfs.NFS3ErrIO,
 			func(status uint32) *nfs.SymlinkResponse {

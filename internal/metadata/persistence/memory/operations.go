@@ -1805,3 +1805,185 @@ func (r *MemoryRepository) RenameFile(
 
 	return nil
 }
+
+// CreateSymlink creates a symbolic link with the specified target path.
+//
+// This implements support for the SYMLINK NFS procedure (RFC 1813 section 3.3.10).
+// A symbolic link is a special file that contains a pathname to another file or
+// directory. Unlike hard links, symlinks can span filesystems and can point to
+// directories.
+//
+// Implementation Notes:
+//   - The target path is stored in attr.SymlinkTarget without validation
+//   - The symlink size is set to the length of the target path
+//   - Default permissions are 0777 (lrwxrwxrwx) as symlinks typically grant all
+//   - Actual access control is applied when following the symlink, not on the symlink itself
+//
+// RFC 1813 Requirements:
+//   - Check write permission on parent directory
+//   - Verify name doesn't already exist
+//   - Store target path without validation (dangling symlinks are allowed)
+//   - Update parent directory timestamps (mtime, ctime)
+//   - Set appropriate symlink attributes
+//
+// Parameters:
+//   - parentHandle: Handle of the parent directory
+//   - name: Name for the new symbolic link
+//   - target: Path that the symlink will point to
+//   - attr: Partial attributes (mode, uid, gid may be set by client)
+//   - ctx: Authentication context for access control
+//
+// Returns:
+//   - FileHandle: Handle of the newly created symlink
+//   - error: Returns error if:
+//   - Access denied (no write permission on parent)
+//   - Name already exists
+//   - Parent is not a directory
+//   - I/O error
+func (r *MemoryRepository) CreateSymlink(
+	parentHandle metadata.FileHandle,
+	name string,
+	target string,
+	attr *metadata.FileAttr,
+	ctx *metadata.AuthContext,
+) (metadata.FileHandle, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// ========================================================================
+	// Step 1: Verify parent directory exists
+	// ========================================================================
+
+	parentKey := handleToKey(parentHandle)
+	parentAttr, exists := r.files[parentKey]
+	if !exists {
+		return nil, &metadata.ExportError{
+			Code:    metadata.ExportErrNotFound,
+			Message: "parent directory not found",
+		}
+	}
+
+	// Verify parent is a directory
+	if parentAttr.Type != metadata.FileTypeDirectory {
+		return nil, &metadata.ExportError{
+			Code:    metadata.ExportErrServerFault,
+			Message: "parent is not a directory",
+		}
+	}
+
+	// ========================================================================
+	// Step 2: Check write access to parent directory (if auth context provided)
+	// ========================================================================
+
+	if ctx != nil && ctx.AuthFlavor != 0 && ctx.UID != nil {
+		uid := *ctx.UID
+		gid := *ctx.GID
+
+		var hasWrite bool
+
+		// Owner permissions
+		if uid == parentAttr.UID {
+			hasWrite = (parentAttr.Mode & 0200) != 0 // Owner write bit
+		} else if gid == parentAttr.GID || containsGID(ctx.GIDs, parentAttr.GID) {
+			// Group permissions
+			hasWrite = (parentAttr.Mode & 0020) != 0 // Group write bit
+		} else {
+			// Other permissions
+			hasWrite = (parentAttr.Mode & 0002) != 0 // Other write bit
+		}
+
+		if !hasWrite {
+			return nil, &metadata.ExportError{
+				Code:    metadata.ExportErrAccessDenied,
+				Message: "write permission denied on parent directory",
+			}
+		}
+	}
+
+	// ========================================================================
+	// Step 3: Verify name doesn't already exist
+	// ========================================================================
+
+	if r.children[parentKey] == nil {
+		r.children[parentKey] = make(map[string]metadata.FileHandle)
+	}
+
+	if _, exists := r.children[parentKey][name]; exists {
+		return nil, &metadata.ExportError{
+			Code:    metadata.ExportErrServerFault,
+			Message: fmt.Sprintf("file already exists: %s", name),
+		}
+	}
+
+	// ========================================================================
+	// Step 4: Complete symlink attributes with server-assigned values
+	// ========================================================================
+
+	now := time.Now()
+
+	// Start with the attributes provided by the protocol layer
+	// If UID/GID not set, use authenticated user's credentials
+	completeAttr := &metadata.FileAttr{
+		Type: metadata.FileTypeSymlink, // Always symlink
+		Mode: attr.Mode,                // From protocol layer (or default 0777)
+		UID:  attr.UID,                 // From protocol layer or default
+		GID:  attr.GID,                 // From protocol layer or default
+
+		// Server-assigned attributes
+		Size:          uint64(len(target)), // Size is length of target path
+		Atime:         now,
+		Mtime:         now,
+		Ctime:         now,
+		ContentID:     "",     // Symlinks don't have content blobs
+		SymlinkTarget: target, // Store the target path
+	}
+
+	// If UID not set, use authenticated user's UID
+	if completeAttr.UID == 0 && ctx != nil && ctx.UID != nil {
+		completeAttr.UID = *ctx.UID
+	}
+
+	// If GID not set, use authenticated user's GID
+	if completeAttr.GID == 0 && ctx != nil && ctx.GID != nil {
+		completeAttr.GID = *ctx.GID
+	}
+
+	// Apply default mode if not specified (0777 for symlinks)
+	if completeAttr.Mode == 0 {
+		completeAttr.Mode = 0777 // Default: rwxrwxrwx
+	}
+
+	// ========================================================================
+	// Step 5: Generate unique symlink handle
+	// ========================================================================
+
+	symlinkHandle := r.generateFileHandle(name)
+
+	// ========================================================================
+	// Step 6: Create symlink metadata
+	// ========================================================================
+
+	symlinkKey := handleToKey(symlinkHandle)
+	r.files[symlinkKey] = completeAttr
+
+	// ========================================================================
+	// Step 7: Link symlink to parent
+	// ========================================================================
+
+	r.children[parentKey][name] = symlinkHandle
+
+	// Set parent relationship
+	r.parents[symlinkKey] = parentHandle
+
+	// ========================================================================
+	// Step 8: Update parent directory timestamps
+	// ========================================================================
+	// The parent directory's mtime and ctime should be updated when a child
+	// is added, as this modifies the directory's contents.
+
+	parentAttr.Mtime = now
+	parentAttr.Ctime = now
+	r.files[parentKey] = parentAttr
+
+	return symlinkHandle, nil
+}
