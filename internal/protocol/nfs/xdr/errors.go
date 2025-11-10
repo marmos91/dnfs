@@ -87,3 +87,53 @@ func MapRepositoryErrorToNFSStatus(err error, clientIP string, operation string)
 		return types.NFS3ErrIO
 	}
 }
+
+// mapContentErrorToNFSStatus maps content repository errors to appropriate
+// NFS status codes.
+//
+// This function analyzes error messages and types to determine the most
+// appropriate NFS error code. In the future, the content repository should
+// return typed errors for more precise mapping.
+//
+// Common mappings:
+//   - "no space" / "disk full" → NFS3ErrNoSpc
+//   - "read-only" / "permission denied" → NFS3ErrRofs
+//   - "not found" / "does not exist" → NFS3ErrNoEnt
+//   - Other errors → NFS3ErrIO (generic I/O error)
+//
+// Parameters:
+//   - err: Error returned from content repository
+//
+// Returns:
+//   - uint32: Appropriate NFS status code
+func MapContentErrorToNFSStatus(err error) uint32 {
+	if err == nil {
+		return types.NFS3OK
+	}
+
+	// Analyze error message for common patterns
+	// This is a best-effort approach until content repository returns typed errors
+	errMsg := err.Error()
+
+	// Check for specific error patterns (case-insensitive substring matching)
+	switch {
+	case containsIgnoreCase(errMsg, "no space") || containsIgnoreCase(errMsg, "disk full"):
+		return types.NFS3ErrNoSpc
+
+	case containsIgnoreCase(errMsg, "read-only") || containsIgnoreCase(errMsg, "read only"):
+		return types.NFS3ErrRofs
+
+	case containsIgnoreCase(errMsg, "not found") || containsIgnoreCase(errMsg, "does not exist"):
+		return types.NFS3ErrNoEnt
+
+	case containsIgnoreCase(errMsg, "permission denied") || containsIgnoreCase(errMsg, "access denied"):
+		return types.NFS3ErrAcces
+
+	case containsIgnoreCase(errMsg, "stale") || containsIgnoreCase(errMsg, "invalid handle"):
+		return types.NFS3ErrStale
+
+	default:
+		// Generic I/O error for unrecognized errors
+		return types.NFS3ErrIO
+	}
+}
