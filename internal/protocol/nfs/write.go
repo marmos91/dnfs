@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"time"
 
 	"github.com/marmos91/dittofs/internal/content"
 	"github.com/marmos91/dittofs/internal/logger"
@@ -35,16 +34,6 @@ const (
 	// Safest option but slowest performance.
 	FileSyncWrite = 2
 )
-
-// ============================================================================
-// Server Instance Tracking
-// ============================================================================
-
-// serverBootTime stores the time when the NFS server started.
-// This is used as the write verifier to help clients detect server restarts.
-// When a server restarts, any unstable writes are lost, so clients must
-// re-send them. The verifier changing indicates a restart occurred.
-var serverBootTime = uint64(time.Now().Unix())
 
 // ============================================================================
 // Request and Response Structures
@@ -329,7 +318,12 @@ func (h *DefaultNFSHandler) Write(
 	// ========================================================================
 
 	dataLen := uint64(len(req.Data))
-	newSize, _ := safeAdd(req.Offset, dataLen)
+	newSize, overflow := safeAdd(req.Offset, dataLen)
+	if overflow {
+		logger.Warn("WRITE failed: offset + dataLen overflow: offset=%d dataLen=%d client=%s",
+			req.Offset, dataLen, clientIP)
+		return &WriteResponse{Status: types.NFS3ErrInval}, nil
+	}
 
 	// ========================================================================
 	// Step 4: Check permissions and update metadata

@@ -10,7 +10,7 @@ import (
 type NFSHandler interface {
 	// Null does nothing. This is used to test connectivity.
 	// RFC 1813 Section 3.3.0
-	Null(repository metadata.Repository) ([]byte, error)
+	Null(repository metadata.Repository, req *nfs.NullRequest, ctx *nfs.NullContext) (*nfs.NullResponse, error)
 
 	// GetAttr returns the attributes for a file system object.
 	// RFC 1813 Section 3.3.1
@@ -94,7 +94,7 @@ type NFSHandler interface {
 
 	// Commit commits cached data on the server to stable storage.
 	// RFC 1813 Section 3.3.21
-	Commit(repository metadata.Repository, req *nfs.CommitRequest) (*nfs.CommitResponse, error)
+	Commit(repository metadata.Repository, req *nfs.CommitRequest, ctx *nfs.CommitContext) (*nfs.CommitResponse, error)
 }
 
 type MountHandler interface {

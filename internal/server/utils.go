@@ -9,6 +9,7 @@ import (
 type rpcRequest interface {
 	*nfs.GetAttrRequest |
 		*nfs.FsStatRequest |
+		*nfs.NullRequest |
 		*nfs.FsInfoRequest |
 		*nfs.PathConfRequest |
 		*nfs.ReadDirRequest |
@@ -38,6 +39,7 @@ type rpcRequest interface {
 type rpcResponse interface {
 	*nfs.GetAttrResponse |
 		*nfs.FsStatResponse |
+		*nfs.NullResponse |
 		*nfs.FsInfoResponse |
 		*nfs.PathConfResponse |
 		*nfs.ReadDirResponse |

@@ -496,4 +496,9 @@ type Repository interface {
 	// Returns:
 	//   - uint32: Maximum write size in bytes
 	GetMaxWriteSize() uint32
+
+	// Healthcheck performs a health check on the repository.
+	// Returns nil if the repository is healthy and accessible.
+	// This is used by the NULL procedure for optional health monitoring.
+	Healthcheck() error
 }
