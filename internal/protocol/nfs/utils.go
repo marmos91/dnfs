@@ -1,4 +1,4 @@
-package server
+package nfs
 
 import (
 	"github.com/marmos91/dittofs/internal/logger"

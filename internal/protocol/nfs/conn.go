@@ -1,4 +1,4 @@
-package server
+package nfs
 
 import (
 	"context"
@@ -13,7 +13,7 @@ import (
 )
 
 type conn struct {
-	server *NFSServer
+	server *NFSFacade
 	conn   net.Conn
 }
 
@@ -39,7 +39,6 @@ func (c *conn) serve(ctx context.Context) {
 	defer func() {
 		// Panic recovery - prevents a single connection from crashing the server
 		if r := recover(); r != nil {
-			c.server.metrics.RecordPanic()
 			logger.Error("Panic in connection handler from %s: %v",
 				c.conn.RemoteAddr().String(), r)
 		}
@@ -77,7 +76,6 @@ func (c *conn) serve(ctx context.Context) {
 			if err == io.EOF {
 				logger.Debug("Connection from %s closed by client", clientAddr)
 			} else if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				c.server.metrics.RecordTimeout()
 				logger.Debug("Connection from %s timed out: %v", clientAddr, err)
 			} else if err == context.Canceled || err == context.DeadlineExceeded {
 				logger.Debug("Connection from %s cancelled: %v", clientAddr, err)
@@ -138,7 +136,6 @@ func (c *conn) handleRequest(ctx context.Context) error {
 	// Validate fragment size to prevent memory exhaustion
 	const maxFragmentSize = 1 << 20 // 1MB - NFS messages are typically much smaller
 	if header.Length > maxFragmentSize {
-		c.server.metrics.RecordFragmentError()
 		logger.Warn("Fragment size %d exceeds maximum %d from %s",
 			header.Length, maxFragmentSize, c.conn.RemoteAddr().String())
 		return fmt.Errorf("fragment too large: %d bytes", header.Length)
@@ -161,7 +158,6 @@ func (c *conn) handleRequest(ctx context.Context) error {
 	// Parse RPC call
 	call, err := rpc.ReadCall(message)
 	if err != nil {
-		c.server.metrics.RecordParseError()
 		logger.Debug("Error parsing RPC call: %v", err)
 		return nil
 	}
@@ -172,7 +168,6 @@ func (c *conn) handleRequest(ctx context.Context) error {
 	// Extract procedure data
 	procedureData, err := rpc.ReadData(message, call)
 	if err != nil {
-		c.server.metrics.RecordParseError()
 		return fmt.Errorf("extract procedure data: %w", err)
 	}
 
@@ -242,10 +237,8 @@ func (c *conn) readRPCMessage(length uint32) ([]byte, error) {
 // - Handler returns an error
 // - Reply cannot be sent
 func (c *conn) handleRPCCall(ctx context.Context, call *rpc.RPCCallMessage, procedureData []byte) error {
-	startTime := time.Now()
 	var replyData []byte
 	var err error
-	var isNFS bool
 
 	clientAddr := c.conn.RemoteAddr().String()
 
@@ -263,20 +256,13 @@ func (c *conn) handleRPCCall(ctx context.Context, call *rpc.RPCCallMessage, proc
 
 	switch call.Program {
 	case rpc.ProgramNFS:
-		isNFS = true
 		replyData, err = c.handleNFSProcedure(ctx, call, procedureData, clientAddr)
 	case rpc.ProgramMount:
-		isNFS = false
 		replyData, err = c.handleMountProcedure(ctx, call, procedureData, clientAddr)
 	default:
 		logger.Debug("Unknown program: %d", call.Program)
 		return nil
 	}
-
-	// Record request metrics
-	duration := time.Since(startTime)
-	success := (err == nil)
-	c.server.metrics.RecordRequest(duration, success, isNFS)
 
 	if err != nil {
 		// Check if error was due to context cancellation
