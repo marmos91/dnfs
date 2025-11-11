@@ -14,7 +14,7 @@ import (
 	"github.com/marmos91/dittofs/internal/logger"
 	"github.com/marmos91/dittofs/internal/metadata"
 	"github.com/marmos91/dittofs/internal/metadata/persistence/memory"
-	nfsServer "github.com/marmos91/dittofs/internal/server"
+	nfsServer "github.com/marmos91/dittofs/internal/protocol/nfs/server"
 )
 
 func createInitialStructure(ctx context.Context, repo *memory.MemoryRepository, contentRepo *content.FSContentRepository, rootHandle metadata.FileHandle) error {
