@@ -14,7 +14,8 @@ import (
 	"github.com/marmos91/dittofs/internal/logger"
 	"github.com/marmos91/dittofs/internal/metadata"
 	"github.com/marmos91/dittofs/internal/metadata/persistence/memory"
-	nfsServer "github.com/marmos91/dittofs/internal/protocol/nfs/server"
+	"github.com/marmos91/dittofs/internal/protocol/nfs"
+	dittoServer "github.com/marmos91/dittofs/internal/server"
 )
 
 func createInitialStructure(ctx context.Context, repo *memory.MemoryRepository, contentRepo *content.FSContentRepository, rootHandle metadata.FileHandle) error {
@@ -126,9 +127,6 @@ func main() {
 	// Repository configuration flags
 	dumpRestricted := flag.Bool("dump-restricted", false, "Restrict DUMP to localhost only")
 
-	// Metrics flags
-	metricsInterval := flag.Duration("metrics-interval", 5*time.Minute, "Interval for logging metrics (0 to disable)")
-
 	flag.Parse()
 
 	// Configure logger
@@ -221,42 +219,33 @@ func main() {
 	}
 	logger.Info("Initial file structure created")
 
-	// Update server configuration section:
-	serverConfig := nfsServer.ServerConfig{
-		Port:               *port,
-		MaxConnections:     *maxConnections,
-		ReadTimeout:        *readTimeout,
-		WriteTimeout:       *writeTimeout,
-		IdleTimeout:        *idleTimeout,
-		ShutdownTimeout:    *shutdownTimeout,
-		MetricsLogInterval: *metricsInterval,
+	dittoSrv := dittoServer.New(metadataRepo, contentRepo)
+
+	portInt := 2049 // default
+	if _, err := fmt.Sscanf(*port, "%d", &portInt); err != nil {
+		log.Fatalf("Invalid port number: %v", err)
 	}
+
+	nfsConfig := nfs.NFSConfig{
+		Port:            portInt,
+		MaxConnections:  *maxConnections,
+		ReadTimeout:     *readTimeout,
+		WriteTimeout:    *writeTimeout,
+		IdleTimeout:     *idleTimeout,
+		ShutdownTimeout: *shutdownTimeout,
+	}
+
+	nfsFacade := nfs.New(nfsConfig)
+	dittoSrv.AddFacade(nfsFacade)
 
 	// Log server configuration
 	logger.Info("Server configuration:")
-	logger.Info("  Port: %s", serverConfig.Port)
-	if serverConfig.MaxConnections > 0 {
-		logger.Info("  Max connections: %d", serverConfig.MaxConnections)
-	} else {
-		logger.Info("  Max connections: unlimited")
-	}
-	logger.Info("  Read timeout: %v", serverConfig.ReadTimeout)
-	logger.Info("  Write timeout: %v", serverConfig.WriteTimeout)
-	logger.Info("  Idle timeout: %v", serverConfig.IdleTimeout)
-	logger.Info("  Shutdown timeout: %v", serverConfig.ShutdownTimeout)
-	logger.Info("  Metrics interval: %v", serverConfig.MetricsLogInterval)
-
-	if serverConfig.MetricsLogInterval == 0 {
-		logger.Info("  (metrics logging disabled)")
-	}
-
-	// Create NFS server with configuration
-	srv := nfsServer.New(serverConfig, metadataRepo, contentRepo)
+	logger.Info("  Port: %d", nfsFacade.Port())
 
 	// Start server in background
 	serverDone := make(chan error, 1)
 	go func() {
-		serverDone <- srv.Serve(ctx)
+		serverDone <- dittoSrv.Serve(ctx)
 	}()
 
 	// Wait for interrupt signal or server error
