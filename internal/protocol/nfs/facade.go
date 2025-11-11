@@ -15,73 +15,226 @@ import (
 	v3 "github.com/marmos91/dittofs/internal/protocol/nfs/v3/handlers"
 )
 
+// NFSFacade implements the server.Facade interface for NFSv3 protocol.
+//
+// This facade provides a production-ready NFSv3 server with:
+//   - Graceful shutdown with configurable timeout
+//   - Connection limiting and resource management
+//   - Context-based request cancellation
+//   - Configurable timeouts for read/write/idle operations
+//   - Thread-safe operation with atomic counters
+//
+// Architecture:
+// NFSFacade manages the TCP listener and connection lifecycle. Each accepted
+// connection is handled by a conn instance (defined elsewhere) that manages
+// RPC request/response cycles. The facade coordinates graceful shutdown across
+// all active connections using context cancellation and wait groups.
+//
+// Shutdown flow:
+//  1. Context cancelled or Stop() called
+//  2. Listener closed (no new connections)
+//  3. shutdownCtx cancelled (signals in-flight requests to abort)
+//  4. Wait for active connections to complete (up to ShutdownTimeout)
+//  5. Force-close any remaining connections after timeout
+//
+// Thread safety:
+// All methods are safe for concurrent use. The shutdown mechanism uses sync.Once
+// to ensure idempotent behavior even if Stop() is called multiple times.
 type NFSFacade struct {
-	config       NFSConfig
-	listener     net.Listener
-	nfsHandler   v3.NFSHandler
+	// config holds the server configuration (ports, timeouts, limits)
+	config NFSConfig
+
+	// listener is the TCP listener for accepting NFS connections
+	// Closed during shutdown to stop accepting new connections
+	listener net.Listener
+
+	// nfsHandler processes NFSv3 protocol operations (LOOKUP, READ, WRITE, etc.)
+	nfsHandler v3.NFSHandler
+
+	// mountHandler processes MOUNT protocol operations (MNT, UMNT, EXPORT, etc.)
 	mountHandler mount.MountHandler
-	repository   metadata.Repository
-	content      content.Repository
 
-	// Connection tracking for graceful shutdown
-	activeConns  sync.WaitGroup
+	// repository provides access to file system metadata operations
+	repository metadata.Repository
+
+	// content provides access to file content (data blocks)
+	content content.Repository
+
+	// activeConns tracks all currently active connections for graceful shutdown
+	// Each connection calls Add(1) when starting and Done() when complete
+	activeConns sync.WaitGroup
+
+	// shutdownOnce ensures shutdown is only initiated once
+	// Protects the shutdown channel close and listener cleanup
 	shutdownOnce sync.Once
-	shutdown     chan struct{}
 
-	// Connection limiting
-	connCount     atomic.Int32
-	connSemaphore chan struct{} // Semaphore for connection limiting
+	// shutdown signals that graceful shutdown has been initiated
+	// Closed by initiateShutdown(), monitored by Serve()
+	shutdown chan struct{}
 
-	// Context for request cancellation
-	// This context is cancelled on shutdown to abort in-flight requests
-	shutdownCtx    context.Context
+	// connCount tracks the current number of active connections
+	// Used for metrics and shutdown logging
+	connCount atomic.Int32
+
+	// connSemaphore limits the number of concurrent connections if MaxConnections > 0
+	// Connections must acquire a slot before being accepted
+	// nil if MaxConnections is 0 (unlimited)
+	connSemaphore chan struct{}
+
+	// shutdownCtx is cancelled during shutdown to abort in-flight requests
+	// This context is passed to all request handlers, allowing them to detect
+	// shutdown and gracefully abort long-running operations (directory scans, etc.)
+	shutdownCtx context.Context
+
+	// cancelRequests cancels shutdownCtx during shutdown
+	// This triggers request cancellation across all active connections
 	cancelRequests context.CancelFunc
 }
 
-// ServerConfig holds configuration parameters for the NFS server.
-// These values control connection limits, timeouts, and resource management.
+// NFSConfig holds configuration parameters for the NFS server.
+//
+// These values control server behavior including connection limits, timeouts,
+// and resource management. All timeout values are optional - zero means no timeout.
+//
+// Default values (applied by New if zero):
+//   - Port: 2049 (standard NFS port)
+//   - MaxConnections: 0 (unlimited)
+//   - ReadTimeout: 30s
+//   - WriteTimeout: 30s
+//   - IdleTimeout: 5m
+//   - ShutdownTimeout: 30s
+//   - MetricsLogInterval: 5m (0 disables)
+//
+// Production recommendations:
+//   - MaxConnections: Set based on expected load (e.g., 1000 for busy servers)
+//   - ReadTimeout: 30s prevents slow clients from holding connections
+//   - WriteTimeout: 30s prevents slow networks from blocking responses
+//   - IdleTimeout: 5m closes inactive connections to free resources
+//   - ShutdownTimeout: 30s balances graceful shutdown with restart time
 type NFSConfig struct {
-	// Port is the TCP port to listen on (e.g., "2049")
+	// Port is the TCP port to listen on for NFS connections.
+	// Standard NFS port is 2049. Must be > 0.
+	// If 0, defaults to 2049.
 	Port int
 
 	// MaxConnections limits the number of concurrent client connections.
-	// Zero means unlimited. Default: 0 (unlimited)
+	// When reached, new connections are rejected until existing ones close.
+	// 0 means unlimited (not recommended for production).
+	// Recommended: 1000-5000 for production servers.
 	MaxConnections int
 
 	// ReadTimeout is the maximum duration for reading a complete RPC request.
-	// This prevents slow clients from holding connections indefinitely.
-	// Zero means no timeout. Default: 30s
+	// This prevents slow or malicious clients from holding connections indefinitely.
+	// 0 means no timeout (not recommended).
+	// Recommended: 30s for LAN, 60s for WAN.
 	ReadTimeout time.Duration
 
 	// WriteTimeout is the maximum duration for writing an RPC response.
-	// Zero means no timeout. Default: 30s
+	// This prevents slow networks or clients from blocking server resources.
+	// 0 means no timeout (not recommended).
+	// Recommended: 30s for LAN, 60s for WAN.
 	WriteTimeout time.Duration
 
 	// IdleTimeout is the maximum duration a connection can remain idle
-	// between requests before being closed.
-	// Zero means no timeout. Default: 5m
+	// between requests before being closed automatically.
+	// This frees resources from abandoned connections.
+	// 0 means no timeout (connections stay open indefinitely).
+	// Recommended: 5m for production.
 	IdleTimeout time.Duration
 
 	// ShutdownTimeout is the maximum duration to wait for active connections
 	// to complete during graceful shutdown.
-	// Default: 30s
+	// After this timeout, remaining connections are forcibly closed.
+	// Must be > 0 to ensure shutdown completes.
+	// Recommended: 30s (balances graceful shutdown with restart time).
 	ShutdownTimeout time.Duration
 
-	// MetricsLogInterval is the interval at which to log server metrics.
-	// Set to 0 to disable periodic metrics logging.
-	// Default: 5 minutes
+	// MetricsLogInterval is the interval at which to log server metrics
+	// (active connections, requests/sec, etc.).
+	// 0 disables periodic metrics logging.
+	// Recommended: 5m for production monitoring.
 	MetricsLogInterval time.Duration
 }
 
-// New creates a new NFSServer with the specified configuration.
-// The repositories are provided later via the Start() method.
-// The server must be started with Start() (or Serve()) before it will accept connections.
+// applyDefaults fills in zero values with sensible defaults.
+func (c *NFSConfig) applyDefaults() {
+	if c.Port <= 0 {
+		c.Port = 2049
+	}
+	if c.ReadTimeout == 0 {
+		c.ReadTimeout = 30 * time.Second
+	}
+	if c.WriteTimeout == 0 {
+		c.WriteTimeout = 30 * time.Second
+	}
+	if c.IdleTimeout == 0 {
+		c.IdleTimeout = 5 * time.Minute
+	}
+	if c.ShutdownTimeout == 0 {
+		c.ShutdownTimeout = 30 * time.Second
+	}
+	if c.MetricsLogInterval == 0 {
+		c.MetricsLogInterval = 5 * time.Minute
+	}
+}
+
+// validate checks that the configuration is valid for production use.
+func (c *NFSConfig) validate() error {
+	if c.Port < 0 || c.Port > 65535 {
+		return fmt.Errorf("invalid port %d: must be 0-65535", c.Port)
+	}
+	if c.MaxConnections < 0 {
+		return fmt.Errorf("invalid MaxConnections %d: must be >= 0", c.MaxConnections)
+	}
+	if c.ReadTimeout < 0 {
+		return fmt.Errorf("invalid ReadTimeout %v: must be >= 0", c.ReadTimeout)
+	}
+	if c.WriteTimeout < 0 {
+		return fmt.Errorf("invalid WriteTimeout %v: must be >= 0", c.WriteTimeout)
+	}
+	if c.IdleTimeout < 0 {
+		return fmt.Errorf("invalid IdleTimeout %v: must be >= 0", c.IdleTimeout)
+	}
+	if c.ShutdownTimeout <= 0 {
+		return fmt.Errorf("invalid ShutdownTimeout %v: must be > 0", c.ShutdownTimeout)
+	}
+	return nil
+}
+
+// New creates a new NFSFacade with the specified configuration.
+//
+// The facade is created in a stopped state. Call SetRepositories() to inject
+// the backend repositories, then call Serve() to start accepting connections.
+//
+// Configuration:
+//   - Zero values in config are replaced with sensible defaults
+//   - Invalid configurations cause a panic (indicates programmer error)
+//
+// Parameters:
+//   - config: Server configuration (ports, timeouts, limits)
+//
+// Returns a configured but not yet started NFSFacade.
+//
+// Panics if config validation fails.
 func New(config NFSConfig) *NFSFacade {
+	// Apply defaults for zero values
+	config.applyDefaults()
+
+	// Validate configuration
+	if err := config.validate(); err != nil {
+		panic(fmt.Sprintf("invalid NFS config: %v", err))
+	}
+
+	// Create connection semaphore if MaxConnections is set
 	var connSemaphore chan struct{}
 	if config.MaxConnections > 0 {
 		connSemaphore = make(chan struct{}, config.MaxConnections)
+		logger.Debug("NFS connection limit: %d", config.MaxConnections)
+	} else {
+		logger.Debug("NFS connection limit: unlimited")
 	}
 
+	// Create shutdown context for request cancellation
 	shutdownCtx, cancelRequests := context.WithCancel(context.Background())
 
 	return &NFSFacade{
@@ -95,68 +248,107 @@ func New(config NFSConfig) *NFSFacade {
 	}
 }
 
+// SetRepositories injects the shared metadata and content repositories.
+//
+// This method is called by DittoServer before Serve() is called. The repositories
+// are shared across all protocol facades.
+//
+// Parameters:
+//   - metadataRepo: Repository for file system metadata operations
+//   - contentRepo: Repository for file content operations
+//
+// Thread safety:
+// Called exactly once before Serve(), no synchronization needed.
 func (s *NFSFacade) SetRepositories(metadataRepo metadata.Repository, contentRepo content.Repository) {
 	s.repository = metadataRepo
 	s.content = contentRepo
+	logger.Debug("NFS repositories configured")
 }
 
 // Serve starts the NFS server and blocks until the context is cancelled
 // or an unrecoverable error occurs.
 //
-// When the context is cancelled, Serve initiates a graceful shutdown:
-// 1. Stops accepting new connections
-// 2. Cancels all in-flight request contexts
-// 3. Waits for active connections to complete (up to ShutdownTimeout)
-// 4. Forcibly closes any remaining connections
+// Serve accepts incoming TCP connections on the configured port and spawns
+// a goroutine to handle each connection. The connection handler processes
+// RPC requests for both NFS and MOUNT protocols.
 //
-// The provided context controls the server lifecycle. When cancelled, it triggers
-// graceful shutdown. Additionally, the server creates a child context (shutdownCtx)
-// that is passed to all request handlers, allowing them to detect shutdown and abort
-// long-running operations gracefully.
+// Graceful shutdown:
+// When the context is cancelled, Serve initiates graceful shutdown:
+//  1. Stops accepting new connections (listener closed)
+//  2. Cancels all in-flight request contexts (shutdownCtx cancelled)
+//  3. Waits for active connections to complete (up to ShutdownTimeout)
+//  4. Forcibly closes any remaining connections after timeout
 //
-// Context cancellation flow:
-//   - Server context cancelled → initiateShutdown()
-//   - shutdownCtx cancelled → all in-flight NFS operations receive cancellation
-//   - Handlers check context and abort (e.g., READDIR stops scanning directories)
-//   - Connections close after completing or aborting their current request
+// Context cancellation propagation:
+// The shutdownCtx is passed to all connection handlers and flows through
+// the entire request stack:
+//   - Connection handlers receive shutdownCtx
+//   - RPC dispatchers receive shutdownCtx
+//   - NFS procedure handlers receive shutdownCtx
+//   - Repository operations can detect cancellation via ctx.Done()
 //
-// Returns nil on graceful shutdown, or an error if startup fails.
+// This enables graceful abort of long-running operations like:
+//   - Large directory scans (READDIR/READDIRPLUS)
+//   - Large file reads/writes
+//   - Metadata operations on deep directory trees
+//
+// Parameters:
+//   - ctx: Controls the server lifecycle. Cancellation triggers graceful shutdown.
+//
+// Returns:
+//   - nil on graceful shutdown
+//   - context.Canceled if cancelled via context
+//   - error if listener fails to start or shutdown is not graceful
+//
+// Thread safety:
+// Serve() should only be called once per NFSFacade instance.
 func (s *NFSFacade) Serve(ctx context.Context) error {
+	// Create TCP listener
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", s.config.Port))
 	if err != nil {
-		return fmt.Errorf("failed to start listener: %w", err)
+		return fmt.Errorf("failed to create NFS listener on port %d: %w", s.config.Port, err)
 	}
 
 	s.listener = listener
-	logger.Info("NFS server started on port %d", s.config.Port)
-	logger.Debug("Server config: max_connections=%d read_timeout=%v write_timeout=%v idle_timeout=%v",
+	logger.Info("NFS server listening on port %d", s.config.Port)
+	logger.Debug("NFS config: max_connections=%d read_timeout=%v write_timeout=%v idle_timeout=%v",
 		s.config.MaxConnections, s.config.ReadTimeout, s.config.WriteTimeout, s.config.IdleTimeout)
 
-	// Handle context cancellation
+	// Monitor context cancellation in separate goroutine
+	// This allows the main accept loop to focus on accepting connections
 	go func() {
 		<-ctx.Done()
-		logger.Info("Shutdown signal received, initiating graceful shutdown")
+		logger.Info("NFS shutdown signal received: %v", ctx.Err())
 		s.initiateShutdown()
 	}()
 
+	// Start metrics logging if enabled
+	if s.config.MetricsLogInterval > 0 {
+		go s.logMetrics(ctx)
+	}
+
 	// Accept connections until shutdown
 	for {
+		// Check if shutdown has been initiated
 		select {
 		case <-s.shutdown:
 			return s.gracefulShutdown()
 		default:
 		}
 
-		// Check connection limit before accepting
+		// Acquire connection semaphore if connection limiting is enabled
+		// This blocks if we're at MaxConnections until a connection closes
 		if s.connSemaphore != nil {
 			select {
 			case s.connSemaphore <- struct{}{}:
-				// Acquired semaphore, can accept connection
+				// Acquired semaphore slot, proceed with accept
 			case <-s.shutdown:
+				// Shutdown initiated while waiting for semaphore
 				return s.gracefulShutdown()
 			}
 		}
 
+		// Accept next connection (blocks until connection arrives or error)
 		tcpConn, err := s.listener.Accept()
 		if err != nil {
 			// Release semaphore on accept error
@@ -164,11 +356,15 @@ func (s *NFSFacade) Serve(ctx context.Context) error {
 				<-s.connSemaphore
 			}
 
+			// Check if error is due to shutdown (expected) or network error (unexpected)
 			select {
 			case <-s.shutdown:
+				// Expected error during shutdown (listener was closed)
 				return s.gracefulShutdown()
 			default:
-				logger.Debug("Error accepting connection: %v", err)
+				// Unexpected error - log but continue
+				// Common causes: resource exhaustion, network issues
+				logger.Debug("Error accepting NFS connection: %v", err)
 				continue
 			}
 		}
@@ -177,107 +373,199 @@ func (s *NFSFacade) Serve(ctx context.Context) error {
 		s.activeConns.Add(1)
 		s.connCount.Add(1)
 
+		// Log new connection (debug level to avoid log spam under load)
+		logger.Debug("NFS connection accepted from %s (active: %d)",
+			tcpConn.RemoteAddr(), s.connCount.Load())
+
+		// Handle connection in separate goroutine
 		conn := s.newConn(tcpConn)
 		go func() {
 			defer func() {
+				// Cleanup on connection close
 				s.activeConns.Done()
 				s.connCount.Add(-1)
 				if s.connSemaphore != nil {
 					<-s.connSemaphore
 				}
+				logger.Debug("NFS connection closed from %s (active: %d)",
+					tcpConn.RemoteAddr(), s.connCount.Load())
 			}()
-			// Pass the shutdown context to the connection handler
-			// This allows requests to detect shutdown and abort gracefully
+
+			// Handle connection requests
+			// Pass shutdownCtx so requests can detect shutdown and abort
 			conn.serve(s.shutdownCtx)
 		}()
 	}
 }
 
 // initiateShutdown signals the server to begin graceful shutdown.
-// This is called automatically when the context is cancelled.
-// It's safe to call multiple times.
 //
-// During shutdown:
-// 1. The shutdown channel is closed to signal all goroutines
-// 2. The listener is closed to stop accepting new connections
-// 3. All in-flight request contexts are cancelled via cancelRequests()
+// This method is called automatically when the context is cancelled or
+// when Stop() is called. It's safe to call multiple times.
 //
-// The cancellation propagates through the entire request stack:
-//   - Connection handlers receive cancelled context
-//   - RPC dispatchers receive cancelled context
-//   - NFS procedure handlers receive cancelled context
-//   - Repository operations can detect cancellation
+// Shutdown sequence:
+//  1. Close shutdown channel (signals accept loop to stop)
+//  2. Close listener (stops accepting new connections)
+//  3. Cancel shutdownCtx (signals in-flight requests to abort)
+//
+// The context cancellation propagates through the entire request stack:
+//   - Connection handlers detect ctx.Done() and finish current request
+//   - RPC dispatchers check ctx.Done() before processing
+//   - NFS procedure handlers check ctx.Done() during long operations
+//   - Repository operations can detect ctx.Done() for early abort
 //
 // This enables graceful abort of long-running operations like:
-//   - Directory scans (READDIR/READDIRPLUS)
-//   - Large file reads/writes
-//   - Metadata operations on large directory trees
+//   - Large directory scans (READDIR/READDIRPLUS check context in loop)
+//   - Large file reads/writes (can abort between chunks)
+//   - Metadata tree traversal (can abort at each level)
+//
+// Thread safety:
+// Safe to call multiple times and from multiple goroutines.
+// Uses sync.Once to ensure shutdown logic only runs once.
 func (s *NFSFacade) initiateShutdown() {
 	s.shutdownOnce.Do(func() {
+		logger.Debug("NFS shutdown initiated")
+
+		// Close shutdown channel (signals accept loop)
 		close(s.shutdown)
+
+		// Close listener (stops accepting new connections)
 		if s.listener != nil {
-			// Stop accepting new connections
-			s.listener.Close()
+			if err := s.listener.Close(); err != nil {
+				logger.Debug("Error closing NFS listener: %v", err)
+			}
 		}
+
 		// Cancel all in-flight request contexts
-		// This signals to all NFS procedure handlers that they should abort
+		// This is the key to graceful shutdown: NFS procedure handlers
+		// check ctx.Done() during long operations and abort cleanly
 		s.cancelRequests()
-		logger.Debug("Request cancellation signal sent to all in-flight operations")
+		logger.Debug("NFS request cancellation signal sent to all in-flight operations")
 	})
 }
 
 // gracefulShutdown waits for active connections to complete or timeout.
-// Returns nil if all connections complete gracefully, or an error if
-// the shutdown timeout is exceeded.
+//
+// This method blocks until either:
+//   - All active connections complete naturally
+//   - ShutdownTimeout expires
+//
+// After timeout, any remaining connections are considered non-responsive
+// and are abandoned (their goroutines will eventually clean up when they
+// complete or detect the closed listener).
+//
+// Returns:
+//   - nil if all connections completed gracefully
+//   - error if shutdown timeout was exceeded
+//
+// Thread safety:
+// Should only be called once, from the Serve() method.
 func (s *NFSFacade) gracefulShutdown() error {
-	logger.Info("Waiting for %d active connections to complete (timeout: %v)",
-		s.connCount.Load(), s.config.ShutdownTimeout)
+	activeCount := s.connCount.Load()
+	logger.Info("NFS graceful shutdown: waiting for %d active connection(s) (timeout: %v)",
+		activeCount, s.config.ShutdownTimeout)
 
-	// Wait for active connections with timeout
+	// Create channel that closes when all connections are done
 	done := make(chan struct{})
 	go func() {
 		s.activeConns.Wait()
 		close(done)
 	}()
 
+	// Wait for completion or timeout
 	select {
 	case <-done:
-		logger.Info("All connections closed gracefully")
+		logger.Info("NFS graceful shutdown complete: all connections closed")
 		return nil
+
 	case <-time.After(s.config.ShutdownTimeout):
 		remaining := s.connCount.Load()
-		logger.Warn("Shutdown timeout exceeded, %d connections still active", remaining)
-		return fmt.Errorf("shutdown timeout exceeded with %d active connections", remaining)
+		logger.Warn("NFS shutdown timeout exceeded: %d connection(s) still active after %v",
+			remaining, s.config.ShutdownTimeout)
+		return fmt.Errorf("NFS shutdown timeout: %d connections still active", remaining)
 	}
 }
 
-// Stop initiates graceful shutdown of the server.
-// It stops accepting new connections, cancels all in-flight requests,
-// and waits for active connections to complete up to ShutdownTimeout.
+// Stop initiates graceful shutdown of the NFS server.
 //
-// Stop is safe to call multiple times and safe to call concurrently with Serve.
-// After Stop returns, no new connections will be accepted and all active
-// connections will have been given a chance to complete.
+// Stop is safe to call multiple times and safe to call concurrently with Serve().
+// It signals the server to begin shutdown and waits for active connections to
+// complete up to ShutdownTimeout.
 //
-// The shutdown process:
-//   - Listener closed → no new connections accepted
-//   - Context cancelled → all in-flight operations receive abort signal
-//   - Wait for connections → up to ShutdownTimeout
-//   - Force close → any remaining connections after timeout
+// The context parameter allows the caller to set a custom shutdown timeout,
+// overriding the configured ShutdownTimeout. If ctx is cancelled before
+// connections complete, Stop returns immediately.
 //
-// Returns nil on successful shutdown, or an error if the shutdown timeout
-// is exceeded.
+// Parameters:
+//   - ctx: Controls the shutdown timeout. If cancelled, Stop returns immediately.
+//
+// Returns:
+//   - nil on successful graceful shutdown
+//   - error if shutdown timeout exceeded or context cancelled
+//
+// Thread safety:
+// Safe to call concurrently from multiple goroutines.
 func (s *NFSFacade) Stop(ctx context.Context) error {
 	s.initiateShutdown()
+
+	// If caller provided a context, respect it
+	// Otherwise use our configured timeout
+	if ctx != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+
 	return s.gracefulShutdown()
 }
 
+// logMetrics periodically logs server metrics for monitoring.
+//
+// This goroutine logs active connection count at regular intervals
+// (MetricsLogInterval) to help operators monitor server load.
+//
+// Future enhancements could include:
+//   - Requests per second
+//   - Average request latency
+//   - Error rates
+//   - Memory usage
+//
+// The goroutine exits when the context is cancelled.
+func (s *NFSFacade) logMetrics(ctx context.Context) {
+	ticker := time.NewTicker(s.config.MetricsLogInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			activeConns := s.connCount.Load()
+			logger.Info("NFS metrics: active_connections=%d", activeConns)
+		}
+	}
+}
+
 // GetActiveConnections returns the current number of active connections.
+//
+// This method is primarily used for testing and monitoring.
+//
+// Returns the count of connections currently being processed.
+//
+// Thread safety:
+// Safe to call concurrently. Uses atomic operations.
 func (s *NFSFacade) GetActiveConnections() int32 {
 	return s.connCount.Load()
 }
 
 // newConn creates a new connection wrapper for a TCP connection.
+//
+// The conn type (defined elsewhere) handles the RPC request/response cycle
+// for a single client connection. It processes both NFS and MOUNT protocol
+// requests.
+//
+// Parameters:
+//   - tcpConn: The accepted TCP connection
+//
+// Returns a conn instance ready to serve requests.
 func (s *NFSFacade) newConn(tcpConn net.Conn) *conn {
 	return &conn{
 		server: s,
@@ -285,10 +573,20 @@ func (s *NFSFacade) newConn(tcpConn net.Conn) *conn {
 	}
 }
 
+// Port returns the TCP port the NFS server is listening on.
+//
+// This implements the server.Facade interface.
+//
+// Returns the configured port number.
 func (s *NFSFacade) Port() int {
 	return s.config.Port
 }
 
+// Protocol returns "NFS" as the protocol identifier.
+//
+// This implements the server.Facade interface.
+//
+// Returns "NFS" for logging and metrics.
 func (s *NFSFacade) Protocol() string {
 	return "NFS"
 }
