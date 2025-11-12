@@ -12,5 +12,5 @@ type ServerConfig struct {
 	//   - "nfs.mount.denied_clients": []string{"192.168.1.50"}
 	//   - "smb.signing_required": true
 	//   - "ftp.passive_ports": "10000-10100"
-	CustomSettings map[string]interface{}
+	CustomSettings map[string]any
 }
