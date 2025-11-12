@@ -60,61 +60,10 @@ func (s *MemoryMetadataStore) GetFilesystemCapabilities(ctx context.Context, han
 		}
 	}
 
-	// Return static capabilities for the in-memory filesystem
-	// These values are based on typical NFS/SMB recommendations and
-	// standard Unix filesystem limits
-	return &metadata.FilesystemCapabilities{
-		// Transfer Sizes
-		// Maximum read size: 1MB (balance between efficiency and memory)
-		MaxReadSize: 1048576,
-
-		// Preferred read size: 64KB (good balance for most protocols)
-		PreferredReadSize: 65536,
-
-		// Maximum write size: 1MB (matches read size)
-		MaxWriteSize: 1048576,
-
-		// Preferred write size: 64KB (matches preferred read size)
-		PreferredWriteSize: 65536,
-
-		// Limits
-		// Maximum file size: 2^63-1 (practically unlimited, constrained by memory)
-		MaxFileSize: 9223372036854775807,
-
-		// Maximum filename length: 255 bytes (standard Unix limit)
-		MaxFilenameLen: 255,
-
-		// Maximum path length: 4096 bytes (standard Unix limit)
-		MaxPathLen: 4096,
-
-		// Maximum hard link count: 32767 (reasonable limit, similar to ext4)
-		MaxHardLinkCount: 32767,
-
-		// Features
-		// Supports hard links (we track link counts)
-		SupportsHardLinks: true,
-
-		// Supports symbolic links (we store symlink targets in FileAttr)
-		SupportsSymlinks: true,
-
-		// Case-sensitive filenames (Go map keys are case-sensitive)
-		CaseSensitive: true,
-
-		// Case-preserving (we store exact filenames as provided)
-		CasePreserving: true,
-
-		// ACLs not supported in basic implementation (could be added via Extended attrs)
-		SupportsACLs: false,
-
-		// Extended attributes not supported in basic implementation
-		SupportsExtendedAttrs: false,
-
-		// Reject long names with error (don't silently truncate)
-		TruncatesLongNames: true,
-
-		// Timestamp resolution: 1 nanosecond (Go time.Time has nanosecond precision)
-		TimestampResolution: 1,
-	}, nil
+	// Return the capabilities that were configured at store creation
+	// Make a copy to prevent external modifications
+	capsCopy := s.capabilities
+	return &capsCopy, nil
 }
 
 // GetFilesystemStatistics returns dynamic filesystem statistics.
@@ -183,17 +132,19 @@ func (s *MemoryMetadataStore) GetFilesystemStatistics(ctx context.Context, handl
 	// Count total files (including directories)
 	usedFiles := uint64(len(s.files))
 
-	// For in-memory implementation, use large default values to indicate "unlimited"
-	// In practice, limits are determined by available system memory
-	// These could be made configurable via CustomSettings if needed, e.g.:
-	//   - s.serverConfig.CustomSettings["memory.max_storage_bytes"]
-	//   - s.serverConfig.CustomSettings["memory.max_files"]
+	// Get configured limits from store configuration
+	// If not configured (0), use large default values to indicate "unlimited"
+	totalBytes := s.maxStorageBytes
+	if totalBytes == 0 {
+		// Default to 1TB (effectively unlimited for in-memory)
+		totalBytes = 1024 * 1024 * 1024 * 1024
+	}
 
-	// Default to 1TB total storage (effectively unlimited for in-memory)
-	totalBytes := uint64(1024 * 1024 * 1024 * 1024)
-
-	// Default to 1 million files
-	totalFiles := uint64(1000000)
+	totalFiles := s.maxFiles
+	if totalFiles == 0 {
+		// Default to 1 million files
+		totalFiles = 1000000
+	}
 
 	// Calculate available space
 	availableBytes := uint64(0)
@@ -207,7 +158,7 @@ func (s *MemoryMetadataStore) GetFilesystemStatistics(ctx context.Context, handl
 	}
 
 	return &metadata.FilesystemStatistics{
-		// Total space in bytes (default limit)
+		// Total space in bytes (from configuration)
 		TotalBytes: totalBytes,
 
 		// Used space in bytes (sum of all file sizes)
