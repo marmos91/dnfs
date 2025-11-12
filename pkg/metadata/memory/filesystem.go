@@ -34,7 +34,7 @@ import (
 //   - *FilesystemCapabilities: Static filesystem capabilities and limits
 //   - error: ErrNotFound if handle doesn't exist, ErrInvalidHandle if handle
 //     is malformed, or context cancellation error
-func (s *MemoryMetadataStore) GetFilesystemCapabilities(ctx context.Context, handle metadata.FileHandle) (*metadata.FilesystemCapabilities, error) {
+func (store *MemoryMetadataStore) GetFilesystemCapabilities(ctx context.Context, handle metadata.FileHandle) (*metadata.FilesystemCapabilities, error) {
 	// Check context before acquiring lock
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -48,12 +48,12 @@ func (s *MemoryMetadataStore) GetFilesystemCapabilities(ctx context.Context, han
 		}
 	}
 
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	store.mu.RLock()
+	defer store.mu.RUnlock()
 
 	// Verify the handle exists
 	key := handleToKey(handle)
-	if _, exists := s.files[key]; !exists {
+	if _, exists := store.files[key]; !exists {
 		return nil, &metadata.StoreError{
 			Code:    metadata.ErrNotFound,
 			Message: "file not found",
@@ -62,7 +62,7 @@ func (s *MemoryMetadataStore) GetFilesystemCapabilities(ctx context.Context, han
 
 	// Return the capabilities that were configured at store creation
 	// Make a copy to prevent external modifications
-	capsCopy := s.capabilities
+	capsCopy := store.capabilities
 	return &capsCopy, nil
 }
 
@@ -94,7 +94,7 @@ func (s *MemoryMetadataStore) GetFilesystemCapabilities(ctx context.Context, han
 //   - *FilesystemStatistics: Dynamic filesystem usage statistics
 //   - error: ErrNotFound if handle doesn't exist, ErrInvalidHandle if handle
 //     is malformed, or context cancellation error
-func (s *MemoryMetadataStore) GetFilesystemStatistics(ctx context.Context, handle metadata.FileHandle) (*metadata.FilesystemStatistics, error) {
+func (store *MemoryMetadataStore) GetFilesystemStatistics(ctx context.Context, handle metadata.FileHandle) (*metadata.FilesystemStatistics, error) {
 	// Check context before acquiring lock
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -108,12 +108,12 @@ func (s *MemoryMetadataStore) GetFilesystemStatistics(ctx context.Context, handl
 		}
 	}
 
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	store.mu.RLock()
+	defer store.mu.RUnlock()
 
 	// Verify the handle exists
 	key := handleToKey(handle)
-	if _, exists := s.files[key]; !exists {
+	if _, exists := store.files[key]; !exists {
 		return nil, &metadata.StoreError{
 			Code:    metadata.ErrNotFound,
 			Message: "file not found",
@@ -122,7 +122,7 @@ func (s *MemoryMetadataStore) GetFilesystemStatistics(ctx context.Context, handl
 
 	// Calculate current usage by summing all file sizes
 	var usedBytes uint64
-	for _, attr := range s.files {
+	for _, attr := range store.files {
 		// Only count regular files (directories, symlinks have no real content)
 		if attr.Type == metadata.FileTypeRegular {
 			usedBytes += attr.Size
@@ -130,17 +130,17 @@ func (s *MemoryMetadataStore) GetFilesystemStatistics(ctx context.Context, handl
 	}
 
 	// Count total files (including directories)
-	usedFiles := uint64(len(s.files))
+	usedFiles := uint64(len(store.files))
 
 	// Get configured limits from store configuration
 	// If not configured (0), use large default values to indicate "unlimited"
-	totalBytes := s.maxStorageBytes
+	totalBytes := store.maxStorageBytes
 	if totalBytes == 0 {
 		// Default to 1TB (effectively unlimited for in-memory)
 		totalBytes = 1024 * 1024 * 1024 * 1024
 	}
 
-	totalFiles := s.maxFiles
+	totalFiles := store.maxFiles
 	if totalFiles == 0 {
 		// Default to 1 million files
 		totalFiles = 1000000
