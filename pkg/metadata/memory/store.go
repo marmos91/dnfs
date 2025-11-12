@@ -221,7 +221,7 @@ func handleToKey(handle metadata.FileHandle) string {
 //
 // Returns:
 //   - FileHandle: A unique 16-byte file handle
-func (s *MemoryMetadataStore) generateFileHandle(seed string) metadata.FileHandle {
+func (store *MemoryMetadataStore) generateFileHandle(seed string) metadata.FileHandle {
 	id := uuid.New()
 	return id[:]
 }
