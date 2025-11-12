@@ -19,4 +19,5 @@ type StoreTestSuite struct {
 func (suite *StoreTestSuite) Run(test *testing.T) {
 	test.Run("Share", suite.RunShareTests)
 	test.Run("Server", suite.RunShareTests)
+	test.Run("Filesystem", suite.RunFilesystemTests)
 }
