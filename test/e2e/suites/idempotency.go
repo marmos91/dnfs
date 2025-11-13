@@ -1,6 +1,7 @@
 package suites
 
 import (
+	"strconv"
 	"testing"
 
 	"github.com/marmos91/dittofs/test/e2e/framework"
@@ -108,7 +109,7 @@ func TestIdempotency(t *testing.T, storeType framework.StoreType) {
 	t.Run("WriteFileMultipleTimes", func(t *testing.T) {
 		// Write file multiple times with different content
 		for i := 0; i < 5; i++ {
-			content := []byte("iteration " + string(rune('0'+i)))
+			content := []byte("iteration " + strconv.Itoa(i))
 			err := ctx.WriteFile("multiwrite.txt", content, 0644)
 			if err != nil {
 				t.Fatalf("Write %d failed: %v", i, err)

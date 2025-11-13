@@ -108,7 +108,7 @@ to access the same S3-backed storage
 ### Development & Testing
 
 ```
-Facades → NFS only
+Adapters → NFS only
 Metadata → In-Memory
 Content → In-Memory or local filesystem
 
@@ -118,11 +118,11 @@ Use case: Fast development iteration without external dependencies
 ### High-Performance Distributed Cache
 
 ```
-Facades → NFS
+Adapters → NFS
 Metadata → Redis (in-memory, sub-millisecond lookups)
 Content → Local NVMe + S3 tiering
 
-Use case: ML training pipelines with hot data on NVMe, 
+Use case: ML training pipelines with hot data on NVMe,
 cold data automatically tiered to S3
 ```
 
@@ -174,6 +174,44 @@ DittoFS includes comprehensive testing:
 - **Unit tests** for core components (RPC, XDR, metadata, content repositories)
 - **E2E tests** that mount real NFS filesystems and test complete workflows
 - **Test matrix** running all suites against multiple storage backends (memory, filesystem)
+
+### Benchmarking
+
+DittoFS includes a comprehensive benchmark suite for performance testing and comparison:
+
+```bash
+# Run all benchmarks with default settings (10s per benchmark, 3 iterations)
+./scripts/benchmark.sh
+
+# Run with CPU and memory profiling
+./scripts/benchmark.sh --profile
+
+# Compare with previous benchmark results
+./scripts/benchmark.sh --compare
+
+# Run specific benchmarks
+go test -bench='BenchmarkE2E/memory/ReadThroughput' -benchtime=20s ./test/e2e/
+
+# Run with custom configuration
+BENCH_TIME=30s BENCH_COUNT=5 ./scripts/benchmark.sh
+```
+
+The benchmark suite measures:
+- **Throughput**: Read/write performance from 4KB to 100MB files
+- **Latency**: Per-operation timing for metadata and file operations
+- **Memory Usage**: Allocation patterns and memory footprint via profiling
+- **Scalability**: Performance with varying directory sizes and workloads
+- **Store Comparison**: Side-by-side comparison of all storage backends
+
+Results are saved to `benchmark_results/<timestamp>/` with:
+- Raw benchmark data and profiles (CPU, memory)
+- Generated reports (text and SVG graphs)
+- Summary report with throughput/latency comparisons
+- Comparison with previous runs (if `--compare` used)
+
+**Documentation**:
+- See [test/e2e/BENCHMARKS.md](test/e2e/BENCHMARKS.md) for detailed usage and interpretation
+- See [test/e2e/COMPARISON_GUIDE.md](test/e2e/COMPARISON_GUIDE.md) for comparing with FUSE-based and kernel NFS implementations
 
 ## Architecture Deep Dive
 
@@ -476,14 +514,14 @@ DittoFS is in active development and welcomes contributions!
 
 **Medium Priority**
 
-- SMB/CIFS facade implementation
+- SMB/CIFS adapter implementation
 - Documentation improvements
 - Example applications and tutorials
 - Monitoring and observability
 
 **Future Work**
 
-- WebDAV facade
+- WebDAV adapter
 - NFSv4 support
 - Advanced caching strategies
 - Multi-region replication
@@ -518,7 +556,7 @@ DittoFS includes a comprehensive end-to-end testing framework that validates rea
 - **Starting a real DittoFS server** with configurable backends
 - **Mounting the NFS filesystem** using platform-native mount commands
 - **Executing real file operations** using standard Go `os` package functions
-- **Testing all combinations** of facades and storage backends
+- **Testing all combinations** of adapters and storage backends
 
 Test suites cover:
 - Basic file operations (create, read, write, delete)
@@ -538,7 +576,7 @@ dittofs/
 ├── pkg/                  # Public APIs
 │   ├── metadata/         # Metadata repository interfaces and implementations
 │   ├── content/          # Content repository interfaces and implementations
-│   ├── facade/           # Facade interfaces and implementations
+│   ├── adapter/          # Adapter interfaces and implementations
 │   └── server/           # Core server logic
 ├── internal/             # Internal implementation details
 │   ├── protocol/nfs/     # NFS protocol implementation
@@ -638,9 +676,9 @@ A: Not yet. DittoFS is experimental and needs more testing, security auditing, a
 
 A: Currently NFSv3 over TCP. NFSv4 support is planned for a future phase.
 
-**Q: Can I implement my own protocol facade?**
+**Q: Can I implement my own protocol adapter?**
 
-A: Yes! That's the whole point. Implement the `Facade` interface and wire it to the metadata/content repositories.
+A: Yes! That's the whole point. Implement the `Adapter` interface and wire it to the metadata/content repositories.
 
 **Q: How does performance compare to kernel NFS?**
 
