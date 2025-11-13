@@ -55,15 +55,15 @@ type UmountAllContext struct {
 //  2. Extract the client IP address from the network context
 //  3. Query the repository for all mounts from this client (for logging)
 //  4. Check for cancellation before the destructive operation
-//  5. Remove all mount records for this client across all exports
+//  5. Remove all mount records for this client across all shares
 //  6. Log the operation with count of removed mounts
 //  7. Always return success (RFC 1813 specifies void return)
 //
 // Context cancellation:
 //   - Check at the beginning to respect client disconnection
-//   - Check before RemoveAllMounts to avoid starting destructive operation
-//   - Once RemoveAllMounts starts, let it complete to ensure consistency
-//   - If cancelled during RemoveAllMounts, we still return success per RFC
+//   - Check before removing mounts to avoid starting destructive operation
+//   - Once removal starts, let it complete to ensure consistency
+//   - If cancelled during removal, we still return success per RFC
 //
 // Use cases for UMNTALL:
 //   - Client is shutting down and wants to clean up all mounts
@@ -77,11 +77,10 @@ type UmountAllContext struct {
 //   - Server-side tracking is informational only
 //   - No error status codes are defined for UMNTALL in the protocol
 //   - This is more efficient than calling UMNT for each mount individually
-//   - GetMountsByClient is optional (for logging) - failure is non-fatal
 //
 // Parameters:
 //   - ctx: Context with cancellation and client information
-//   - repository: The metadata repository that tracks active mounts
+//   - repository: The metadata repository that tracks active shares
 //   - req: Empty request struct (UMNTALL takes no parameters)
 //
 // Returns:
@@ -90,29 +89,12 @@ type UmountAllContext struct {
 //     otherwise always returns nil per RFC 1813
 //
 // RFC 1813 Appendix I: UMNTALL Procedure
-//
-// Example:
-//
-//	handler := &DefaultMountHandler{}
-//	req := &UmountAllRequest{}
-//	ctx := &UmountAllContext{
-//	    Context: context.Background(),
-//	    ClientAddr: "192.168.1.100:1234",
-//	}
-//	resp, err := handler.UmntAll(ctx, repository, req)
-//	if err != nil {
-//	    if errors.Is(err, context.Canceled) {
-//	        // Client disconnected before unmount-all could complete
-//	    }
-//	}
-//	// Response is always success unless cancelled early
 func (h *DefaultMountHandler) UmntAll(
 	ctx *UmountAllContext,
-	repository metadata.Repository,
+	repository metadata.MetadataStore,
 	req *UmountAllRequest,
 ) (*UmountAllResponse, error) {
 	// Check for cancellation before starting any work
-	// This handles the case where the client disconnects before we begin processing
 	select {
 	case <-ctx.Context.Done():
 		logger.Debug("Unmount-all request cancelled before processing: client=%s error=%v",
@@ -130,30 +112,37 @@ func (h *DefaultMountHandler) UmntAll(
 
 	logger.Info("Unmount-all request: client=%s", clientIP)
 
-	// Get all mounts for this client to count them before removal
-	// This is optional (for logging purposes) - if it fails, we continue anyway
-	// The repository should respect context cancellation internally
-	mounts, err := repository.GetMountsByClient(ctx.Context, clientIP)
+	// Get all active share sessions to find this client's mounts
+	// This is for logging purposes - if it fails, we continue anyway
+	allSessions, err := repository.GetActiveShares(ctx.Context)
 	if err != nil {
 		// Check if the error is due to context cancellation
 		if ctx.Context.Err() != nil {
-			logger.Debug("Unmount-all cancelled while getting mount list: client=%s error=%v",
+			logger.Debug("Unmount-all cancelled while getting share list: client=%s error=%v",
 				clientIP, ctx.Context.Err())
 			return &UmountAllResponse{}, ctx.Context.Err()
 		}
 
 		// Log the error but continue - we'll try to remove anyway
-		logger.Warn("Failed to get mounts for client: client=%s error=%v", clientIP, err)
-		mounts = []metadata.MountEntry{} // Empty list
+		logger.Warn("Failed to get active shares: client=%s error=%v", clientIP, err)
+		allSessions = []metadata.ShareSession{} // Empty list
 	}
 
-	mountCount := len(mounts)
+	// Filter to find mounts belonging to this client
+	clientSessions := make([]metadata.ShareSession, 0)
+	for _, session := range allSessions {
+		if session.ClientAddr == clientIP {
+			clientSessions = append(clientSessions, session)
+		}
+	}
+
+	mountCount := len(clientSessions)
 	if mountCount == 0 {
 		logger.Info("Unmount-all: client=%s had no active mounts", clientIP)
 		return &UmountAllResponse{}, nil
 	}
 
-	// Check for cancellation before the destructive RemoveAllMounts operation
+	// Check for cancellation before the destructive remove operations
 	// This is important because once we start removing, we want to complete
 	// the operation to avoid leaving partial/inconsistent mount records
 	select {
@@ -164,36 +153,42 @@ func (h *DefaultMountHandler) UmntAll(
 	default:
 	}
 
-	// Remove all mounts for this client
-	// We don't check for cancellation after this point because:
-	// 1. We want to complete the cleanup to maintain consistency
-	// 2. The operation should be relatively fast (batch delete)
-	// 3. Partial removal would leave inconsistent mount tracking
-	// 4. The client has already decided to unmount everything
-	//
-	// The repository should respect context internally if needed
-	err = repository.RemoveAllMounts(ctx.Context, clientIP)
-	if err != nil {
-		// Check if the error is due to context cancellation
-		if ctx.Context.Err() != nil {
-			// Context was cancelled during RemoveAllMounts
-			// We still return success per RFC 1813 (UMNTALL always succeeds)
-			// but log that some mount records may not have been removed
-			logger.Warn("Unmount-all cancelled during mount record removal: client=%s count=%d error=%v (mount records may be partially removed)",
-				clientIP, mountCount, ctx.Context.Err())
+	// Remove each mount for this client
+	// TODO: This could be optimized with a batch RemoveAllShareMountsByClient() method
+	// For now, we remove them individually
+	removedCount := 0
+	for _, session := range clientSessions {
+		err := repository.RemoveShareMount(ctx.Context, session.ShareName, clientIP)
+		if err != nil {
+			// Check if cancelled during removal
+			if ctx.Context.Err() != nil {
+				logger.Warn("Unmount-all cancelled during mount removal: client=%s removed=%d of %d error=%v",
+					clientIP, removedCount, mountCount, ctx.Context.Err())
+				// Per RFC 1813, UMNTALL always succeeds
+				break
+			}
+
+			// Log error but continue removing other mounts
+			logger.Warn("Failed to remove mount record: client=%s share=%s error=%v",
+				clientIP, session.ShareName, err)
 		} else {
-			// Log the error but still return success per RFC 1813
-			// The mount tracking is informational - the client has already unmounted
-			logger.Warn("Failed to remove mount records: client=%s count=%d error=%v",
-				clientIP, mountCount, err)
+			removedCount++
+			logger.Debug("Removed mount: client=%s share=%s", clientIP, session.ShareName)
 		}
+	}
+
+	if removedCount == mountCount {
+		logger.Info("Unmount-all successful: client=%s removed=%d mounts", clientIP, removedCount)
+	} else if removedCount > 0 {
+		logger.Warn("Unmount-all partially successful: client=%s removed=%d of %d mounts",
+			clientIP, removedCount, mountCount)
 	} else {
-		logger.Info("Unmount-all successful: client=%s removed=%d mounts",
+		logger.Warn("Unmount-all failed to remove any mounts: client=%s count=%d",
 			clientIP, mountCount)
 	}
 
 	// UMNTALL always returns void/success per RFC 1813
-	// Even if RemoveAllMounts failed or was cancelled, we return success
+	// Even if RemoveShareMount failed or was cancelled, we return success
 	// because the client-side unmount has already occurred
 	return &UmountAllResponse{}, nil
 }
@@ -208,14 +203,6 @@ func (h *DefaultMountHandler) UmntAll(
 // Returns:
 //   - *UmountAllRequest: Empty request struct
 //   - error: Returns error only if data is unexpectedly non-empty
-//
-// Example:
-//
-//	data := []byte{} // Empty - UMNTALL has no parameters
-//	req, err := DecodeUmountAllRequest(data)
-//	if err != nil {
-//	    // handle error
-//	}
 func DecodeUmountAllRequest(data []byte) (*UmountAllRequest, error) {
 	// UMNTALL takes no parameters, so we just return an empty request
 	// We don't error on non-empty data to be lenient with client implementations
@@ -228,12 +215,6 @@ func DecodeUmountAllRequest(data []byte) (*UmountAllRequest, error) {
 // Returns:
 //   - []byte: Empty slice (void response)
 //   - error: Always nil (encoding void cannot fail)
-//
-// Example:
-//
-//	resp := &UmountAllResponse{}
-//	data, err := resp.Encode()
-//	// data will be []byte{}, err will be nil
 func (resp *UmountAllResponse) Encode() ([]byte, error) {
 	// UMNTALL returns void (no data)
 	return []byte{}, nil
