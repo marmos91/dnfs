@@ -138,20 +138,20 @@ type CommitContext struct {
 //  2. Validate request parameters (handle format, offset/count range)
 //  3. Extract client IP and authentication from context
 //  4. Verify file exists and capture pre-operation state
-//  5. Delegate commit operation to repository (when implemented)
+//  5. Delegate commit operation to store (when implemented)
 //  6. Return file WCC data and write verifier
 //
 // **Design Principles:**
 //
 //   - Protocol layer handles only XDR encoding/decoding and validation
-//   - Business logic (actual flushing) will be delegated to repository
-//   - File handle validation performed by repository.GetFile()
+//   - Business logic (actual flushing) will be delegated to store
+//   - File handle validation performed by store.GetFile()
 //   - Comprehensive logging at INFO level for operations, DEBUG for details
 //   - Respects context cancellation for graceful shutdown and timeouts
 //
 // **Current Implementation:**
 //
-// This implementation is a no-op because the in-memory metadata repository
+// This implementation is a no-op because the in-memory metadata store
 // doesn't have write caching. All writes are immediately "committed" to the
 // in-memory data structures.
 //
@@ -159,10 +159,10 @@ type CommitContext struct {
 //
 // A production implementation with actual write caching should:
 //
-//  1. Add a CommitFile method to the Repository interface:
+//  1. Add a CommitFile method to the Store interface:
 //     CommitFile(handle FileHandle, offset uint64, count uint32, ctx *AuthContext) error
 //
-//  2. The repository should:
+//  2. The store should:
 //     - Identify cached writes in the specified range [offset, offset+count)
 //     - Flush those writes to stable storage (disk)
 //     - Ensure durability (fsync, fdatasync, or equivalent)
@@ -247,7 +247,7 @@ type CommitContext struct {
 //
 // This operation respects context cancellation:
 //   - Checks at operation start before any work
-//   - Checks before metadata repository calls
+//   - Checks before metadata store calls
 //   - Returns types.NFS3ErrIO on cancellation (NFS has no specific cancel status)
 //
 // For a lightweight metadata operation like this, cancellation is primarily
@@ -257,7 +257,7 @@ type CommitContext struct {
 //   - Enforcing request timeouts
 //
 // **Parameters:**
-//   - repository: The metadata repository for file operations
+//   - store: The metadata store for file operations
 //   - req: The commit request containing file handle and range
 //   - ctx: Context with client address and authentication credentials
 //
@@ -283,7 +283,7 @@ type CommitContext struct {
 //	    UID:        &uid,
 //	    GID:        &gid,
 //	}
-//	resp, err := handler.Commit(repository, req, ctx)
+//	resp, err := handler.Commit(store, req, ctx)
 //	if err != nil {
 //	    // Internal server error
 //	}
@@ -292,7 +292,7 @@ type CommitContext struct {
 //	}
 func (h *DefaultNFSHandler) Commit(
 	ctx *CommitContext,
-	repository metadata.Repository,
+	store metadata.MetadataStore,
 	req *CommitRequest,
 ) (*CommitResponse, error) {
 	// Extract client IP for logging
@@ -327,7 +327,7 @@ func (h *DefaultNFSHandler) Commit(
 	// Step 3: Verify file exists and capture pre-operation state
 	// ========================================================================
 
-	// Check context before repository call
+	// Check context before store call
 	select {
 	case <-ctx.Context.Done():
 		logger.Warn("COMMIT cancelled before GetFile: handle=%x client=%s error=%v",
@@ -337,7 +337,7 @@ func (h *DefaultNFSHandler) Commit(
 	}
 
 	handle := metadata.FileHandle(req.Handle)
-	fileAttr, err := repository.GetFile(ctx.Context, handle)
+	fileAttr, err := store.GetFile(ctx.Context, handle)
 	if err != nil {
 		logger.Warn("COMMIT failed: file not found: handle=%x client=%s error=%v",
 			req.Handle, clientIP, err)
@@ -365,10 +365,10 @@ func (h *DefaultNFSHandler) Commit(
 	// ========================================================================
 	// Step 4: Perform commit operation
 	// ========================================================================
-	// TODO: When the repository supports write caching, delegate to:
-	//   repository.CommitFile(handle, req.Offset, req.Count, authCtx)
+	// TODO: When the store supports write caching, delegate to:
+	//   store.CommitFile(handle, req.Offset, req.Count, authCtx)
 	//
-	// For now, this is a no-op since the in-memory repository doesn't
+	// For now, this is a no-op since the in-memory store doesn't
 	// have write caching - all writes are immediately "committed".
 
 	// In a production implementation with write caching, you would:
@@ -389,7 +389,7 @@ func (h *DefaultNFSHandler) Commit(
 	//
 	//     // Get updated attributes for WCC data (best effort)
 	//     var wccAfter *types.NFSFileAttr
-	//     if updatedAttr, getErr := repository.GetFile(ctx.Context, handle); getErr == nil {
+	//     if updatedAttr, getErr := store.GetFile(ctx.Context, handle); getErr == nil {
 	//         fileID := xdr.ExtractFileID(handle)
 	//         wccAfter = xdr.MetadataToNFS(updatedAttr, fileID)
 	//     }
@@ -402,19 +402,19 @@ func (h *DefaultNFSHandler) Commit(
 	// default:
 	// }
 	//
-	// 3. Call repository to flush writes (should pass context for cancellation)
-	// if err := repository.CommitFile(ctx.Context, handle, req.Offset, req.Count, authCtx); err != nil {
-	//     logger.Error("COMMIT failed: repository error: handle=%x offset=%d count=%d client=%s error=%v",
+	// 3. Call store to flush writes (should pass context for cancellation)
+	// if err := store.CommitFile(ctx.Context, handle, req.Offset, req.Count, authCtx); err != nil {
+	//     logger.Error("COMMIT failed: store error: handle=%x offset=%d count=%d client=%s error=%v",
 	//         req.Handle, req.Offset, req.Count, clientIP, err)
 	//
 	//     // Get updated attributes for WCC data (best effort)
 	//     var wccAfter *types.NFSFileAttr
-	//     if updatedAttr, getErr := repository.GetFile(ctx.Context, handle); getErr == nil {
+	//     if updatedAttr, getErr := store.GetFile(ctx.Context, handle); getErr == nil {
 	//         fileID := xdr.ExtractFileID(handle)
 	//         wccAfter = xdr.MetadataToNFS(updatedAttr, fileID)
 	//     }
 	//
-	//     status := xdr.MapRepositoryErrorToNFSStatus(err, clientIP, "COMMIT")
+	//     status := xdr.MapStoreErrorToNFSStatus(err, clientIP, "COMMIT")
 	//     return &CommitResponse{
 	//         Status:        status,
 	//         AttrBefore:    wccBefore,
@@ -428,7 +428,7 @@ func (h *DefaultNFSHandler) Commit(
 	// ========================================================================
 
 	// Get updated file attributes for WCC data
-	fileAttr, err = repository.GetFile(ctx.Context, handle)
+	fileAttr, err = store.GetFile(ctx.Context, handle)
 	if err != nil {
 		logger.Warn("COMMIT: successful but cannot get updated file attributes: handle=%x error=%v",
 			req.Handle, err)
