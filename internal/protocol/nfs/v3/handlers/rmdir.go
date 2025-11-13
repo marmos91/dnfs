@@ -653,25 +653,6 @@ func mapRmdirErrorToNFSStatus(err error) uint32 {
 	return mapMetadataErrorToNFS(err)
 }
 
-// OLD CODE - Check for specific error messages
-func _unused_mapRmdirErrors(err error) uint32 {
-	errMsg := err.Error()
-
-	// Directory not empty
-	if bytes.Contains([]byte(errMsg), []byte("not empty")) ||
-		bytes.Contains([]byte(errMsg), []byte("has children")) {
-		return types.NFS3ErrNotEmpty
-	}
-
-	// Not a directory
-	if bytes.Contains([]byte(errMsg), []byte("not a directory")) {
-		return types.NFS3ErrNotDir
-	}
-
-	// Default to I/O error for unknown errors
-	return types.NFS3ErrIO
-}
-
 // buildAuthContextFromRmdir creates an AuthContext from RmdirContext.
 //
 // This translates the NFS-specific authentication context into the generic

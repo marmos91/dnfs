@@ -332,7 +332,7 @@ func (c *NFSConn) handleNFSProcedure(ctx context.Context, call *rpc.RPCCallMessa
 	return procInfo.Handler(
 		authCtx,
 		c.server.nfsHandler,
-		c.server.repository,
+		c.server.metadataStore,
 		c.server.content,
 		data,
 	)
@@ -379,7 +379,7 @@ func (c *NFSConn) handleMountProcedure(ctx context.Context, call *rpc.RPCCallMes
 	return procInfo.Handler(
 		authCtx,
 		c.server.mountHandler,
-		c.server.repository,
+		c.server.metadataStore,
 		data,
 	)
 }
