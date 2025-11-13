@@ -112,27 +112,27 @@ type FsStatContext struct {
 // The FSSTAT process follows these steps:
 //  1. Check for context cancellation before starting
 //  2. Validate the file handle format and size
-//  3. Verify the file handle exists via repository.GetFile()
-//  4. Retrieve current filesystem statistics from the repository
+//  3. Verify the file handle exists via store.GetFile()
+//  4. Retrieve current filesystem statistics from the store
 //  5. Retrieve file attributes for cache consistency
 //  6. Return comprehensive filesystem statistics to the client
 //
 // Design principles:
 //   - Protocol layer handles only XDR encoding/decoding and validation
-//   - All business logic (space calculations, limits) is delegated to repository
-//   - File handle validation is performed by repository.GetFile()
+//   - All business logic (space calculations, limits) is delegated to store
+//   - File handle validation is performed by store.GetFile()
 //   - Comprehensive logging at INFO level for operations, DEBUG for details
 //   - Respects context cancellation for graceful shutdown and timeouts
 //
 // Security considerations:
 //   - Handle validation prevents malformed requests from causing errors
-//   - Repository layer enforces access control if needed
+//   - store layer enforces access control if needed
 //   - Client context enables auditing and rate limiting
 //   - No sensitive information leaked in error messages
 //
 // Context cancellation:
 //   - Checks at operation start before any work
-//   - Checks before each repository call (GetFile, GetFSStats)
+//   - Checks before each store call (GetFile, GetFilesystemStatistics)
 //   - Returns types.NFS3ErrIO on cancellation
 //   - Useful for client disconnects, server shutdown, request timeouts
 //
@@ -146,7 +146,7 @@ type FsStatContext struct {
 //
 // Parameters:
 //   - ctx: Context information including cancellation, client address and auth flavor
-//   - repository: The metadata repository containing filesystem statistics
+//   - metadataStore: The metadata store containing filesystem statistics
 //   - req: The FSSTAT request containing the file handle
 //
 // Returns:
@@ -165,7 +165,7 @@ type FsStatContext struct {
 //	    ClientAddr: "192.168.1.100:1234",
 //	    AuthFlavor: 1, // AUTH_UNIX
 //	}
-//	resp, err := handler.FsStat(ctx, repository, req)
+//	resp, err := handler.FsStat(ctx, store, req)
 //	if err != nil {
 //	    // Internal server error
 //	}
@@ -174,7 +174,7 @@ type FsStatContext struct {
 //	}
 func (h *DefaultNFSHandler) FsStat(
 	ctx *FsStatContext,
-	repository metadata.Repository,
+	metadataStore metadata.MetadataStore,
 	req *FsStatRequest,
 ) (*FsStatResponse, error) {
 	logger.Debug("FSSTAT request: handle=%x client=%s", req.Handle, ctx.ClientAddr)
@@ -217,7 +217,7 @@ func (h *DefaultNFSHandler) FsStat(
 	// Step 3: Verify the file handle exists
 	// ========================================================================
 
-	// Check context before repository call
+	// Check context before store call
 	select {
 	case <-ctx.Context.Done():
 		logger.Warn("FSSTAT cancelled before GetFile: handle=%x client=%s error=%v",
@@ -226,28 +226,34 @@ func (h *DefaultNFSHandler) FsStat(
 	default:
 	}
 
-	attr, err := repository.GetFile(ctx.Context, metadata.FileHandle(req.Handle))
+	attr, err := metadataStore.GetFile(ctx.Context, metadata.FileHandle(req.Handle))
 	if err != nil {
 		logger.Debug("FSSTAT failed: handle not found: %v client=%s", err, ctx.ClientAddr)
 		return &FsStatResponse{Status: types.NFS3ErrStale}, nil
 	}
 
 	// ========================================================================
-	// Step 4: Retrieve filesystem statistics from the repository
+	// Step 4: Retrieve filesystem statistics from the store
 	// ========================================================================
 
-	// Check context before repository call
+	// Check context before store call
 	select {
 	case <-ctx.Context.Done():
-		logger.Warn("FSSTAT cancelled before GetFSStats: handle=%x client=%s error=%v",
+		logger.Warn("FSSTAT cancelled before GetFilesystemStatistics: handle=%x client=%s error=%v",
 			req.Handle, ctx.ClientAddr, ctx.Context.Err())
 		return &FsStatResponse{Status: types.NFS3ErrIO}, nil
 	default:
 	}
 
-	fsStats, err := repository.GetFSStats(ctx.Context, metadata.FileHandle(req.Handle))
+	stats, err := metadataStore.GetFilesystemStatistics(ctx.Context, metadata.FileHandle(req.Handle))
 	if err != nil {
 		logger.Error("FSSTAT failed: error retrieving statistics: %v client=%s", err, ctx.ClientAddr)
+		return &FsStatResponse{Status: types.NFS3ErrIO}, nil
+	}
+
+	// Defensive check: ensure store returned valid statistics
+	if stats == nil {
+		logger.Error("FSSTAT failed: store returned nil statistics client=%s", ctx.ClientAddr)
 		return &FsStatResponse{Status: types.NFS3ErrIO}, nil
 	}
 
@@ -259,21 +265,28 @@ func (h *DefaultNFSHandler) FsStat(
 	fileid := binary.BigEndian.Uint64(req.Handle[:8])
 	nfsAttr := xdr.MetadataToNFS(attr, fileid)
 
-	logger.Info("FSSTAT successful: client=%s total=%d free=%d avail=%d tfiles=%d ffiles=%d afiles=%d",
-		ctx.ClientAddr, fsStats.TotalBytes, fsStats.FreeBytes, fsStats.AvailBytes,
-		fsStats.TotalFiles, fsStats.FreeFiles, fsStats.AvailFiles)
+	// Convert ValidFor duration to seconds for Invarsec
+	invarsec := uint32(stats.ValidFor.Seconds())
 
-	// Build response with data from repository
+	logger.Info("FSSTAT successful: client=%s total=%d free=%d avail=%d tfiles=%d ffiles=%d afiles=%d",
+		ctx.ClientAddr, stats.TotalBytes, stats.UsedBytes, stats.AvailableBytes,
+		stats.TotalFiles, stats.UsedFiles, stats.AvailableFiles)
+
+	// Build response with data from store
+	// Note: NFS uses "free bytes" while the interface tracks "used bytes"
+	// Calculate free bytes as: total - used
+	freeBytes := stats.TotalBytes - stats.UsedBytes
+
 	return &FsStatResponse{
 		Status:   types.NFS3OK,
 		Attr:     nfsAttr,
-		Tbytes:   fsStats.TotalBytes,
-		Fbytes:   fsStats.FreeBytes,
-		Abytes:   fsStats.AvailBytes,
-		Tfiles:   fsStats.TotalFiles,
-		Ffiles:   fsStats.FreeFiles,
-		Afiles:   fsStats.AvailFiles,
-		Invarsec: fsStats.Invarsec,
+		Tbytes:   stats.TotalBytes,
+		Fbytes:   freeBytes,
+		Abytes:   stats.AvailableBytes,
+		Tfiles:   stats.TotalFiles,
+		Ffiles:   stats.TotalFiles - stats.UsedFiles, // Free = Total - Used
+		Afiles:   stats.AvailableFiles,
+		Invarsec: invarsec,
 	}, nil
 }
 
