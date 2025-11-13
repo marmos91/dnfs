@@ -136,7 +136,7 @@ type NullContext struct {
 //	// resp is always non-nil on success (empty response)
 func (h *DefaultMountHandler) MountNull(
 	ctx *NullContext,
-	repository metadata.Repository,
+	repository metadata.MetadataStore,
 	req *NullRequest,
 ) (*NullResponse, error) {
 	// Check for cancellation before starting

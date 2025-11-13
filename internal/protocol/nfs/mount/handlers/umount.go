@@ -115,7 +115,7 @@ type UmountContext struct {
 //	// Response is always success unless cancelled early
 func (h *DefaultMountHandler) Umnt(
 	ctx *UmountContext,
-	repository metadata.Repository,
+	repository metadata.MetadataStore,
 	req *UmountRequest,
 ) (*UmountResponse, error) {
 	// Check for cancellation before starting
@@ -151,7 +151,7 @@ func (h *DefaultMountHandler) Umnt(
 	// 4. Leaving stale mount records would pollute the DUMP output
 	//
 	// The repository should respect context internally if needed
-	err = repository.RemoveMount(ctx.Context, req.DirPath, clientIP)
+	err = repository.DeleteShare(ctx.Context, req.DirPath)
 	if err != nil {
 		// Check if the error is due to context cancellation
 		if ctx.Context.Err() != nil {
