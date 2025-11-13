@@ -395,8 +395,10 @@ func (h *DefaultNFSHandler) Remove(
 	logger.Info("REMOVE successful: file='%s' dir=%x client=%s",
 		req.Filename, req.DirHandle, clientIP)
 
+	// Convert internal type to NFS type for logging
+	nfsType := uint32(removedFileAttr.Type) + 1 // Internal types are 0-based, NFS types are 1-based
 	logger.Debug("REMOVE details: file_type=%d file_size=%d",
-		removedFileAttr.Type, removedFileAttr.Size)
+		nfsType, removedFileAttr.Size)
 
 	return &RemoveResponse{
 		Status:       types.NFS3OK,

@@ -162,7 +162,7 @@ func (c *NFSConfig) applyDefaults() {
 		c.Port = 2049
 	}
 	if c.ReadTimeout == 0 {
-		c.ReadTimeout = 30 * time.Second
+		c.ReadTimeout = 5 * time.Minute
 	}
 	if c.WriteTimeout == 0 {
 		c.WriteTimeout = 30 * time.Second

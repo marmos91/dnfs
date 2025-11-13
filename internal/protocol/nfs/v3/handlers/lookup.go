@@ -373,7 +373,7 @@ func (h *DefaultNFSHandler) Lookup(
 	nfsDirAttr := xdr.MetadataToNFS(dirAttr, dirID)
 
 	logger.Info("LOOKUP successful: file='%s' handle=%x type=%d size=%d client=%s",
-		req.Filename, childHandle, childAttr.Type, childAttr.Size, clientIP)
+		req.Filename, childHandle, nfsChildAttr.Type, childAttr.Size, clientIP)
 
 	logger.Debug("LOOKUP details: child_id=%d child_mode=%o dir_id=%d",
 		childID, childAttr.Mode, dirID)

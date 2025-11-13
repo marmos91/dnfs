@@ -77,8 +77,8 @@ func (store *MemoryMetadataStore) AddShare(
 		rootAttr.Mode = 0755
 	}
 
-	// Generate unique handle for root directory
-	rootHandle := store.generateFileHandle()
+	// Generate deterministic handle for root directory based on share name
+	rootHandle := store.generateFileHandle(name, "/")
 
 	// Initialize root directory metadata
 	// Note: We store a copy to avoid external modifications

@@ -261,11 +261,12 @@ func (h *DefaultMountHandler) Mount(
 		return &MountResponse{Status: MountErrServerFault}, nil
 	}
 
-	// TODO: Record the mount session for tracking (needed by DUMP procedure)
-	// This requires adding RecordShareMount() to MetadataStore interface
-	// For now, we'll skip recording but log that it should be done
-	logger.Debug("Mount session tracking not yet implemented: path=%s client=%s",
-		req.DirPath, clientIP)
+	// Record the mount session for tracking (needed by DUMP procedure)
+	// Note: We don't fail the mount if session recording fails - it's informational only
+	if err := repository.RecordShareMount(ctx.Context, req.DirPath, clientIP); err != nil {
+		logger.Warn("Failed to record mount session: path=%s client=%s error=%v",
+			req.DirPath, clientIP, err)
+	}
 
 	// Convert allowed auth methods to int32 array for response
 	authFlavors := make([]int32, len(accessDecision.AllowedAuthMethods))

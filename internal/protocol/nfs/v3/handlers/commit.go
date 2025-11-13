@@ -440,7 +440,7 @@ func (h *DefaultNFSHandler) Commit(
 		fileID := xdr.ExtractFileID(handle)
 		wccAfter = xdr.MetadataToNFS(fileAttr, fileID)
 		logger.Debug("COMMIT details: file_size=%d file_type=%d",
-			fileAttr.Size, fileAttr.Type)
+			fileAttr.Size, wccAfter.Type)
 	}
 
 	logger.Info("COMMIT successful: handle=%x offset=%d count=%d client=%s (no-op in current implementation)",
