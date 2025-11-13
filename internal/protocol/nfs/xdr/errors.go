@@ -7,14 +7,14 @@ import (
 )
 
 // ============================================================================
-// Error Mapping - Repository Errors → NFS Status Codes
+// Error Mapping - store Errors → NFS Status Codes
 // ============================================================================
 
-// MapRepositoryErrorToNFSStatus maps repository errors to NFS status codes.
+// MapStoreErrorToNFSStatus maps store errors to NFS status codes.
 //
 // Per RFC 1813 Section 2.2 (nfsstat3):
 // NFS procedures return status codes indicating success or specific failure
-// conditions. This function translates internal repository errors into the
+// conditions. This function translates internal store errors into the
 // appropriate NFS status codes for client consumption.
 //
 // Error Mapping:
@@ -38,13 +38,13 @@ import (
 //   - Server errors: logged as errors
 //
 // Parameters:
-//   - err: Repository error to map (nil = success)
+//   - err: store error to map (nil = success)
 //   - clientIP: Client IP address for audit logging
 //   - operation: Operation name for audit logging (e.g., "LOOKUP", "CREATE")
 //
 // Returns:
 //   - uint32: NFS status code (NFS3OK on success, error code on failure)
-func MapRepositoryErrorToNFSStatus(err error, clientIP string, operation string) uint32 {
+func MapStoreErrorToNFSStatus(err error, clientIP string, operation string) uint32 {
 	if err == nil {
 		return types.NFS3OK
 	}
@@ -164,7 +164,7 @@ func MapContentErrorToNFSStatus(err error) uint32 {
 	_, ok := err.(*metadata.StoreError)
 	if ok {
 		// Use the more specific error mapping
-		return MapRepositoryErrorToNFSStatus(err, "", "content operation")
+		return MapStoreErrorToNFSStatus(err, "", "content operation")
 	}
 
 	// Analyze error message for common patterns

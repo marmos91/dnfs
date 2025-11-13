@@ -111,17 +111,17 @@ type WriteContext struct {
 	AuthFlavor uint32
 
 	// UID is the authenticated user ID (from AUTH_UNIX).
-	// Used for write permission checks by the repository.
+	// Used for write permission checks by the store.
 	// Only valid when AuthFlavor == AUTH_UNIX.
 	UID *uint32
 
 	// GID is the authenticated group ID (from AUTH_UNIX).
-	// Used for write permission checks by the repository.
+	// Used for write permission checks by the store.
 	// Only valid when AuthFlavor == AUTH_UNIX.
 	GID *uint32
 
 	// GIDs is a list of supplementary group IDs (from AUTH_UNIX).
-	// Used for access control checks by the repository.
+	// Used for access control checks by the store.
 	// Only valid when AuthFlavor == AUTH_UNIX.
 	GIDs []uint32
 }
@@ -147,19 +147,19 @@ type WriteContext struct {
 //  1. Check for context cancellation before starting
 //  2. Validate request parameters (handle, offset, count, data)
 //  3. Extract client IP and authentication credentials from context
-//  4. Verify file exists and is a regular file (via repository)
+//  4. Verify file exists and is a regular file (via store)
 //  5. Calculate new size (safe after validation)
-//  6. Check write permissions and update metadata (via repository)
-//  7. Write data to content repository
+//  6. Check write permissions and update metadata (via store)
+//  7. Write data to content store
 //  8. Return updated attributes and commit status
 //
 // **Design Principles:**
 //
 //   - Protocol layer handles only XDR encoding/decoding and validation
 //   - Protocol layer coordinates between metadata and content repositories
-//   - Content repository handles actual data writing
-//   - Metadata repository handles file attributes and permissions
-//   - Access control enforced by metadata repository
+//   - Content store handles actual data writing
+//   - Metadata store handles file attributes and permissions
+//   - Access control enforced by metadata store
 //   - Comprehensive logging at INFO level for operations, DEBUG for details
 //   - Respects context cancellation for graceful shutdown and timeouts
 //   - Cancellation checks before expensive I/O operations
@@ -167,7 +167,7 @@ type WriteContext struct {
 // **Authentication:**
 //
 // The context contains authentication credentials from the RPC layer.
-// Write permission checking is implemented by the metadata repository
+// Write permission checking is implemented by the metadata store
 // based on Unix-style permission bits (owner/group/other).
 //
 // **Write Stability:**
@@ -205,7 +205,7 @@ type WriteContext struct {
 // **Error Handling:**
 //
 // Protocol-level errors return appropriate NFS status codes.
-// Repository/Content errors are mapped to NFS status codes:
+// store/Content errors are mapped to NFS status codes:
 //   - File not found → types.NFS3ErrNoEnt
 //   - Not a regular file → NFS3ErrIsDir
 //   - Permission denied → NFS3ErrAcces
@@ -218,7 +218,7 @@ type WriteContext struct {
 // **Performance Considerations:**
 //
 // WRITE is frequently called and performance-critical:
-//   - Use efficient content repository implementation
+//   - Use efficient content store implementation
 //   - Support write-behind caching (UnstableWrite)
 //   - Minimize data copying
 //   - Batch small writes when possible
@@ -245,15 +245,15 @@ type WriteContext struct {
 // **Security Considerations:**
 //
 //   - Handle validation prevents malformed requests
-//   - Repository layers enforce write permissions
+//   - store layers enforce write permissions
 //   - Read-only exports prevent writes
 //   - Client context enables audit logging
 //   - Prevent writes to system files via export configuration
 //
 // **Parameters:**
 //   - ctx: Context with cancellation, client address and authentication credentials
-//   - contentRepo: Content repository for file data operations
-//   - metadataRepo: Metadata repository for file attributes
+//   - contentRepo: Content store for file data operations
+//   - metadataStore: Metadata store for file attributes
 //   - req: The write request containing handle, offset, and data
 //
 // **Returns:**
@@ -291,7 +291,7 @@ type WriteContext struct {
 func (h *DefaultNFSHandler) Write(
 	ctx *WriteContext,
 	contentRepo content.Repository,
-	metadataRepo metadata.Repository,
+	metadataStore metadata.MetadataStore,
 	req *WriteRequest,
 ) (*WriteResponse, error) {
 	// Extract client IP for logging
@@ -316,8 +316,15 @@ func (h *DefaultNFSHandler) Write(
 	// Step 2: Validate request parameters
 	// ========================================================================
 
-	maxWriteSize := metadataRepo.GetMaxWriteSize(ctx.Context)
-	if err := validateWriteRequest(req, maxWriteSize); err != nil {
+	fileHandle := metadata.FileHandle(req.Handle)
+	caps, err := metadataStore.GetFilesystemCapabilities(ctx.Context, fileHandle)
+	if err != nil {
+		logger.Warn("WRITE failed: cannot get capabilities: handle=%x client=%s error=%v",
+			req.Handle, clientIP, err)
+		return &WriteResponse{Status: types.NFS3ErrNoEnt}, nil
+	}
+
+	if err := validateWriteRequest(req, caps.MaxWriteSize); err != nil {
 		logger.Warn("WRITE validation failed: handle=%x client=%s error=%v",
 			req.Handle, clientIP, err)
 		return &WriteResponse{Status: err.nfsStatus}, nil
@@ -327,7 +334,7 @@ func (h *DefaultNFSHandler) Write(
 	// Step 3: Verify file exists and is a regular file
 	// ========================================================================
 
-	// Check context before repository call
+	// Check context before store call
 	select {
 	case <-ctx.Context.Done():
 		logger.Warn("WRITE cancelled before GetFile: handle=%x offset=%d count=%d client=%s error=%v",
@@ -336,8 +343,7 @@ func (h *DefaultNFSHandler) Write(
 	default:
 	}
 
-	fileHandle := metadata.FileHandle(req.Handle)
-	attr, err := metadataRepo.GetFile(ctx.Context, fileHandle)
+	attr, err := metadataStore.GetFile(ctx.Context, fileHandle)
 	if err != nil {
 		logger.Warn("WRITE failed: file not found: handle=%x client=%s error=%v",
 			req.Handle, clientIP, err)
@@ -372,19 +378,18 @@ func (h *DefaultNFSHandler) Write(
 	}
 
 	// ========================================================================
-	// Step 5: Check permissions and update metadata
+	// Step 5: Prepare write operation (validate permissions)
 	// ========================================================================
-	// Call repository to:
-	// - Check write permissions
-	// - Capture pre-operation attributes (for WCC)
-	// - Generate content ID if needed
-	// - Update file size and timestamps
-	// - Return updated attributes
+	// PrepareWrite validates permissions but does NOT modify metadata yet.
+	// Metadata is updated by CommitWrite after content write succeeds.
 
-	// Check context before repository call
+	// Build authentication context
+	authCtx := buildAuthContextFromWrite(ctx)
+
+	// Check context before store call
 	select {
 	case <-ctx.Context.Done():
-		logger.Warn("WRITE cancelled before WriteFile: handle=%x offset=%d count=%d client=%s error=%v",
+		logger.Warn("WRITE cancelled before PrepareWrite: handle=%x offset=%d count=%d client=%s error=%v",
 			req.Handle, req.Offset, req.Count, clientIP, ctx.Context.Err())
 
 		fileid := xdr.ExtractFileID(fileHandle)
@@ -397,86 +402,61 @@ func (h *DefaultNFSHandler) Write(
 	default:
 	}
 
-	updatedAttr, preSize, preMtime, preCtime, err := metadataRepo.WriteFile(
-		&metadata.AuthContext{
-			Context:    ctx.Context,
-			AuthFlavor: ctx.AuthFlavor,
-			UID:        ctx.UID,
-			GID:        ctx.GID,
-			GIDs:       ctx.GIDs,
-			ClientAddr: clientIP,
-		},
-		fileHandle,
-		newSize,
-	)
-
-	// Build WCC attributes from pre-operation values
-	// This is done early so we can include it in error responses
-	nfsWccAttr := &types.WccAttr{
-		Size: preSize,
-		Mtime: types.TimeVal{
-			Seconds:  uint32(preMtime.Unix()),
-			Nseconds: uint32(preMtime.Nanosecond()),
-		},
-		Ctime: types.TimeVal{
-			Seconds:  uint32(preCtime.Unix()),
-			Nseconds: uint32(preCtime.Nanosecond()),
-		},
-	}
-
+	writeIntent, err := metadataStore.PrepareWrite(authCtx, fileHandle, newSize)
 	if err != nil {
-		// Check for specific error types
-		if exportErr, ok := err.(*metadata.ExportError); ok {
-			var status uint32
-			switch exportErr.Code {
-			case metadata.ExportErrNotFound:
-				status = types.NFS3ErrNoEnt
-			case metadata.ExportErrAccessDenied:
-				status = types.NFS3ErrAcces
-			case metadata.ExportErrServerFault:
-				status = types.NFS3ErrIO
-			default:
-				status = types.NFS3ErrIO
-			}
+		// Map store error to NFS status
+		status := mapMetadataErrorToNFS(err)
 
-			logger.Warn("WRITE failed: %s: handle=%x offset=%d count=%d client=%s",
-				exportErr.Message, req.Handle, req.Offset, len(req.Data), clientIP)
-
-			fileid := xdr.ExtractFileID(fileHandle)
-			nfsAttr := xdr.MetadataToNFS(attr, fileid)
-
-			return &WriteResponse{
-				Status:     status,
-				AttrBefore: nfsWccAttr,
-				AttrAfter:  nfsAttr,
-			}, nil
-		}
-
-		// Generic error
-		logger.Error("WRITE failed: repository error: handle=%x offset=%d count=%d client=%s error=%v",
+		logger.Warn("WRITE failed: PrepareWrite error: handle=%x offset=%d count=%d client=%s error=%v",
 			req.Handle, req.Offset, len(req.Data), clientIP, err)
 
 		fileid := xdr.ExtractFileID(fileHandle)
 		nfsAttr := xdr.MetadataToNFS(attr, fileid)
 
+		// Build WCC attributes from current state
+		nfsWccAttr := &types.WccAttr{
+			Size: attr.Size,
+			Mtime: types.TimeVal{
+				Seconds:  uint32(attr.Mtime.Unix()),
+				Nseconds: uint32(attr.Mtime.Nanosecond()),
+			},
+			Ctime: types.TimeVal{
+				Seconds:  uint32(attr.Ctime.Unix()),
+				Nseconds: uint32(attr.Ctime.Nanosecond()),
+			},
+		}
+
 		return &WriteResponse{
-			Status:     types.NFS3ErrIO,
+			Status:     status,
 			AttrBefore: nfsWccAttr,
 			AttrAfter:  nfsAttr,
 		}, nil
 	}
 
+	// Build WCC attributes from pre-write state
+	nfsWccAttr := &types.WccAttr{
+		Size: writeIntent.PreWriteAttr.Size,
+		Mtime: types.TimeVal{
+			Seconds:  uint32(writeIntent.PreWriteAttr.Mtime.Unix()),
+			Nseconds: uint32(writeIntent.PreWriteAttr.Mtime.Nanosecond()),
+		},
+		Ctime: types.TimeVal{
+			Seconds:  uint32(writeIntent.PreWriteAttr.Ctime.Unix()),
+			Nseconds: uint32(writeIntent.PreWriteAttr.Ctime.Nanosecond()),
+		},
+	}
+
 	// ========================================================================
-	// Step 6: Check if content repository supports writing
+	// Step 6: Check if content store supports writing
 	// ========================================================================
 
 	writeRepo, ok := contentRepo.(content.WriteRepository)
 	if !ok {
-		logger.Error("WRITE failed: content repository does not support writing: handle=%x client=%s",
+		logger.Error("WRITE failed: content store does not support writing: handle=%x client=%s",
 			req.Handle, clientIP)
 
 		fileid := xdr.ExtractFileID(fileHandle)
-		nfsAttr := xdr.MetadataToNFS(updatedAttr, fileid)
+		nfsAttr := xdr.MetadataToNFS(writeIntent.PreWriteAttr, fileid)
 
 		return &WriteResponse{
 			Status:     types.NFS3ErrRofs, // Read-only filesystem
@@ -486,9 +466,9 @@ func (h *DefaultNFSHandler) Write(
 	}
 
 	// ========================================================================
-	// Step 7: Write data to content repository
+	// Step 7: Write data to content store
 	// ========================================================================
-	// The content repository handles:
+	// The content store handles:
 	// - Physical storage of data
 	// - Space availability checks
 	// - I/O operations
@@ -501,7 +481,7 @@ func (h *DefaultNFSHandler) Write(
 			req.Handle, req.Offset, req.Count, clientIP, ctx.Context.Err())
 
 		fileid := xdr.ExtractFileID(fileHandle)
-		nfsAttr := xdr.MetadataToNFS(updatedAttr, fileid)
+		nfsAttr := xdr.MetadataToNFS(writeIntent.PreWriteAttr, fileid)
 
 		return &WriteResponse{
 			Status:     types.NFS3ErrIO,
@@ -511,15 +491,15 @@ func (h *DefaultNFSHandler) Write(
 	default:
 	}
 
-	err = writeRepo.WriteAt(ctx.Context, updatedAttr.ContentID, req.Data, int64(req.Offset))
+	err = writeRepo.WriteAt(ctx.Context, writeIntent.ContentID, req.Data, int64(req.Offset))
 	if err != nil {
 		logger.Error("WRITE failed: content write error: handle=%x offset=%d count=%d content_id=%s client=%s error=%v",
-			req.Handle, req.Offset, len(req.Data), updatedAttr.ContentID, clientIP, err)
+			req.Handle, req.Offset, len(req.Data), writeIntent.ContentID, clientIP, err)
 
 		fileid := xdr.ExtractFileID(fileHandle)
-		nfsAttr := xdr.MetadataToNFS(updatedAttr, fileid)
+		nfsAttr := xdr.MetadataToNFS(writeIntent.PreWriteAttr, fileid)
 
-		// Map content repository errors to NFS status codes
+		// Map content store errors to NFS status codes
 		// The error is analyzed to provide the most appropriate NFS status
 		status := xdr.MapContentErrorToNFSStatus(err)
 
@@ -531,10 +511,31 @@ func (h *DefaultNFSHandler) Write(
 	}
 
 	// ========================================================================
-	// Step 8: Build success response
+	// Step 8: Commit metadata changes after successful content write
 	// ========================================================================
-	// Metadata is already updated by WriteFile, so we just need to
-	// convert to NFS wire format
+
+	updatedAttr, err := metadataStore.CommitWrite(authCtx, writeIntent)
+	if err != nil {
+		logger.Error("WRITE failed: CommitWrite error (content written but metadata not updated): handle=%x offset=%d count=%d client=%s error=%v",
+			req.Handle, req.Offset, len(req.Data), clientIP, err)
+
+		// Content is written but metadata not updated - this is an inconsistent state
+		// Map error to NFS status
+		status := mapMetadataErrorToNFS(err)
+
+		fileid := xdr.ExtractFileID(fileHandle)
+		nfsAttr := xdr.MetadataToNFS(writeIntent.PreWriteAttr, fileid)
+
+		return &WriteResponse{
+			Status:     status,
+			AttrBefore: nfsWccAttr,
+			AttrAfter:  nfsAttr,
+		}, nil
+	}
+
+	// ========================================================================
+	// Step 9: Build success response
+	// ========================================================================
 
 	fileid := xdr.ExtractFileID(fileHandle)
 	nfsAttr := xdr.MetadataToNFS(updatedAttr, fileid)
@@ -581,7 +582,7 @@ func (e *writeValidationError) Error() string {
 //
 // Parameters:
 //   - req: The write request to validate
-//   - maxWriteSize: Maximum write size from repository configuration
+//   - maxWriteSize: Maximum write size from store configuration
 //
 // Returns:
 //   - nil if valid
@@ -620,8 +621,8 @@ func validateWriteRequest(req *WriteRequest, maxWriteSize uint32) *writeValidati
 		// Not fatal - we'll use actual data length
 	}
 
-	// Validate count doesn't exceed maximum write size configured by repository
-	// The repository can configure this based on its constraints and the
+	// Validate count doesn't exceed maximum write size configured by store
+	// The store can configure this based on its constraints and the
 	// wtmax value advertised in FSINFO.
 	if dataLen > maxWriteSize {
 		return &writeValidationError{
@@ -770,10 +771,10 @@ func DecodeWriteRequest(data []byte) (*WriteRequest, error) {
 	// Validate data length during decoding to prevent memory exhaustion.
 	// This is a hard-coded safety limit to prevent allocating excessive
 	// memory before we can even validate the request. The actual validation
-	// will use the repository's configured maximum.
+	// will use the store's configured maximum.
 	//
 	// This limit (32MB) is chosen to be:
-	//   - Large enough to accommodate any reasonable repository configuration
+	//   - Large enough to accommodate any reasonable store configuration
 	//   - Small enough to prevent memory exhaustion attacks during XDR decoding
 	//   - Higher than typical NFS write sizes (64KB-1MB)
 	const maxDecodingSize = 32 * 1024 * 1024 // 32MB
@@ -936,4 +937,30 @@ func (resp *WriteResponse) Encode() ([]byte, error) {
 		buf.Len(), resp.Status, resp.Count, resp.Committed)
 
 	return buf.Bytes(), nil
+}
+
+// buildAuthContextFromWrite creates an AuthContext from WriteContext.
+//
+// This translates the NFS-specific authentication context into the generic
+// AuthContext used by the metadata store.
+func buildAuthContextFromWrite(ctx *WriteContext) *metadata.AuthContext {
+	// Map auth flavor to auth method string
+	authMethod := "anonymous"
+	if ctx.AuthFlavor == 1 {
+		authMethod = "unix"
+	}
+
+	// Build identity with proper UID/GID/GIDs structure
+	identity := &metadata.Identity{
+		UID:  ctx.UID,
+		GID:  ctx.GID,
+		GIDs: ctx.GIDs,
+	}
+
+	return &metadata.AuthContext{
+		Context:    ctx.Context,
+		AuthMethod: authMethod,
+		Identity:   identity,
+		ClientAddr: ctx.ClientAddr,
+	}
 }
