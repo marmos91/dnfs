@@ -61,7 +61,7 @@ type MknodRequest struct {
 	//   - UID: Owner user ID
 	//   - GID: Owner group ID
 	// Other fields (size, times) are ignored and set by the server.
-	Attr metadata.SetAttrs
+	Attr *metadata.SetAttrs
 
 	// Spec contains device-specific data (only for block/char devices).
 	// For NF3CHR and NF3BLK:
@@ -154,7 +154,7 @@ type MknodContext struct {
 	GID *uint32
 
 	// GIDs is a list of supplementary group IDs (from AUTH_UNIX).
-	// Used for access control checks by the repository.
+	// Used for access control checks by the store.
 	// Only valid when AuthFlavor == AUTH_UNIX.
 	GIDs []uint32
 }
@@ -179,25 +179,27 @@ type MknodContext struct {
 //
 //  1. Check for context cancellation (client disconnect, timeout)
 //  2. Validate request parameters (handle format, name syntax, file type)
-//  3. Extract client IP and authentication credentials from context
-//  4. Verify parent directory exists and is a directory (via repository)
+//  3. Build AuthContext for permission checking
+//  4. Verify parent directory exists and is a directory (via store)
 //  5. Capture pre-operation parent state (for WCC)
-//  6. Check for name conflicts
-//  7. Delegate special file creation to repository.CreateSpecialFile()
-//  8. Return new file handle and attributes with WCC data
+//  6. Check for context cancellation before existence check
+//  7. Check for name conflicts using Lookup
+//  8. Delegate special file creation to store.CreateSpecialFile()
+//  9. Return new file handle and attributes with WCC data
 //
 // **Design Principles:**
 //
 //   - Protocol layer handles only XDR encoding/decoding and validation
-//   - All business logic (creation, validation, access control) delegated to repository
-//   - File handle validation performed by repository.GetFile()
+//   - All business logic (creation, validation, access control) delegated to store
+//   - File handle validation performed by store.GetFile()
 //   - Context cancellation respected throughout the operation
 //   - Comprehensive logging at INFO level for operations, DEBUG for details
 //
 // **Authentication:**
 //
 // The context contains authentication credentials from the RPC layer.
-// The protocol layer passes these to the repository, which can implement:
+// The protocol layer builds AuthContext and passes it to store.CreateSpecialFile(),
+// which implements:
 //   - Write permission checking on the parent directory
 //   - Access control based on UID/GID
 //   - Default ownership assignment for new special files
@@ -233,13 +235,8 @@ type MknodContext struct {
 // Context cancellation is checked at key points:
 //   - Before starting the operation (client disconnect detection)
 //   - After parent directory lookup
-//   - Repository operations respect context (passed through in AuthContext)
-//
-// Cancellation scenarios include:
-//   - Client disconnects before completion
-//   - Client timeout expires
-//   - Server shutdown initiated
-//   - Network connection lost
+//   - Before existence check
+//   - store operations respect context (passed through in AuthContext)
 //
 // **Security Considerations:**
 //
@@ -249,7 +246,7 @@ type MknodContext struct {
 //   - FIFOs can be used for DoS attacks
 //   - Most systems restrict device creation to root/admin
 //
-// The repository should enforce:
+// The store enforces:
 //   - Proper permission checking (typically root-only for devices)
 //   - Write access to parent directory
 //   - Quota enforcement
@@ -258,16 +255,7 @@ type MknodContext struct {
 // **Error Handling:**
 //
 // Protocol-level errors return appropriate NFS status codes.
-// Repository errors are mapped to NFS status codes:
-//   - Parent not found → types.NFS3ErrNoEnt
-//   - Parent not directory → types.NFS3ErrNotDir
-//   - Name already exists → NFS3ErrExist
-//   - Invalid type → NFS3ErrInval
-//   - Invalid name → NFS3ErrInval
-//   - Name too long → NFS3ErrNameTooLong
-//   - Permission denied → NFS3ErrAcces
-//   - I/O error → types.NFS3ErrIO
-//   - Context cancelled → returns context error (client disconnect)
+// store errors are mapped to NFS status codes via mapMetadataErrorToNFS().
 //
 // **Weak Cache Consistency (WCC):**
 //
@@ -276,11 +264,9 @@ type MknodContext struct {
 //  2. Perform the special file creation
 //  3. Capture parent attributes after the operation (WccAfter)
 //
-// Clients use this to maintain cache consistency and detect concurrent modifications.
-//
 // **Parameters:**
 //   - ctx: Context with client address, authentication, and cancellation support
-//   - repository: The metadata repository for file operations
+//   - metadataStore: The metadata store for file operations
 //   - req: The mknod request containing parent handle, name, type, and attributes
 //
 // **Returns:**
@@ -290,38 +276,9 @@ type MknodContext struct {
 //     protocol-level errors are indicated via the response Status field
 //
 // **RFC 1813 Section 3.3.11: MKNOD Procedure**
-//
-// Example:
-//
-//	handler := &DefaultNFSHandler{}
-//	req := &MknodRequest{
-//	    DirHandle: parentHandle,
-//	    Name:      "my-device",
-//	    Type:      NF3CHR,
-//	    Attr:      SetAttrs{SetMode: true, Mode: 0644},
-//	    Spec:      DeviceSpec{SpecData1: 1, SpecData2: 3}, // major=1, minor=3
-//	}
-//	ctx := &MknodContext{
-//	    Context:    context.Background(),
-//	    ClientAddr: "192.168.1.100:1234",
-//	    AuthFlavor: 1, // AUTH_UNIX
-//	    UID:        &uid,
-//	    GID:        &gid,
-//	}
-//	resp, err := handler.Mknod(ctx, repository, req)
-//	if err == context.Canceled {
-//	    // Client disconnected during mknod
-//	    return nil, err
-//	}
-//	if err != nil {
-//	    // Internal server error
-//	}
-//	if resp.Status == types.NFS3OK {
-//	    // Special file created successfully, use resp.FileHandle
-//	}
 func (h *DefaultNFSHandler) Mknod(
 	ctx *MknodContext,
-	repository metadata.Repository,
+	metadataStore metadata.MetadataStore,
 	req *MknodRequest,
 ) (*MknodResponse, error) {
 	// ========================================================================
@@ -342,8 +299,13 @@ func (h *DefaultNFSHandler) Mknod(
 	// Extract client IP for logging
 	clientIP := xdr.ExtractClientIP(ctx.ClientAddr)
 
+	var mode uint32 = 0644 // Default
+	if req.Attr != nil && req.Attr.Mode != nil {
+		mode = *req.Attr.Mode
+	}
+
 	logger.Info("MKNOD: name='%s' type=%s dir=%x mode=%o client=%s auth=%d",
-		req.Name, specialFileTypeName(req.Type), req.DirHandle, req.Attr.Mode, clientIP, ctx.AuthFlavor)
+		req.Name, specialFileTypeName(req.Type), req.DirHandle, mode, clientIP, ctx.AuthFlavor)
 
 	// ========================================================================
 	// Step 1: Validate request parameters
@@ -356,17 +318,23 @@ func (h *DefaultNFSHandler) Mknod(
 	}
 
 	// ========================================================================
-	// Step 2: Verify parent directory exists and is valid
+	// Step 2: Build AuthContext for permission checking
+	// ========================================================================
+
+	authCtx := buildAuthContextFromMknod(ctx)
+
+	// ========================================================================
+	// Step 3: Verify parent directory exists and is valid
 	// ========================================================================
 
 	parentHandle := metadata.FileHandle(req.DirHandle)
-	parentAttr, err := repository.GetFile(ctx.Context, parentHandle)
+	parentAttr, err := metadataStore.GetFile(ctx.Context, parentHandle)
 	if err != nil {
 		// Check if error is due to context cancellation
-		if err == context.Canceled || err == context.DeadlineExceeded {
+		if ctx.Context.Err() != nil {
 			logger.Debug("MKNOD: parent lookup cancelled: name='%s' dir=%x client=%s",
 				req.Name, req.DirHandle, clientIP)
-			return nil, err
+			return nil, ctx.Context.Err()
 		}
 
 		logger.Warn("MKNOD failed: parent not found: dir=%x client=%s error=%v",
@@ -407,17 +375,17 @@ func (h *DefaultNFSHandler) Mknod(
 	}
 
 	// ========================================================================
-	// Step 3: Check if special file name already exists
+	// Step 4: Check if special file name already exists using Lookup
 	// ========================================================================
 
-	_, err = repository.GetChild(ctx.Context, parentHandle, req.Name)
+	_, _, err = metadataStore.Lookup(authCtx, parentHandle, req.Name)
 	if err == nil {
-		// Child exists
+		// Child exists (no error from Lookup)
 		logger.Debug("MKNOD failed: file '%s' already exists: dir=%x client=%s",
 			req.Name, req.DirHandle, clientIP)
 
 		// Get updated parent attributes for WCC data
-		parentAttr, _ = repository.GetFile(ctx.Context, parentHandle)
+		parentAttr, _ = metadataStore.GetFile(ctx.Context, parentHandle)
 		dirID := xdr.ExtractFileID(parentHandle)
 		wccAfter := xdr.MetadataToNFS(parentAttr, dirID)
 
@@ -427,11 +395,12 @@ func (h *DefaultNFSHandler) Mknod(
 			DirAttrAfter:  wccAfter,
 		}, nil
 	}
+	// If error from Lookup, file doesn't exist (good) - continue
 
 	// ========================================================================
-	// Step 4: Create special file via repository
+	// Step 5: Create special file via store.CreateSpecialFile()
 	// ========================================================================
-	// The repository is responsible for:
+	// The store is responsible for:
 	// - Converting NFS file type to metadata file type
 	// - Building complete file attributes with defaults
 	// - Checking write permission on parent directory
@@ -442,47 +411,63 @@ func (h *DefaultNFSHandler) Mknod(
 	// - Updating parent directory timestamps
 	// - Respecting context cancellation
 
-	// Build authentication context for repository
-	authCtx := &metadata.AuthContext{
-		Context:    ctx.Context, // Pass context through for cancellation
-		AuthFlavor: ctx.AuthFlavor,
-		UID:        ctx.UID,
-		GID:        ctx.GID,
-		GIDs:       ctx.GIDs,
-		ClientAddr: clientIP,
+	// Build special file attributes
+	fileAttr := &metadata.FileAttr{
+		Type: nfsTypeToMetadataType(req.Type),
+		Mode: 0644, // Default: rw-r--r--
+		UID:  0,
+		GID:  0,
 	}
 
-	// Convert SetAttrs to metadata format for repository
-	fileAttr := xdr.ConvertSetAttrsToMetadata(nfsTypeToMetadataType(req.Type), &req.Attr, authCtx)
-	fileAttr.Type = nfsTypeToMetadataType(req.Type)
+	// Apply context defaults (authenticated user's UID/GID)
+	if authCtx.Identity.UID != nil {
+		fileAttr.UID = *authCtx.Identity.UID
+	}
+	if authCtx.Identity.GID != nil {
+		fileAttr.GID = *authCtx.Identity.GID
+	}
+
+	// Apply explicit attributes from request
+	if req.Attr != nil {
+		if req.Attr.Mode != nil {
+			fileAttr.Mode = *req.Attr.Mode
+		}
+		if req.Attr.UID != nil {
+			fileAttr.UID = *req.Attr.UID
+		}
+		if req.Attr.GID != nil {
+			fileAttr.GID = *req.Attr.GID
+		}
+	}
 
 	// Create the special file
-	newHandle, err := repository.CreateSpecialFile(
+	newHandle, err := metadataStore.CreateSpecialFile(
 		authCtx,
 		parentHandle,
 		req.Name,
+		nfsTypeToMetadataType(req.Type), // FileType parameter
 		fileAttr,
 		req.Spec.SpecData1, // Major device number (or 0 for non-devices)
 		req.Spec.SpecData2, // Minor device number (or 0 for non-devices)
 	)
 	if err != nil {
 		// Check if error is due to context cancellation
-		if err == context.Canceled || err == context.DeadlineExceeded {
+		if ctx.Context.Err() != nil {
 			logger.Debug("MKNOD: creation cancelled: name='%s' dir=%x client=%s",
 				req.Name, req.DirHandle, clientIP)
-			return nil, err
+			return nil, ctx.Context.Err()
 		}
 
-		logger.Error("MKNOD failed: repository error: name='%s' type=%d client=%s error=%v",
+		logger.Error("MKNOD failed: store error: name='%s' type=%d client=%s error=%v",
 			req.Name, req.Type, clientIP, err)
 
 		// Get updated parent attributes for WCC data
-		parentAttr, _ = repository.GetFile(ctx.Context, parentHandle)
+		parentAttr, _ = metadataStore.GetFile(ctx.Context, parentHandle)
 		dirID := xdr.ExtractFileID(parentHandle)
 		wccAfter := xdr.MetadataToNFS(parentAttr, dirID)
 
-		// Map repository errors to NFS status codes
-		status := xdr.MapRepositoryErrorToNFSStatus(err, clientIP, "mknod")
+		// Map store errors to NFS status codes
+		status := mapMetadataErrorToNFS(err)
 
 		return &MknodResponse{
 			Status:        status,
@@ -492,17 +477,17 @@ func (h *DefaultNFSHandler) Mknod(
 	}
 
 	// ========================================================================
-	// Step 5: Build success response with new file attributes
+	// Step 6: Build success response with new file attributes
 	// ========================================================================
 
 	// Get the newly created file's attributes
-	newFileAttr, err := repository.GetFile(ctx.Context, newHandle)
+	newFileAttr, err := metadataStore.GetFile(ctx.Context, newHandle)
 	if err != nil {
 		// Check if error is due to context cancellation
-		if err == context.Canceled || err == context.DeadlineExceeded {
+		if ctx.Context.Err() != nil {
 			logger.Debug("MKNOD: final attribute lookup cancelled: name='%s' handle=%x client=%s",
 				req.Name, newHandle, clientIP)
-			return nil, err
+			return nil, ctx.Context.Err()
 		}
 
 		logger.Error("MKNOD: failed to get new file attributes: handle=%x error=%v",
@@ -516,7 +501,7 @@ func (h *DefaultNFSHandler) Mknod(
 	nfsAttr := xdr.MetadataToNFS(newFileAttr, fileid)
 
 	// Get updated parent attributes for WCC data
-	parentAttr, _ = repository.GetFile(ctx.Context, parentHandle)
+	parentAttr, _ = metadataStore.GetFile(ctx.Context, parentHandle)
 	parentFileid := xdr.ExtractFileID(parentHandle)
 	wccAfter := xdr.MetadataToNFS(parentAttr, parentFileid)
 
@@ -534,6 +519,84 @@ func (h *DefaultNFSHandler) Mknod(
 		DirAttrBefore: wccBefore,
 		DirAttrAfter:  wccAfter,
 	}, nil
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+// buildAuthContextFromMknod creates an AuthContext from MknodContext.
+//
+// This translates the NFS-specific authentication context into the generic
+// AuthContext used by the metadata store.
+func buildAuthContextFromMknod(ctx *MknodContext) *metadata.AuthContext {
+	// Map auth flavor to auth method string
+	authMethod := "anonymous"
+	if ctx.AuthFlavor == 1 {
+		authMethod = "unix"
+	}
+
+	// Build identity from Unix credentials
+	identity := &metadata.Identity{
+		UID:  ctx.UID,
+		GID:  ctx.GID,
+		GIDs: ctx.GIDs,
+	}
+
+	// Set username from UID if available (for logging/auditing)
+	if ctx.UID != nil {
+		identity.Username = fmt.Sprintf("uid:%d", *ctx.UID)
+	}
+
+	return &metadata.AuthContext{
+		Context:    ctx.Context,
+		AuthMethod: authMethod,
+		Identity:   identity,
+		ClientAddr: ctx.ClientAddr,
+	}
+}
+
+// nfsTypeToMetadataType converts NFS file type to metadata file type.
+//
+// Note: The metadata interface uses more descriptive names:
+//   - FileTypeCharDevice (not FileTypeChar)
+//   - FileTypeBlockDevice (not FileTypeBlock)
+func nfsTypeToMetadataType(nfsType uint32) metadata.FileType {
+	switch nfsType {
+	case types.NF3CHR:
+		return metadata.FileTypeCharDevice
+	case types.NF3BLK:
+		return metadata.FileTypeBlockDevice
+	case types.NF3SOCK:
+		return metadata.FileTypeSocket
+	case types.NF3FIFO:
+		return metadata.FileTypeFIFO
+	default:
+		// This shouldn't happen due to validation, but handle gracefully
+		return metadata.FileTypeRegular
+	}
+}
+
+// specialFileTypeName returns a human-readable name for a special file type.
+func specialFileTypeName(fileType uint32) string {
+	switch fileType {
+	case types.NF3CHR:
+		return "CHARACTER_DEVICE"
+	case types.NF3BLK:
+		return "BLOCK_DEVICE"
+	case types.NF3SOCK:
+		return "SOCKET"
+	case types.NF3FIFO:
+		return "FIFO"
+	case types.NF3REG:
+		return "REGULAR_FILE"
+	case types.NF3DIR:
+		return "DIRECTORY"
+	case types.NF3LNK:
+		return "SYMLINK"
+	default:
+		return fmt.Sprintf("UNKNOWN(%d)", fileType)
+	}
 }
 
 // ============================================================================
@@ -665,49 +728,6 @@ func validateMknodRequest(req *MknodRequest) *mknodValidationError {
 }
 
 // ============================================================================
-// Helper Functions
-// ============================================================================
-
-// nfsTypeToMetadataType converts NFS file type to metadata file type.
-func nfsTypeToMetadataType(nfsType uint32) metadata.FileType {
-	switch nfsType {
-	case types.NF3CHR:
-		return metadata.FileTypeChar
-	case types.NF3BLK:
-		return metadata.FileTypeBlock
-	case types.NF3SOCK:
-		return metadata.FileTypeSocket
-	case types.NF3FIFO:
-		return metadata.FileTypeFifo
-	default:
-		// This shouldn't happen due to validation, but handle gracefully
-		return metadata.FileTypeRegular
-	}
-}
-
-// specialFileTypeName returns a human-readable name for a special file type.
-func specialFileTypeName(fileType uint32) string {
-	switch fileType {
-	case types.NF3CHR:
-		return "CHARACTER_DEVICE"
-	case types.NF3BLK:
-		return "BLOCK_DEVICE"
-	case types.NF3SOCK:
-		return "SOCKET"
-	case types.NF3FIFO:
-		return "FIFO"
-	case types.NF3REG:
-		return "REGULAR_FILE"
-	case types.NF3DIR:
-		return "DIRECTORY"
-	case types.NF3LNK:
-		return "SYMLINK"
-	default:
-		return fmt.Sprintf("UNKNOWN(%d)", fileType)
-	}
-}
-
-// ============================================================================
 // XDR Decoding
 // ============================================================================
 
@@ -742,28 +762,12 @@ func specialFileTypeName(fileType uint32) string {
 //     - For CHR/BLK: Read attributes + device spec (major/minor)
 //     - For SOCK/FIFO: Read attributes only
 //
-// XDR encoding details:
-//   - All integers are 4-byte aligned (32-bit)
-//   - Variable-length data (handles, strings) are length-prefixed
-//   - Padding is added to maintain 4-byte alignment
-//   - Discriminated unions use type field to determine structure
-//
 // Parameters:
 //   - data: XDR-encoded bytes containing the mknod request
 //
 // Returns:
 //   - *MknodRequest: The decoded request
 //   - error: Decoding error if data is malformed or incomplete
-//
-// Example:
-//
-//	data := []byte{...} // XDR-encoded MKNOD request from network
-//	req, err := DecodeMknodRequest(data)
-//	if err != nil {
-//	    // Handle decode error - send error reply to client
-//	    return nil, err
-//	}
-//	// Use req.DirHandle, req.Name, req.Type, req.Attr, req.Spec in MKNOD procedure
 func DecodeMknodRequest(data []byte) (*MknodRequest, error) {
 	if len(data) < 8 {
 		return nil, fmt.Errorf("data too short: need at least 8 bytes, got %d", len(data))
@@ -813,7 +817,7 @@ func DecodeMknodRequest(data []byte) (*MknodRequest, error) {
 		if err != nil {
 			return nil, fmt.Errorf("decode device attributes: %w", err)
 		}
-		req.Attr = *attr
+		req.Attr = attr
 
 		// Decode device spec (major/minor numbers)
 		if err := binary.Read(reader, binary.BigEndian, &req.Spec.SpecData1); err != nil {
@@ -829,7 +833,7 @@ func DecodeMknodRequest(data []byte) (*MknodRequest, error) {
 		if err != nil {
 			return nil, fmt.Errorf("decode pipe attributes: %w", err)
 		}
-		req.Attr = *attr
+		req.Attr = attr
 
 		// Device spec is not present for sockets and FIFOs
 		req.Spec = DeviceSpec{SpecData1: 0, SpecData2: 0}
@@ -840,8 +844,13 @@ func DecodeMknodRequest(data []byte) (*MknodRequest, error) {
 		return nil, fmt.Errorf("invalid file type for MKNOD: %d (expected CHR/BLK/SOCK/FIFO)", fileType)
 	}
 
+	var mode uint32
+	if req.Attr != nil && req.Attr.Mode != nil {
+		mode = *req.Attr.Mode
+	}
+
 	logger.Debug("Decoded MKNOD request: handle_len=%d name='%s' type=%d mode=%o major=%d minor=%d",
-		len(handle), name, fileType, req.Attr.Mode, req.Spec.SpecData1, req.Spec.SpecData2)
+		len(handle), name, fileType, mode, req.Spec.SpecData1, req.Spec.SpecData2)
 
 	return req, nil
 }
@@ -874,28 +883,9 @@ func DecodeMknodRequest(data []byte) (*MknodRequest, error) {
 //  3. If failure:
 //     a. Write WCC data for parent directory (best effort)
 //
-// XDR encoding requires all data to be in big-endian format and aligned
-// to 4-byte boundaries.
-//
 // Returns:
 //   - []byte: The XDR-encoded response ready to send to the client
 //   - error: Any error encountered during encoding
-//
-// Example:
-//
-//	resp := &MknodResponse{
-//	    Status:        types.NFS3OK,
-//	    FileHandle:    newFileHandle,
-//	    Attr:          fileAttr,
-//	    DirAttrBefore: wccBefore,
-//	    DirAttrAfter:  wccAfter,
-//	}
-//	data, err := resp.Encode()
-//	if err != nil {
-//	    // Handle encoding error
-//	    return nil, err
-//	}
-//	// Send 'data' to client over network
 func (resp *MknodResponse) Encode() ([]byte, error) {
 	var buf bytes.Buffer
 
