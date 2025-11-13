@@ -58,7 +58,7 @@ type NFSFacade struct {
 	metadataStore metadata.MetadataStore
 
 	// content provides access to file content (data blocks)
-	content content.Repository
+	content content.ContentStore
 
 	// activeConns tracks all currently active connections for graceful shutdown
 	// Each connection calls Add(1) when starting and Done() when complete
@@ -259,7 +259,7 @@ func New(config NFSConfig) *NFSFacade {
 //
 // Thread safety:
 // Called exactly once before Serve(), no synchronization needed.
-func (s *NFSFacade) SetStores(metadataStore metadata.MetadataStore, contentRepo content.Repository) {
+func (s *NFSFacade) SetStores(metadataStore metadata.MetadataStore, contentRepo content.ContentStore) {
 	s.metadataStore = metadataStore
 	s.content = contentRepo
 	logger.Debug("NFS repositories configured")

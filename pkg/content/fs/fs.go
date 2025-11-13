@@ -7,12 +7,11 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/marmos91/dittofs/pkg/content"
 	"github.com/marmos91/dittofs/pkg/metadata"
-
-	. "github.com/marmos91/dittofs/pkg/content"
 )
 
-// FSContentRepository implements ContentRepository using the local filesystem.
+// FSContentStore implements ContentRepository using the local filesystem.
 //
 // This implementation stores file contents directly on the filesystem using
 // content IDs as filenames. It provides basic CRUD operations for file content
@@ -22,11 +21,11 @@ import (
 // The underlying filesystem operations are thread-safe at the OS level, but
 // concurrent writes to the same file may result in corruption. Callers should
 // ensure proper synchronization for concurrent access to the same content ID.
-type FSContentRepository struct {
+type FSContentStore struct {
 	basePath string
 }
 
-// NewFSContentRepository creates a new filesystem-based content repository.
+// NewFSContentStore creates a new filesystem-based content repository.
 //
 // This initializes the repository by creating the base directory if it doesn't
 // exist. The base directory will be created with permissions 0755.
@@ -39,9 +38,9 @@ type FSContentRepository struct {
 //   - basePath: Root directory for storing content files
 //
 // Returns:
-//   - *FSContentRepository: Initialized repository
+//   - *FSContentStore: Initialized repository
 //   - error: Returns error if directory creation fails or context is cancelled
-func NewFSContentRepository(ctx context.Context, basePath string) (*FSContentRepository, error) {
+func NewFSContentStore(ctx context.Context, basePath string) (*FSContentStore, error) {
 	// ========================================================================
 	// Step 1: Check context before filesystem operation
 	// ========================================================================
@@ -58,7 +57,7 @@ func NewFSContentRepository(ctx context.Context, basePath string) (*FSContentRep
 		return nil, fmt.Errorf("failed to create base directory: %w", err)
 	}
 
-	return &FSContentRepository{
+	return &FSContentStore{
 		basePath: basePath,
 	}, nil
 }
@@ -74,7 +73,7 @@ func NewFSContentRepository(ctx context.Context, basePath string) (*FSContentRep
 //
 // Returns:
 //   - string: Full filesystem path for the content
-func (r *FSContentRepository) getFilePath(_ context.Context, id metadata.ContentID) string {
+func (r *FSContentStore) getFilePath(_ context.Context, id metadata.ContentID) string {
 	return filepath.Join(r.basePath, string(id))
 }
 
@@ -96,7 +95,7 @@ func (r *FSContentRepository) getFilePath(_ context.Context, id metadata.Content
 // Returns:
 //   - io.ReadCloser: Reader for the content (must be closed by caller)
 //   - error: Returns error if content not found, open fails, or context is cancelled
-func (r *FSContentRepository) ReadContent(ctx context.Context, id metadata.ContentID) (io.ReadCloser, error) {
+func (r *FSContentStore) ReadContent(ctx context.Context, id metadata.ContentID) (io.ReadCloser, error) {
 	// ========================================================================
 	// Step 1: Check context before filesystem operation
 	// ========================================================================
@@ -113,7 +112,7 @@ func (r *FSContentRepository) ReadContent(ctx context.Context, id metadata.Conte
 	file, err := os.Open(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("content %s: %w", id, ErrContentNotFound)
+			return nil, fmt.Errorf("content %s: %w", id, content.ErrContentNotFound)
 		}
 		return nil, fmt.Errorf("failed to open content: %w", err)
 	}
@@ -136,7 +135,7 @@ func (r *FSContentRepository) ReadContent(ctx context.Context, id metadata.Conte
 // Returns:
 //   - uint64: Size of the content in bytes
 //   - error: Returns error if content not found, stat fails, or context is cancelled
-func (r *FSContentRepository) GetContentSize(ctx context.Context, id metadata.ContentID) (uint64, error) {
+func (r *FSContentStore) GetContentSize(ctx context.Context, id metadata.ContentID) (uint64, error) {
 	// ========================================================================
 	// Step 1: Check context before filesystem operation
 	// ========================================================================
@@ -153,7 +152,7 @@ func (r *FSContentRepository) GetContentSize(ctx context.Context, id metadata.Co
 	info, err := os.Stat(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return 0, fmt.Errorf("content %s: %w", id, ErrContentNotFound)
+			return 0, fmt.Errorf("content %s: %w", id, content.ErrContentNotFound)
 		}
 		return 0, fmt.Errorf("failed to stat content: %w", err)
 	}
@@ -177,7 +176,7 @@ func (r *FSContentRepository) GetContentSize(ctx context.Context, id metadata.Co
 //   - bool: True if content exists, false otherwise
 //   - error: Returns error on filesystem errors (excluding not-exists) or
 //     context cancellation
-func (r *FSContentRepository) ContentExists(ctx context.Context, id metadata.ContentID) (bool, error) {
+func (r *FSContentStore) ContentExists(ctx context.Context, id metadata.ContentID) (bool, error) {
 	// ========================================================================
 	// Step 1: Check context before filesystem operation
 	// ========================================================================
@@ -219,7 +218,7 @@ func (r *FSContentRepository) ContentExists(ctx context.Context, id metadata.Con
 //
 // Returns:
 //   - error: Returns error if write fails or context is cancelled
-func (r *FSContentRepository) WriteContent(ctx context.Context, id metadata.ContentID, content []byte) error {
+func (r *FSContentStore) WriteContent(ctx context.Context, id metadata.ContentID, content []byte) error {
 	// ========================================================================
 	// Step 1: Check context before filesystem operation
 	// ========================================================================
@@ -268,7 +267,7 @@ func (r *FSContentRepository) WriteContent(ctx context.Context, id metadata.Cont
 
 // WriteAt writes data at the specified offset.
 //
-// This implements the WriteRepository interface for partial file updates.
+// This implements the WritableContentStore interface for partial file updates.
 // The file will be created if it doesn't exist. If the offset is beyond the
 // current file size, the gap will be filled with zeros.
 //
@@ -284,7 +283,7 @@ func (r *FSContentRepository) WriteContent(ctx context.Context, id metadata.Cont
 //
 // Returns:
 //   - error: Returns error if operation fails or context is cancelled
-func (r *FSContentRepository) WriteAt(ctx context.Context, id metadata.ContentID, data []byte, offset int64) error {
+func (r *FSContentStore) WriteAt(ctx context.Context, id metadata.ContentID, data []byte, offset int64) error {
 	// ========================================================================
 	// Step 1: Check context before filesystem operation
 	// ========================================================================
@@ -367,7 +366,7 @@ func (r *FSContentRepository) WriteAt(ctx context.Context, id metadata.ContentID
 //
 // Returns:
 //   - error: Returns error if truncate fails or context is cancelled
-func (r *FSContentRepository) Truncate(ctx context.Context, id metadata.ContentID, newSize uint64) error {
+func (r *FSContentStore) Truncate(ctx context.Context, id metadata.ContentID, newSize uint64) error {
 	// ========================================================================
 	// Step 1: Check context before filesystem operation
 	// ========================================================================
@@ -385,7 +384,7 @@ func (r *FSContentRepository) Truncate(ctx context.Context, id metadata.ContentI
 	_, err := os.Stat(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return fmt.Errorf("truncate failed for %s: %w", id, ErrContentNotFound)
+			return fmt.Errorf("truncate failed for %s: %w", id, content.ErrContentNotFound)
 		}
 		return fmt.Errorf("failed to stat content for truncate: %w", err)
 	}
@@ -418,7 +417,7 @@ func (r *FSContentRepository) Truncate(ctx context.Context, id metadata.ContentI
 // Returns:
 //   - error: Only returns error for context cancellation or filesystem failures,
 //     NOT for non-existent content (returns nil in that case)
-func (r *FSContentRepository) Delete(ctx context.Context, id metadata.ContentID) error {
+func (r *FSContentStore) Delete(ctx context.Context, id metadata.ContentID) error {
 	// ========================================================================
 	// Step 1: Check context before filesystem operation
 	// ========================================================================
@@ -447,22 +446,35 @@ func (r *FSContentRepository) Delete(ctx context.Context, id metadata.ContentID)
 
 // GetStorageStats returns statistics about the filesystem storage.
 //
+// ⚠️  IMPORTANT: This is currently a placeholder implementation that returns
+// zeros for all fields. It is NOT suitable for production use cases requiring
+// accurate capacity planning or quota enforcement.
+//
+// Implementation Status:
+// This method requires platform-specific system calls (syscall.Statfs on Unix,
+// GetDiskFreeSpaceEx on Windows) to retrieve filesystem statistics, and
+// directory scanning to count content items. Given DittoFS's experimental
+// status, this was deprioritized in favor of core NFS functionality.
+//
+// To implement this properly:
+//  1. Use build tags for platform-specific implementations (fs_unix.go, fs_windows.go)
+//  2. Call syscall.Statfs (Unix) or GetDiskFreeSpaceEx (Windows) for disk stats
+//  3. Scan r.basePath to count files and calculate total size
+//  4. Consider caching results with TTL (expensive operation)
+//
+// For now, callers should check for zero values and handle gracefully.
+// The memory implementation (MemoryContentStore) provides a reference for
+// complete stats functionality.
+//
 // This implements the ContentStore.GetStorageStats interface method.
-//
-// For filesystem-based storage, this uses the filesystem's statistics
-// to provide capacity and usage information.
-//
-// Note: This is a basic implementation that returns limited statistics.
-// ContentCount and AverageSize are set to 0 as calculating them would
-// require scanning the entire directory.
 //
 // Parameters:
 //   - ctx: Context for cancellation and timeouts
 //
 // Returns:
-//   - *StorageStats: Current storage statistics
-//   - error: Returns error for context cancellation or stat failures
-func (r *FSContentRepository) GetStorageStats(ctx context.Context) (*StorageStats, error) {
+//   - *content.StorageStats: Placeholder statistics (all zeros)
+//   - error: Returns error for context cancellation only
+func (r *FSContentStore) GetStorageStats(ctx context.Context) (*content.StorageStats, error) {
 	// ========================================================================
 	// Step 1: Check context before filesystem operation
 	// ========================================================================
@@ -478,7 +490,7 @@ func (r *FSContentRepository) GetStorageStats(ctx context.Context) (*StorageStat
 	// placeholder values. A full implementation would use syscall.Statfs
 	// on Unix systems or GetDiskFreeSpaceEx on Windows.
 
-	return &StorageStats{
+	return &content.StorageStats{
 		TotalSize:     0, // Would need platform-specific syscall
 		UsedSize:      0, // Would need to scan directory
 		AvailableSize: 0, // Would need platform-specific syscall
@@ -503,7 +515,7 @@ func (r *FSContentRepository) GetStorageStats(ctx context.Context) (*StorageStat
 // Returns:
 //   - []metadata.ContentID: List of all content IDs
 //   - error: Returns error for context cancellation or filesystem failures
-func (r *FSContentRepository) ListAllContent(ctx context.Context) ([]metadata.ContentID, error) {
+func (r *FSContentStore) ListAllContent(ctx context.Context) ([]metadata.ContentID, error) {
 	// ========================================================================
 	// Step 1: Check context before filesystem operation
 	// ========================================================================
@@ -561,7 +573,7 @@ func (r *FSContentRepository) ListAllContent(ctx context.Context) ([]metadata.Co
 // Returns:
 //   - map[metadata.ContentID]error: Map of failed deletions (empty = all succeeded)
 //   - error: Only returns error for context cancellation
-func (r *FSContentRepository) DeleteBatch(ctx context.Context, ids []metadata.ContentID) (map[metadata.ContentID]error, error) {
+func (r *FSContentStore) DeleteBatch(ctx context.Context, ids []metadata.ContentID) (map[metadata.ContentID]error, error) {
 	failures := make(map[metadata.ContentID]error)
 
 	for i, id := range ids {
@@ -599,7 +611,7 @@ func (r *FSContentRepository) DeleteBatch(ctx context.Context, ids []metadata.Co
 // Returns:
 //   - io.ReadSeekCloser: Seekable reader (must be closed by caller)
 //   - error: Returns error if content not found or context is cancelled
-func (r *FSContentRepository) ReadContentSeekable(ctx context.Context, id metadata.ContentID) (io.ReadSeekCloser, error) {
+func (r *FSContentStore) ReadContentSeekable(ctx context.Context, id metadata.ContentID) (io.ReadSeekCloser, error) {
 	// ========================================================================
 	// Step 1: Check context before filesystem operation
 	// ========================================================================
@@ -616,7 +628,7 @@ func (r *FSContentRepository) ReadContentSeekable(ctx context.Context, id metada
 	file, err := os.Open(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("content %s: %w", id, ErrContentNotFound)
+			return nil, fmt.Errorf("content %s: %w", id, content.ErrContentNotFound)
 		}
 		return nil, fmt.Errorf("failed to open content: %w", err)
 	}

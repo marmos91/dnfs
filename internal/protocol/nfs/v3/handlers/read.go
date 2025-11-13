@@ -264,7 +264,7 @@ type ReadContext struct {
 //	}
 func (h *DefaultNFSHandler) Read(
 	ctx *ReadContext,
-	contentRepo content.Repository,
+	contentRepo content.ContentStore,
 	metadataStore metadata.MetadataStore,
 	req *ReadRequest,
 ) (*ReadResponse, error) {

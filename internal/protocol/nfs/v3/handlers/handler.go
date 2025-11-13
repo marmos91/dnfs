@@ -32,15 +32,15 @@ type NFSHandler interface {
 
 	// Read reads data from a file.
 	// RFC 1813 Section 3.3.6
-	Read(ctx *ReadContext, content content.Repository, metadataStore metadata.MetadataStore, req *ReadRequest) (*ReadResponse, error)
+	Read(ctx *ReadContext, content content.ContentStore, metadataStore metadata.MetadataStore, req *ReadRequest) (*ReadResponse, error)
 
 	// Write writes data to a file.
 	// RFC 1813 Section 3.3.7
-	Write(ctx *WriteContext, content content.Repository, metadataStore metadata.MetadataStore, req *WriteRequest) (*WriteResponse, error)
+	Write(ctx *WriteContext, content content.ContentStore, metadataStore metadata.MetadataStore, req *WriteRequest) (*WriteResponse, error)
 
 	// Create creates a regular file.
 	// RFC 1813 Section 3.3.8
-	Create(ctx *CreateContext, content content.Repository, metadataStore metadata.MetadataStore, req *CreateRequest) (*CreateResponse, error)
+	Create(ctx *CreateContext, content content.ContentStore, metadataStore metadata.MetadataStore, req *CreateRequest) (*CreateResponse, error)
 
 	// Mkdir creates a directory.
 	// RFC 1813 Section 3.3.9
@@ -56,7 +56,7 @@ type NFSHandler interface {
 
 	// Remove removes a file.
 	// RFC 1813 Section 3.3.12
-	Remove(ctx *RemoveContext, metadataStore metadata.MetadataStore, req *RemoveRequest) (*RemoveResponse, error)
+	Remove(ctx *RemoveContext, content content.ContentStore, metadataStore metadata.MetadataStore, req *RemoveRequest) (*RemoveResponse, error)
 
 	// RmDir removes a directory.
 	// RFC 1813 Section 3.3.13

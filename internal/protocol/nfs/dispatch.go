@@ -148,7 +148,7 @@ type nfsProcedureHandler func(
 	authCtx *AuthContext,
 	handler nfs.NFSHandler,
 	store metadata.MetadataStore,
-	content content.Repository,
+	content content.ContentStore,
 	data []byte,
 ) ([]byte, error)
 
@@ -343,7 +343,7 @@ func handleNFSNull(
 	authCtx *AuthContext,
 	handler nfs.NFSHandler,
 	store metadata.MetadataStore,
-	content content.Repository,
+	content content.ContentStore,
 	data []byte,
 ) ([]byte, error) {
 	ctx := &nfs.NullContext{
@@ -372,7 +372,7 @@ func handleNFSGetAttr(
 	authCtx *AuthContext,
 	handler nfs.NFSHandler,
 	store metadata.MetadataStore,
-	content content.Repository,
+	content content.ContentStore,
 	data []byte,
 ) ([]byte, error) {
 	ctx := &nfs.GetAttrContext{
@@ -398,7 +398,7 @@ func handleNFSSetAttr(
 	authCtx *AuthContext,
 	handler nfs.NFSHandler,
 	store metadata.MetadataStore,
-	content content.Repository,
+	content content.ContentStore,
 	data []byte,
 ) ([]byte, error) {
 	ctx := &nfs.SetAttrContext{
@@ -427,7 +427,7 @@ func handleNFSLookup(
 	authCtx *AuthContext,
 	handler nfs.NFSHandler,
 	store metadata.MetadataStore,
-	content content.Repository,
+	content content.ContentStore,
 	data []byte,
 ) ([]byte, error) {
 	ctx := &nfs.LookupContext{
@@ -456,7 +456,7 @@ func handleNFSAccess(
 	authCtx *AuthContext,
 	handler nfs.NFSHandler,
 	store metadata.MetadataStore,
-	content content.Repository,
+	content content.ContentStore,
 	data []byte,
 ) ([]byte, error) {
 	ctx := &nfs.AccessContext{
@@ -485,7 +485,7 @@ func handleNFSReadLink(
 	authCtx *AuthContext,
 	handler nfs.NFSHandler,
 	store metadata.MetadataStore,
-	content content.Repository,
+	content content.ContentStore,
 	data []byte,
 ) ([]byte, error) {
 	ctx := &nfs.ReadLinkContext{
@@ -514,7 +514,7 @@ func handleNFSRead(
 	authCtx *AuthContext,
 	handler nfs.NFSHandler,
 	store metadata.MetadataStore,
-	content content.Repository,
+	content content.ContentStore,
 	data []byte,
 ) ([]byte, error) {
 	ctx := &nfs.ReadContext{
@@ -543,7 +543,7 @@ func handleNFSWrite(
 	authCtx *AuthContext,
 	handler nfs.NFSHandler,
 	store metadata.MetadataStore,
-	content content.Repository,
+	content content.ContentStore,
 	data []byte,
 ) ([]byte, error) {
 	ctx := &nfs.WriteContext{
@@ -572,7 +572,7 @@ func handleNFSCreate(
 	authCtx *AuthContext,
 	handler nfs.NFSHandler,
 	store metadata.MetadataStore,
-	content content.Repository,
+	content content.ContentStore,
 	data []byte,
 ) ([]byte, error) {
 	ctx := &nfs.CreateContext{
@@ -600,7 +600,7 @@ func handleNFSMkdir(
 	authCtx *AuthContext,
 	handler nfs.NFSHandler,
 	store metadata.MetadataStore,
-	content content.Repository,
+	content content.ContentStore,
 	data []byte,
 ) ([]byte, error) {
 	ctx := &nfs.MkdirContext{
@@ -629,7 +629,7 @@ func handleNFSSymlink(
 	authCtx *AuthContext,
 	handler nfs.NFSHandler,
 	store metadata.MetadataStore,
-	content content.Repository,
+	content content.ContentStore,
 	data []byte,
 ) ([]byte, error) {
 	ctx := &nfs.SymlinkContext{
@@ -658,7 +658,7 @@ func handleNFSMknod(
 	authCtx *AuthContext,
 	handler nfs.NFSHandler,
 	store metadata.MetadataStore,
-	content content.Repository,
+	content content.ContentStore,
 	data []byte,
 ) ([]byte, error) {
 	ctx := &nfs.MknodContext{
@@ -687,7 +687,7 @@ func handleNFSRemove(
 	authCtx *AuthContext,
 	handler nfs.NFSHandler,
 	store metadata.MetadataStore,
-	content content.Repository,
+	content content.ContentStore,
 	data []byte,
 ) ([]byte, error) {
 	ctx := &nfs.RemoveContext{
@@ -703,7 +703,7 @@ func handleNFSRemove(
 		data,
 		nfs.DecodeRemoveRequest,
 		func(req *nfs.RemoveRequest) (*nfs.RemoveResponse, error) {
-			return handler.Remove(ctx, store, req)
+			return handler.Remove(ctx, content, store, req)
 		},
 		types.NFS3ErrIO,
 		func(status uint32) *nfs.RemoveResponse {
@@ -716,7 +716,7 @@ func handleNFSRmdir(
 	authCtx *AuthContext,
 	handler nfs.NFSHandler,
 	store metadata.MetadataStore,
-	content content.Repository,
+	content content.ContentStore,
 	data []byte,
 ) ([]byte, error) {
 	ctx := &nfs.RmdirContext{
@@ -745,7 +745,7 @@ func handleNFSRename(
 	authCtx *AuthContext,
 	handler nfs.NFSHandler,
 	store metadata.MetadataStore,
-	content content.Repository,
+	content content.ContentStore,
 	data []byte,
 ) ([]byte, error) {
 	ctx := &nfs.RenameContext{
@@ -774,7 +774,7 @@ func handleNFSLink(
 	authCtx *AuthContext,
 	handler nfs.NFSHandler,
 	store metadata.MetadataStore,
-	content content.Repository,
+	content content.ContentStore,
 	data []byte,
 ) ([]byte, error) {
 	ctx := &nfs.LinkContext{
@@ -803,7 +803,7 @@ func handleNFSReadDir(
 	authCtx *AuthContext,
 	handler nfs.NFSHandler,
 	store metadata.MetadataStore,
-	content content.Repository,
+	content content.ContentStore,
 	data []byte,
 ) ([]byte, error) {
 	ctx := &nfs.ReadDirContext{
@@ -832,7 +832,7 @@ func handleNFSReadDirPlus(
 	authCtx *AuthContext,
 	handler nfs.NFSHandler,
 	store metadata.MetadataStore,
-	content content.Repository,
+	content content.ContentStore,
 	data []byte,
 ) ([]byte, error) {
 	ctx := &nfs.ReadDirPlusContext{
@@ -861,7 +861,7 @@ func handleNFSFsStat(
 	authCtx *AuthContext,
 	handler nfs.NFSHandler,
 	store metadata.MetadataStore,
-	content content.Repository,
+	content content.ContentStore,
 	data []byte,
 ) ([]byte, error) {
 	ctx := &nfs.FsStatContext{
@@ -887,7 +887,7 @@ func handleNFSFsInfo(
 	authCtx *AuthContext,
 	handler nfs.NFSHandler,
 	store metadata.MetadataStore,
-	content content.Repository,
+	content content.ContentStore,
 	data []byte,
 ) ([]byte, error) {
 	ctx := &nfs.FsInfoContext{
@@ -913,7 +913,7 @@ func handleNFSPathConf(
 	authCtx *AuthContext,
 	handler nfs.NFSHandler,
 	store metadata.MetadataStore,
-	content content.Repository,
+	content content.ContentStore,
 	data []byte,
 ) ([]byte, error) {
 	ctx := &nfs.PathConfContext{
@@ -939,7 +939,7 @@ func handleNFSCommit(
 	authCtx *AuthContext,
 	handler nfs.NFSHandler,
 	store metadata.MetadataStore,
-	content content.Repository,
+	content content.ContentStore,
 	data []byte,
 ) ([]byte, error) {
 	ctx := &nfs.CommitContext{
