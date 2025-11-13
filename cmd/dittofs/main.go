@@ -211,11 +211,11 @@ func main() {
 
 	// Add restricted export example
 	if err := metadataRepo.AddShare(ctx, "/nolocalhost", metadata.ShareOptions{
-		ReadOnly:       false,
-		Async:          true,
-		AllowedClients: []string{"192.168.1.0/24"},
-		DeniedClients:  []string{"192.168.1.50", "::1"},
-		RequireAuth:    false,
+		ReadOnly:           false,
+		Async:              true,
+		AllowedClients:     []string{"192.168.1.0/24"},
+		DeniedClients:      []string{"192.168.1.50", "::1"},
+		RequireAuth:        false,
 		AllowedAuthMethods: []string{"anonymous", "unix"}, // AUTH_NULL, AUTH_UNIX
 		IdentityMapping: &metadata.IdentityMapping{
 			MapAllToAnonymous: true,
