@@ -18,7 +18,7 @@ import (
 	dittoServer "github.com/marmos91/dittofs/pkg/server"
 )
 
-func createInitialStructure(ctx context.Context, repo *memory.MemoryMetadataStore, contentRepo *contentFs.FSContentRepository, rootHandle metadata.FileHandle) error {
+func createInitialStructure(ctx context.Context, repo *memory.MemoryMetadataStore, contentRepo *contentFs.FSContentStore, rootHandle metadata.FileHandle) error {
 	now := time.Now()
 
 	// Create auth context for initial file creation (using root credentials)
@@ -155,7 +155,7 @@ func main() {
 	logger.Info("Content storage path: %s", *contentPath)
 
 	// Create content repository
-	contentRepo, err := contentFs.NewFSContentRepository(ctx, *contentPath)
+	contentRepo, err := contentFs.NewFSContentStore(ctx, *contentPath)
 	if err != nil {
 		log.Fatalf("Failed to create content repository: %v", err)
 	}

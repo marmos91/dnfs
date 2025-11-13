@@ -290,7 +290,7 @@ type WriteContext struct {
 //	}
 func (h *DefaultNFSHandler) Write(
 	ctx *WriteContext,
-	contentRepo content.Repository,
+	contentRepo content.ContentStore,
 	metadataStore metadata.MetadataStore,
 	req *WriteRequest,
 ) (*WriteResponse, error) {
@@ -450,7 +450,7 @@ func (h *DefaultNFSHandler) Write(
 	// Step 6: Check if content store supports writing
 	// ========================================================================
 
-	writeRepo, ok := contentRepo.(content.WriteRepository)
+	writeRepo, ok := contentRepo.(content.WritableContentStore)
 	if !ok {
 		logger.Error("WRITE failed: content store does not support writing: handle=%x client=%s",
 			req.Handle, clientIP)

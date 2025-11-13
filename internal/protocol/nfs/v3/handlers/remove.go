@@ -10,6 +10,7 @@ import (
 	"github.com/marmos91/dittofs/internal/logger"
 	"github.com/marmos91/dittofs/internal/protocol/nfs/types"
 	"github.com/marmos91/dittofs/internal/protocol/nfs/xdr"
+	"github.com/marmos91/dittofs/pkg/content"
 	"github.com/marmos91/dittofs/pkg/metadata"
 )
 
@@ -245,6 +246,7 @@ type RemoveContext struct {
 //	}
 func (h *DefaultNFSHandler) Remove(
 	ctx *RemoveContext,
+	contentStore content.ContentStore,
 	metadataStore metadata.MetadataStore,
 	req *RemoveRequest,
 ) (*RemoveResponse, error) {
@@ -372,6 +374,31 @@ func (h *DefaultNFSHandler) Remove(
 			DirWccBefore: wccBefore,
 			DirWccAfter:  wccAfter,
 		}, nil
+	}
+
+	// ========================================================================
+	// Step 4.5: Delete content if file has content and store supports deletion
+	// ========================================================================
+	// After successfully removing the metadata, attempt to delete the actual
+	// file content. This is done after metadata removal to ensure consistency:
+	// if metadata is removed but content deletion fails, the content becomes
+	// orphaned but the file is still properly deleted from the client's view.
+
+	if removedFileAttr.ContentID != "" {
+		if writableStore, ok := contentStore.(content.WritableContentStore); ok {
+			if err := writableStore.Delete(ctx.Context, removedFileAttr.ContentID); err != nil {
+				// Log but don't fail the operation - metadata is already removed
+				logger.Warn("REMOVE: failed to delete content for file='%s' content_id=%s: %v",
+					req.Filename, removedFileAttr.ContentID, err)
+				// This is non-fatal - the file is successfully removed from metadata
+				// The orphaned content can be cleaned up later via garbage collection
+			} else {
+				logger.Debug("REMOVE: deleted content for file='%s' content_id=%s",
+					req.Filename, removedFileAttr.ContentID)
+			}
+		} else {
+			logger.Debug("REMOVE: content store does not support deletion (read-only)")
+		}
 	}
 
 	// ========================================================================

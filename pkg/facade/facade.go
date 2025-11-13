@@ -55,7 +55,7 @@ type Facade interface {
 	//
 	// Thread safety:
 	// Called before Serve(), no synchronization needed.
-	SetStores(metadataStore metadata.MetadataStore, content content.Repository)
+	SetStores(metadataStore metadata.MetadataStore, content content.ContentStore)
 
 	// Stop initiates graceful shutdown of the protocol server.
 	//

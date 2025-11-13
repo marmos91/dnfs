@@ -190,7 +190,7 @@ type CreateContext struct {
 // **RFC 1813 Section 3.3.8: CREATE Procedure**
 func (h *DefaultNFSHandler) Create(
 	ctx *CreateContext,
-	contentRepo content.Repository,
+	contentRepo content.ContentStore,
 	metadataRepo metadata.MetadataStore,
 	req *CreateRequest,
 ) (*CreateResponse, error) {
@@ -559,7 +559,7 @@ func createNewFile(
 //   - Updated file attributes and error
 func truncateExistingFile(
 	authCtx *metadata.AuthContext,
-	contentRepo content.Repository,
+	contentRepo content.ContentStore,
 	metadataRepo metadata.MetadataStore,
 	fileHandle metadata.FileHandle,
 	existingAttr *metadata.FileAttr,
@@ -602,7 +602,7 @@ func truncateExistingFile(
 
 	// Truncate content if repository supports writes and file has content
 	if existingAttr.ContentID != "" {
-		if writeRepo, ok := contentRepo.(content.WriteRepository); ok {
+		if writeRepo, ok := contentRepo.(content.WritableContentStore); ok {
 			if err := writeRepo.Truncate(authCtx.Context, existingAttr.ContentID, targetSize); err != nil {
 				logger.Warn("Failed to truncate content to %d bytes: %v", targetSize, err)
 				// Non-fatal: metadata is already updated

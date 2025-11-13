@@ -50,9 +50,9 @@ sudo mount -t nfs -o nfsvers=3,tcp localhost:/export /mnt/nfs
 - [ ] In-Memory (default)
 - [ ] Custom implementation
 
-## Content Repository  
+## Content Repository
 <!-- Which content repository are you using? -->
-- [ ] Filesystem (FSContentRepository)
+- [ ] Filesystem (FSContentStore)
 - [ ] Custom implementation
 
 ## Additional Context
