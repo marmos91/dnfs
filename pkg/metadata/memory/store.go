@@ -3,6 +3,7 @@ package memory
 import (
 	"encoding/binary"
 	"sync"
+	"unsafe"
 
 	"github.com/google/uuid"
 	"github.com/marmos91/dittofs/pkg/metadata"
@@ -25,6 +26,12 @@ type fileData struct {
 	// ShareName tracks which share this file belongs to.
 	// Used to enforce share-level policies (e.g., read-only shares).
 	ShareName string
+}
+
+// deviceNumber stores major and minor device numbers for special files.
+type deviceNumber struct {
+	Major uint32
+	Minor uint32
 }
 
 // MemoryMetadataStore implements MetadataStore using in-memory storage.
@@ -139,6 +146,12 @@ type MemoryMetadataStore struct {
 	//   - When count reaches 0, file content can be deleted
 	linkCounts map[string]uint32
 
+	// deviceNumbers stores major and minor device numbers for block and character devices.
+	// Key: string representation of FileHandle
+	// Value: struct containing major and minor numbers
+	// Note: Only populated for FileTypeBlockDevice and FileTypeCharDevice
+	deviceNumbers map[string]*deviceNumber
+
 	// pendingWrites tracks in-flight write operations for two-phase writes.
 	// Key: operation ID (opaque string, typically UUID)
 	// Value: WriteOperation struct with file handle, new size, timestamps, etc.
@@ -163,6 +176,10 @@ type MemoryMetadataStore struct {
 	// maxFiles is the maximum number of files (inodes) that can be created.
 	// 0 means unlimited (constrained only by available memory).
 	maxFiles uint64
+
+	// attrPool is a sync.Pool for FileAttr allocations to reduce GC pressure.
+	// This pool is used to recycle FileAttr objects during copy operations.
+	attrPool sync.Pool
 }
 
 // MemoryMetadataStoreConfig contains configuration for creating a memory metadata store.
@@ -211,17 +228,27 @@ type MemoryMetadataStoreConfig struct {
 //	}
 //	store := NewMemoryMetadataStore(config)
 func NewMemoryMetadataStore(config MemoryMetadataStoreConfig) *MemoryMetadataStore {
-	return &MemoryMetadataStore{
+	store := &MemoryMetadataStore{
 		shares:          make(map[string]*shareData),
 		files:           make(map[string]*fileData),
 		parents:         make(map[string]metadata.FileHandle),
 		children:        make(map[string]map[string]metadata.FileHandle),
 		linkCounts:      make(map[string]uint32),
+		deviceNumbers:   make(map[string]*deviceNumber),
 		pendingWrites:   make(map[string]*metadata.WriteOperation),
 		capabilities:    config.Capabilities,
 		maxStorageBytes: config.MaxStorageBytes,
 		maxFiles:        config.MaxFiles,
 	}
+
+	// Initialize the sync.Pool for FileAttr allocations
+	store.attrPool = sync.Pool{
+		New: func() interface{} {
+			return &metadata.FileAttr{}
+		},
+	}
+
+	return store
 }
 
 // NewMemoryMetadataStoreWithDefaults creates a new in-memory metadata store with sensible defaults.
@@ -289,10 +316,14 @@ func NewMemoryMetadataStoreWithDefaults() *MemoryMetadataStore {
 // handleToKey converts a FileHandle to a string key for map indexing.
 //
 // FileHandle is a []byte type, which cannot be used directly as a map key
-// in Go. This function converts it to a string, which is safe because:
-//   - Go strings can contain arbitrary byte sequences
-//   - String conversion creates an immutable copy of the bytes
-//   - The conversion is deterministic (same bytes → same string)
+// in Go. This function converts it to a string using unsafe.String to avoid
+// allocations (Go 1.20+).
+//
+// Safety:
+//   - The returned string references the underlying byte slice
+//   - Safe because FileHandle values are not modified after creation
+//   - Map lookups don't retain the key, so lifetime is correct
+//   - Eliminates one allocation per map lookup
 //
 // This is an internal helper used throughout the implementation to index
 // into the various maps (files, parents, children, etc.).
@@ -301,9 +332,17 @@ func NewMemoryMetadataStoreWithDefaults() *MemoryMetadataStore {
 //   - handle: The file handle to convert
 //
 // Returns:
-//   - string: String representation suitable for map indexing
+//   - string: String representation suitable for map indexing (zero-copy)
 func handleToKey(handle metadata.FileHandle) string {
-	return string(handle)
+	if len(handle) == 0 {
+		return ""
+	}
+	// Use unsafe.String to avoid allocation (Go 1.20+)
+	// This is safe because:
+	// 1. FileHandles are immutable after creation
+	// 2. The map doesn't retain the key beyond the lookup
+	// 3. We never modify the underlying bytes
+	return unsafe.String(unsafe.SliceData(handle), len(handle))
 }
 
 // generateFileHandle creates a unique file handle using UUIDs.
@@ -376,4 +415,82 @@ func extractFileIDFromHandle(handle metadata.FileHandle) uint64 {
 		return 0
 	}
 	return binary.BigEndian.Uint64(handle[:8])
+}
+
+// copyFileAttr creates a copy of FileAttr using the sync.Pool for efficiency.
+//
+// This method reduces allocation pressure by reusing FileAttr objects from a pool.
+// The returned FileAttr must be returned to the pool via putFileAttr when no
+// longer needed (or allowed to be garbage collected if that's acceptable).
+//
+// Important: The returned FileAttr is a shallow copy. For most fields this is
+// fine since they're immutable value types, but be careful with any future
+// pointer fields.
+//
+// Parameters:
+//   - src: The source FileAttr to copy
+//
+// Returns:
+//   - *metadata.FileAttr: A copy of the source attributes
+func (s *MemoryMetadataStore) copyFileAttr(src *metadata.FileAttr) *metadata.FileAttr {
+	dst := s.attrPool.Get().(*metadata.FileAttr)
+	*dst = *src // Shallow copy - safe since all fields are value types or immutable strings
+	return dst
+}
+
+// putFileAttr returns a FileAttr to the pool for reuse.
+//
+// This should be called when a FileAttr obtained from copyFileAttr is no
+// longer needed. The FileAttr must not be used after calling this method.
+//
+// Note: This is optional - if not called, the FileAttr will be garbage
+// collected normally. Calling this method is an optimization to reduce
+// allocation pressure.
+//
+// Parameters:
+//   - attr: The FileAttr to return to the pool
+func (s *MemoryMetadataStore) putFileAttr(attr *metadata.FileAttr) {
+	if attr != nil {
+		s.attrPool.Put(attr)
+	}
+}
+
+// checkStorageLimits validates that creating a new file doesn't exceed storage limits.
+//
+// This method checks both file count and storage size limits. If maxFiles or
+// maxStorageBytes are 0, they are considered unlimited.
+//
+// Thread Safety: Must be called with write lock held.
+//
+// Parameters:
+//   - additionalSize: The size of the new file being created
+//
+// Returns:
+//   - error: ErrNoSpace if limits would be exceeded, nil otherwise
+func (s *MemoryMetadataStore) checkStorageLimits(additionalSize uint64) error {
+	// Check file count limit
+	if s.maxFiles > 0 && uint64(len(s.files)) >= s.maxFiles {
+		return &metadata.StoreError{
+			Code:    metadata.ErrNoSpace,
+			Message: "maximum file count reached",
+		}
+	}
+
+	// Check storage size limit
+	if s.maxStorageBytes > 0 && additionalSize > 0 {
+		// Calculate current storage usage
+		var currentSize uint64
+		for _, fileData := range s.files {
+			currentSize += fileData.Attr.Size
+		}
+
+		if currentSize+additionalSize > s.maxStorageBytes {
+			return &metadata.StoreError{
+				Code:    metadata.ErrNoSpace,
+				Message: "maximum storage size reached",
+			}
+		}
+	}
+
+	return nil
 }

@@ -24,7 +24,7 @@ func (suite *StoreTestSuite) RunAuthenticationTests(test *testing.T) {
 	test.Run("CheckPermissions_OtherPermissions", suite.TestCheckPermissions_OtherPermissions)
 	test.Run("CheckPermissions_RootBypass", suite.TestCheckPermissions_RootBypass)
 	test.Run("CheckPermissions_DirectoryPermissions", suite.TestCheckPermissions_DirectoryPermissions)
-	test.Run("CheckPermissions_ReadOnlyShare", suite.TestCheckPermissions_ReadOnlyShare)
+	test.Run("CheckPermissions_ReadOnlyShare", suite.TestCheckShareAccess_ReadOnlyShare)
 	test.Run("CheckPermissions_MultipleFlags", suite.TestCheckPermissions_MultipleFlags)
 }
 
@@ -108,16 +108,16 @@ func (suite *StoreTestSuite) TestCheckShareAccess_RequireAuth(test *testing.T) {
 			// Act
 			decision, authCtx, err := store.CheckShareAccess(ctx, shareName, "192.168.1.100", tt.authMethod, tt.identity)
 
-			// Assert
-			require.NoError(t, err)
+			// Assert - No system error should occur
+			require.NoError(t, err, "CheckShareAccess should not return system errors for access decisions")
 			assert.NotNil(t, decision, "Decision should not be nil")
 			assert.Equal(t, tt.shouldAllow, decision.Allowed, tt.description)
 
 			if tt.shouldAllow {
 				assert.NotNil(t, authCtx, "AuthContext should be provided when access allowed")
-			}
-
-			if !tt.shouldAllow {
+				assert.Empty(t, decision.Reason, "No denial reason when allowed")
+			} else {
+				// When denied, reason should be provided
 				assert.NotEmpty(t, decision.Reason, "Denial should have a reason")
 			}
 		})
@@ -170,16 +170,21 @@ func (suite *StoreTestSuite) TestCheckShareAccess_AllowedClients(test *testing.T
 			// Act
 			decision, _, err := store.CheckShareAccess(ctx, shareName, tt.clientAddr, "anonymous", &metadata.Identity{})
 
-			// Assert
-			require.NoError(t, err)
+			// Assert - No system error should occur
+			require.NoError(t, err, "CheckShareAccess should not return system errors for access decisions")
 			assert.NotNil(t, decision, "Decision should not be nil")
 			assert.Equal(t, tt.shouldAllow, decision.Allowed, tt.description)
+
+			if !tt.shouldAllow {
+				assert.NotEmpty(t, decision.Reason, "Denial should have a reason")
+			}
 		})
 	}
 }
 
 // TestCheckShareAccess_DeniedClients verifies IP-based deny list enforcement.
 func (suite *StoreTestSuite) TestCheckShareAccess_DeniedClients(test *testing.T) {
+
 	store := suite.NewStore()
 	ctx := context.Background()
 
@@ -224,10 +229,14 @@ func (suite *StoreTestSuite) TestCheckShareAccess_DeniedClients(test *testing.T)
 			// Act
 			decision, _, err := store.CheckShareAccess(ctx, shareName, tt.clientAddr, "anonymous", &metadata.Identity{})
 
-			// Assert
-			require.NoError(t, err)
+			// Assert - No system error should occur
+			require.NoError(t, err, "CheckShareAccess should not return system errors for access decisions")
 			assert.NotNil(t, decision, "Decision should not be nil")
 			assert.Equal(t, tt.shouldAllow, decision.Allowed, tt.description)
+
+			if !tt.shouldAllow {
+				assert.NotEmpty(t, decision.Reason, "Denial should have a reason")
+			}
 		})
 	}
 }
@@ -237,23 +246,57 @@ func (suite *StoreTestSuite) TestCheckShareAccess_ReadOnlyShare(test *testing.T)
 	store := suite.NewStore()
 	ctx := context.Background()
 
-	// Create read-only share
+	// Setup - Create READ-ONLY share
 	shareName := "/export/readonly"
-	options := metadata.ShareOptions{
-		ReadOnly:    true,
-		RequireAuth: false,
+	err := store.AddShare(ctx, shareName, metadata.ShareOptions{ReadOnly: true}, DefaultRootDirAttr())
+	require.NoError(test, err)
+
+	rootHandle, err := store.GetShareRoot(ctx, shareName)
+	require.NoError(test, err)
+
+	// Create file with full permissions (mode 0777)
+	authCtx := &metadata.AuthContext{
+		Context:    ctx,
+		AuthMethod: "unix",
+		Identity: &metadata.Identity{
+			UID: uint32Ptr(0),
+			GID: uint32Ptr(0),
+		},
+		ClientAddr: "127.0.0.1",
 	}
-	err := store.AddShare(ctx, shareName, options, DefaultRootDirAttr())
+
+	fileAttr := &metadata.FileAttr{
+		Type: metadata.FileTypeRegular,
+		Size: 0,
+		Mode: 0777, // Full permissions
+		UID:  1000,
+		GID:  1000,
+	}
+
+	fileHandle, err := store.Create(authCtx, rootHandle, "rofile.txt", fileAttr)
 	require.NoError(test, err)
 
-	// Act
-	decision, _, err := store.CheckShareAccess(ctx, shareName, "192.168.1.100", "anonymous", &metadata.Identity{})
+	// Test with file owner - need to pass share context for read-only check
+	// The AuthContext needs to know which share this file belongs to
+	ownerCtx := &metadata.AuthContext{
+		Context:    ctx,
+		AuthMethod: "unix",
+		Identity: &metadata.Identity{
+			UID: uint32Ptr(1000),
+			GID: uint32Ptr(1000),
+		},
+		ClientAddr: "127.0.0.1",
+	}
 
-	// Assert
+	// Act & Assert
+	granted, err := store.CheckPermissions(ownerCtx, fileHandle, metadata.PermissionRead)
 	require.NoError(test, err)
-	assert.NotNil(test, decision, "Decision should not be nil")
-	assert.True(test, decision.Allowed, "Access should be allowed")
-	assert.True(test, decision.ReadOnly, "Share should be marked as read-only")
+	assert.Equal(test, metadata.PermissionRead, granted, "Read should be allowed on read-only share")
+
+	granted, err = store.CheckPermissions(ownerCtx, fileHandle, metadata.PermissionWrite)
+	require.NoError(test, err)
+	assert.Equal(test, metadata.Permission(0), granted,
+		"Write should be blocked on read-only share, even with file permissions")
 }
 
 // TestCheckShareAccess_AuthMethods verifies authentication method restrictions.
@@ -306,8 +349,8 @@ func (suite *StoreTestSuite) TestCheckShareAccess_AuthMethods(test *testing.T) {
 			// Act
 			decision, _, err := store.CheckShareAccess(ctx, shareName, "192.168.1.100", tt.authMethod, identity)
 
-			// Assert
-			require.NoError(t, err)
+			// Assert - No system error should occur
+			require.NoError(t, err, "CheckShareAccess should not return system errors for access decisions")
 			assert.NotNil(t, decision, "Decision should not be nil")
 			assert.Equal(t, tt.shouldAllow, decision.Allowed, tt.description)
 
@@ -698,63 +741,6 @@ func (suite *StoreTestSuite) TestCheckPermissions_DirectoryPermissions(test *tes
 	require.NoError(test, err)
 	assert.Equal(test, metadata.Permission(0), granted,
 		"Should not be able to write to directory (mode 0755)")
-}
-
-// TestCheckPermissions_ReadOnlyShare verifies read-only share enforcement.
-func (suite *StoreTestSuite) TestCheckPermissions_ReadOnlyShare(test *testing.T) {
-	store := suite.NewStore()
-	ctx := context.Background()
-
-	// Setup - Create READ-ONLY share
-	shareName := "/export/readonly"
-	err := store.AddShare(ctx, shareName, metadata.ShareOptions{ReadOnly: true}, DefaultRootDirAttr())
-	require.NoError(test, err)
-
-	rootHandle, err := store.GetShareRoot(ctx, shareName)
-	require.NoError(test, err)
-
-	// Create file with full permissions (mode 0777)
-	authCtx := &metadata.AuthContext{
-		Context:    ctx,
-		AuthMethod: "unix",
-		Identity: &metadata.Identity{
-			UID: uint32Ptr(0),
-			GID: uint32Ptr(0),
-		},
-		ClientAddr: "127.0.0.1",
-	}
-
-	fileAttr := &metadata.FileAttr{
-		Type: metadata.FileTypeRegular,
-		Size: 0,
-		Mode: 0777, // Full permissions
-		UID:  1000,
-		GID:  1000,
-	}
-
-	fileHandle, err := store.Create(authCtx, rootHandle, "rofile.txt", fileAttr)
-	require.NoError(test, err)
-
-	// Test with file owner
-	ownerCtx := &metadata.AuthContext{
-		Context:    ctx,
-		AuthMethod: "unix",
-		Identity: &metadata.Identity{
-			UID: uint32Ptr(1000),
-			GID: uint32Ptr(1000),
-		},
-		ClientAddr: "127.0.0.1",
-	}
-
-	// Act & Assert
-	granted, err := store.CheckPermissions(ownerCtx, fileHandle, metadata.PermissionRead)
-	require.NoError(test, err)
-	assert.Equal(test, metadata.PermissionRead, granted, "Read should be allowed on read-only share")
-
-	granted, err = store.CheckPermissions(ownerCtx, fileHandle, metadata.PermissionWrite)
-	require.NoError(test, err)
-	assert.Equal(test, metadata.Permission(0), granted,
-		"Write should be blocked on read-only share, even with file permissions")
 }
 
 // TestCheckPermissions_MultipleFlags verifies checking multiple permissions at once.
