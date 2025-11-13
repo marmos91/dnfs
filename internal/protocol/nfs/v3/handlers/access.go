@@ -337,7 +337,7 @@ func (h *DefaultNFSHandler) Access(
 		req.Handle, grantedAccess, req.Access, clientIP)
 
 	logger.Debug("ACCESS details: type=%d mode=%o uid=%d gid=%d client_uid=%v client_gid=%v",
-		attr.Type, attr.Mode, attr.UID, attr.GID, ctx.UID, ctx.GID)
+		nfsAttr.Type, attr.Mode, attr.UID, attr.GID, ctx.UID, ctx.GID)
 
 	return &AccessResponse{
 		Status: types.NFS3OK,

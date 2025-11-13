@@ -138,8 +138,13 @@ func (c *NFSConn) handleRequest(ctx context.Context) error {
 	// Read fragment header
 	header, err := c.readFragmentHeader()
 	if err != nil {
+		// Don't log EOF as an error - it's a normal client disconnect
+		if err != io.EOF {
+			logger.Debug("Error reading fragment header from %s: %v", c.conn.RemoteAddr().String(), err)
+		}
 		return err
 	}
+	logger.Debug("Read fragment header from %s: last=%v length=%d", c.conn.RemoteAddr().String(), header.IsLast, header.Length)
 
 	// Validate fragment size to prevent memory exhaustion
 	const maxFragmentSize = 1 << 20 // 1MB - NFS messages are typically much smaller

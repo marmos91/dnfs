@@ -1,11 +1,11 @@
 package memory
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
 	"sync"
 	"unsafe"
 
-	"github.com/google/uuid"
 	"github.com/marmos91/dittofs/pkg/metadata"
 )
 
@@ -353,29 +353,85 @@ func handleToKey(handle metadata.FileHandle) string {
 	return unsafe.String(unsafe.SliceData(handle), len(handle))
 }
 
-// generateFileHandle creates a unique file handle using UUIDs.
+// buildFullPath constructs the full path for a file by walking up the parent chain.
+// This is used to generate deterministic file handles.
+// Thread Safety: Must be called with lock held (read or write).
+func (store *MemoryMetadataStore) buildFullPath(handle metadata.FileHandle, name string) string {
+	if len(handle) == 0 {
+		return "/" + name
+	}
+
+	// Walk up to build path components
+	var components []string
+	if name != "" {
+		components = append(components, name)
+	}
+
+	currentHandle := handle
+	for {
+		currentKey := handleToKey(currentHandle)
+		parentHandle, hasParent := store.parents[currentKey]
+		if !hasParent {
+			// Reached root of share
+			break
+		}
+
+		// Find the name of current handle in parent's children
+		parentKey := handleToKey(parentHandle)
+		if childrenMap, exists := store.children[parentKey]; exists {
+			for childName, childHandle := range childrenMap {
+				if handleToKey(childHandle) == currentKey {
+					components = append([]string{childName}, components...)
+					break
+				}
+			}
+		}
+
+		currentHandle = parentHandle
+	}
+
+	// Build path
+	if len(components) == 0 {
+		return "/"
+	}
+	return "/" + string(components[0]) + buildPath(components[1:])
+}
+
+// buildPath is a helper that constructs a path from components
+func buildPath(components []string) string {
+	result := ""
+	for _, comp := range components {
+		result += "/" + comp
+	}
+	return result
+}
+
+// generateFileHandle creates a unique file handle using deterministic hashing.
 //
-// The handle generation uses UUID v4 (random UUIDs) which provides:
+// The handle generation uses SHA-256 hashing of the share name and file path,
+// which provides:
+//
+// Determinism:
+// The same share/path combination always produces the same handle. This ensures
+// file handles remain stable across server restarts, allowing clients to cache
+// handles and continue operations without remounting.
 //
 // Uniqueness:
-// UUIDs are statistically guaranteed to be unique. The probability of collision
-// is so low (2^-128) that it's negligible for practical purposes. This eliminates
-// the need for any counter or state management.
-//
-// Unpredictability:
-// Random UUID generation makes it computationally infeasible to predict what
-// handle will be generated next, or to guess handles for unauthorized access.
-// This prevents security issues where clients might try to guess handles.
+// SHA-256 provides cryptographic collision resistance, ensuring that different
+// paths produce different handles. The probability of collision is negligible.
 //
 // Fixed Size:
-// All handles are exactly 16 bytes (128 bits), which provides:
+// All handles are exactly 16 bytes (128 bits), using the first 16 bytes of the
+// SHA-256 hash, which provides:
 //   - Consistent memory usage
 //   - Predictable network serialization
 //   - Sufficient space for collision-free operation
 //
-// Stateless:
-// No counters, seeds, or other state needs to be maintained, serialized, or
-// synchronized. Each call independently generates a unique handle.
+// Stability:
+// Handles are stable across server restarts as long as:
+//   - The same synthetic file structure is created
+//   - Files are created in the same order with the same paths
+//   - The share names remain consistent
 //
 // Protocol Compatibility:
 // The 16-byte size works well with file sharing protocols:
@@ -383,15 +439,22 @@ func handleToKey(handle metadata.FileHandle) string {
 //   - SMB: Uses 8-byte file IDs (we extract from first 8 bytes)
 //
 // Parameters:
-//   - seed: A string for debugging/logging context (e.g., file path or name).
-//     This parameter is not used in handle generation but can be logged for
-//     troubleshooting. Pass empty string if not needed.
+//   - shareName: The share name this file belongs to
+//   - fullPath: The full path of the file within the share (e.g., "/images/photo.jpg")
 //
 // Returns:
-//   - FileHandle: A unique 16-byte file handle
-func (store *MemoryMetadataStore) generateFileHandle() metadata.FileHandle {
-	id := uuid.New()
-	return id[:]
+//   - FileHandle: A deterministic 16-byte file handle
+func (store *MemoryMetadataStore) generateFileHandle(shareName, fullPath string) metadata.FileHandle {
+	// Create a deterministic handle by hashing the share name and full path
+	// This ensures the same file always gets the same handle across restarts
+	h := sha256.New()
+	h.Write([]byte(shareName))
+	h.Write([]byte(":"))
+	h.Write([]byte(fullPath))
+	hash := h.Sum(nil)
+
+	// Use first 16 bytes of the hash as the handle
+	return hash[:16]
 }
 
 // extractFileIDFromHandle derives a 64-bit file ID from a file handle.

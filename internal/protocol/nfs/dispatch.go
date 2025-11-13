@@ -665,6 +665,9 @@ func handleNFSMknod(
 		Context:    authCtx.Context,
 		ClientAddr: authCtx.ClientAddr,
 		AuthFlavor: authCtx.AuthFlavor,
+		UID:        authCtx.UID,
+		GID:        authCtx.GID,
+		GIDs:       authCtx.GIDs,
 	}
 
 	return handleRequest(

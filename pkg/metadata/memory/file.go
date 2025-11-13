@@ -436,8 +436,9 @@ func (store *MemoryMetadataStore) Create(
 		}
 	}
 
-	// Generate handle and complete attributes
-	handle := store.generateFileHandle()
+	// Build full path and generate deterministic handle
+	fullPath := store.buildFullPath(parentHandle, name)
+	handle := store.generateFileHandle(parentData.ShareName, fullPath)
 	now := time.Now()
 
 	// Set defaults if not provided
@@ -474,8 +475,10 @@ func (store *MemoryMetadataStore) Create(
 
 	// Type-specific initialization
 	if attr.Type == metadata.FileTypeRegular {
-		// Generate ContentID for regular files
-		newAttr.ContentID = metadata.ContentID(handleToKey(store.generateFileHandle()))
+		// Generate deterministic ContentID for regular files based on their path
+		contentPath := fullPath + ":content"
+		contentHandle := store.generateFileHandle(parentData.ShareName, contentPath)
+		newAttr.ContentID = metadata.ContentID(handleToKey(contentHandle))
 	} else {
 		// Directories don't have content
 		newAttr.ContentID = ""
@@ -596,8 +599,9 @@ func (store *MemoryMetadataStore) CreateSymlink(
 		}
 	}
 
-	// Generate handle and complete attributes
-	handle := store.generateFileHandle()
+	// Build full path and generate deterministic handle
+	fullPath := store.buildFullPath(parentHandle, name)
+	handle := store.generateFileHandle(parentData.ShareName, fullPath)
 	now := time.Now()
 
 	// Set defaults if not provided
@@ -752,8 +756,9 @@ func (store *MemoryMetadataStore) CreateSpecialFile(
 		}
 	}
 
-	// Generate handle and complete attributes
-	handle := store.generateFileHandle()
+	// Build full path and generate deterministic handle
+	fullPath := store.buildFullPath(parentHandle, name)
+	handle := store.generateFileHandle(parentData.ShareName, fullPath)
 	now := time.Now()
 
 	// Set defaults if not provided

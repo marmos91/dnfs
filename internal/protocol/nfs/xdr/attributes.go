@@ -5,6 +5,29 @@ import (
 	"github.com/marmos91/dittofs/pkg/metadata"
 )
 
+// metadataTypeToNFSType converts internal FileType to NFS protocol type constants.
+// The metadata package uses Go iota starting from 0, but NFS types start from 1.
+func metadataTypeToNFSType(mdType metadata.FileType) uint32 {
+	switch mdType {
+	case metadata.FileTypeRegular:
+		return types.FileTypeRegular // 1
+	case metadata.FileTypeDirectory:
+		return types.FileTypeDirectory // 2
+	case metadata.FileTypeBlockDevice:
+		return types.FileTypeBlock // 3
+	case metadata.FileTypeCharDevice:
+		return types.FileTypeChar // 4
+	case metadata.FileTypeSymlink:
+		return types.FileTypeSymlink // 5
+	case metadata.FileTypeSocket:
+		return types.FileTypeSocket // 6
+	case metadata.FileTypeFIFO:
+		return types.FileTypeFifo // 7
+	default:
+		return types.FileTypeRegular // Safe default
+	}
+}
+
 // MetadataToNFS converts internal file metadata to NFS fattr3 format.
 //
 // Per RFC 1813 Section 2.3.1 (fattr3):
@@ -31,7 +54,7 @@ func MetadataToNFS(mdAttr *metadata.FileAttr, fileid uint64) *types.NFSFileAttr 
 	if mdAttr == nil {
 		// Defensive: should not happen, but return safe defaults
 		return &types.NFSFileAttr{
-			Type:   uint32(metadata.FileTypeRegular),
+			Type:   metadataTypeToNFSType(metadata.FileTypeRegular),
 			Mode:   0644,
 			Nlink:  1,
 			UID:    0,
@@ -48,7 +71,7 @@ func MetadataToNFS(mdAttr *metadata.FileAttr, fileid uint64) *types.NFSFileAttr 
 	}
 
 	return &types.NFSFileAttr{
-		Type:  uint32(mdAttr.Type),
+		Type:  metadataTypeToNFSType(mdAttr.Type),
 		Mode:  mdAttr.Mode,
 		Nlink: 1, // Simplified: real implementation should track hard links
 		UID:   mdAttr.UID,

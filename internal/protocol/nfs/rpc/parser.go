@@ -132,9 +132,9 @@ func ReadData(message []byte, call *RPCCallMessage) ([]byte, error) {
 	offset := 24
 
 	// Skip credentials (flavor + length + data + padding)
-	// Read the credential length to know how much to skip
+	// Read the credential flavor and length to know how much to skip
+	offset += 4 // Skip flavor field
 	credLen := binary.BigEndian.Uint32(message[offset : offset+4])
-	offset += 4            // Skip flavor (already included in the 4 bytes above)
 	offset += 4            // Skip length field
 	offset += int(credLen) // Skip credential body
 
@@ -146,8 +146,8 @@ func ReadData(message []byte, call *RPCCallMessage) ([]byte, error) {
 
 	// Skip verifier (flavor + length + data + padding)
 	// Same structure as credentials
+	offset += 4 // Skip flavor field
 	verfLen := binary.BigEndian.Uint32(message[offset : offset+4])
-	offset += 4            // Skip flavor
 	offset += 4            // Skip length field
 	offset += int(verfLen) // Skip verifier body
 

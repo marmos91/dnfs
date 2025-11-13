@@ -140,22 +140,23 @@ func (h *DefaultMountHandler) Umnt(
 
 	logger.Info("Unmount request: path=%s client=%s", req.DirPath, clientIP)
 
-	// Remove the mount record from tracking
-	// Note: We don't check for errors because UMNT always succeeds per RFC 1813
-	// Even if the mount doesn't exist, we acknowledge the unmount
+	// Remove the mount session record from tracking
+	// Note: We remove the SESSION, NOT the share itself! The share persists.
+	// We don't fail the UMNT if session removal fails because UMNT always succeeds per RFC 1813
+	// Even if the mount session doesn't exist, we acknowledge the unmount
 	//
 	// We don't check for cancellation here because:
-	// 1. RemoveMount should be very fast (typically < 1ms)
+	// 1. RemoveShareMount should be very fast (typically < 1ms)
 	// 2. We want to complete the cleanup to maintain tracking consistency
 	// 3. The client has already decided to unmount, so we should honor that
 	// 4. Leaving stale mount records would pollute the DUMP output
 	//
 	// The repository should respect context internally if needed
-	err = repository.DeleteShare(ctx.Context, req.DirPath)
+	err = repository.RemoveShareMount(ctx.Context, req.DirPath, clientIP)
 	if err != nil {
 		// Check if the error is due to context cancellation
 		if ctx.Context.Err() != nil {
-			// Context was cancelled during RemoveMount
+			// Context was cancelled during RemoveShareMount
 			// We still return success per RFC 1813 (UMNT always succeeds)
 			// but log that the mount record may not have been removed
 			logger.Warn("Unmount cancelled during mount record removal: path=%s client=%s error=%v (mount record may be stale)",

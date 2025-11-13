@@ -551,7 +551,7 @@ func (h *DefaultNFSHandler) Read(
 		req.Handle, req.Offset, req.Count, n, eof, clientIP)
 
 	logger.Debug("READ details: size=%d type=%d mode=%o",
-		attr.Size, attr.Type, attr.Mode)
+		attr.Size, nfsAttr.Type, attr.Mode)
 
 	return &ReadResponse{
 		Status: types.NFS3OK,
