@@ -390,33 +390,13 @@ func (store *MemoryMetadataStore) Create(
 
 	// Verify parent exists and is a directory
 	parentKey := handleToKey(parentHandle)
-
-	// DEBUG: Check what's in the map
 	parentData, exists := store.files[parentKey]
 	if !exists {
 		return nil, &metadata.StoreError{
 			Code:    metadata.ErrNotFound,
-			Message: fmt.Sprintf("parent directory not found, key=%s, map size=%d", parentKey, len(store.files)),
+			Message: "parent directory not found",
 		}
 	}
-
-	// DEBUG: Check if parentData is nil (should never happen if exists=true)
-	if parentData == nil {
-		return nil, &metadata.StoreError{
-			Code:    metadata.ErrNotSupported,
-			Message: fmt.Sprintf("INTERNAL ERROR: parentData is nil but exists=true, key=%s", parentKey),
-		}
-	}
-
-	// DEBUG: Check if Attr is nil (THIS is where we're crashing)
-	if parentData.Attr == nil {
-		return nil, &metadata.StoreError{
-			Code:    metadata.ErrNotEmpty,
-			Message: fmt.Sprintf("INTERNAL ERROR: parentData.Attr is nil, key=%s, shareName=%s", parentKey, parentData.ShareName),
-		}
-	}
-
-	// NOW we can safely access parentData.Attr.Type
 	if parentData.Attr.Type != metadata.FileTypeDirectory {
 		return nil, &metadata.StoreError{
 			Code:    metadata.ErrNotDirectory,
@@ -808,10 +788,6 @@ func (store *MemoryMetadataStore) CreateSpecialFile(
 		ContentID:  "", // Special files don't have content
 	}
 
-	// TODO: Store deviceMajor and deviceMinor somewhere
-	// This could be in a separate map or in Extended attributes
-	// For now, they are accepted but not stored
-
 	// Store file with ShareName inherited from parent
 	key := handleToKey(handle)
 	store.files[key] = &fileData{
@@ -819,6 +795,14 @@ func (store *MemoryMetadataStore) CreateSpecialFile(
 		ShareName: parentData.ShareName, // Inherit from parent
 	}
 	store.linkCounts[key] = 1
+
+	// Store device numbers for block and character devices
+	if fileType == metadata.FileTypeBlockDevice || fileType == metadata.FileTypeCharDevice {
+		store.deviceNumbers[key] = &deviceNumber{
+			Major: deviceMajor,
+			Minor: deviceMinor,
+		}
+	}
 
 	// Add to parent's children
 	if !hasChildren {

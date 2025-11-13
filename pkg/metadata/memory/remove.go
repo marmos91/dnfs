@@ -144,6 +144,7 @@ func (store *MemoryMetadataStore) RemoveFile(
 		delete(store.files, fileKey)
 		delete(store.linkCounts, fileKey)
 		delete(store.parents, fileKey)
+		delete(store.deviceNumbers, fileKey) // Clean up device numbers if present
 		// Note: File doesn't have children (it's not a directory)
 	}
 

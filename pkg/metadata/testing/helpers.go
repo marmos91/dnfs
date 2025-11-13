@@ -2,7 +2,6 @@ package testing
 
 import (
 	"context"
-	"fmt"
 	"testing"
 	"time"
 
@@ -21,7 +20,7 @@ func DefaultRootDirAttr() *metadata.FileAttr {
 	now := time.Now()
 	return &metadata.FileAttr{
 		Type:  metadata.FileTypeDirectory,
-		Mode:  0755,
+		Mode:  0777, // World-writable for testing purposes
 		UID:   0,
 		GID:   0,
 		Size:  4096,
@@ -107,6 +106,7 @@ func AnonymousIdentity() *metadata.Identity {
 // RootAuthContext returns an AuthContext for root user.
 func RootAuthContext() *metadata.AuthContext {
 	return &metadata.AuthContext{
+		Context:  context.Background(),
 		Identity: RootIdentity(),
 	}
 }
@@ -154,28 +154,6 @@ func createUserAuthContext(share *metadata.Share, uid, gid uint32) *metadata.Aut
 		Context:    context.Background(),
 		AuthMethod: "unix",
 		Identity:   UserIdentity(uid, gid),
-		ClientAddr: "127.0.0.1",
-	}
-}
-
-// createUserAuthContextWithGroups creates an authentication context with supplementary groups.
-func createUserAuthContextWithGroups(share *metadata.Share, uid, gid uint32, groups []uint32) *metadata.AuthContext {
-	_ = share // Keep parameter for API consistency even if not used in struct
-	return &metadata.AuthContext{
-		Context:    context.Background(),
-		AuthMethod: "unix",
-		Identity:   UserIdentityWithGroups(uid, gid, groups),
-		ClientAddr: "127.0.0.1",
-	}
-}
-
-// createAnonymousAuthContext creates an authentication context for anonymous access.
-func createAnonymousAuthContext(share *metadata.Share) *metadata.AuthContext {
-	_ = share // Keep parameter for API consistency even if not used in struct
-	return &metadata.AuthContext{
-		Context:    context.Background(),
-		AuthMethod: "anonymous",
-		Identity:   AnonymousIdentity(),
 		ClientAddr: "127.0.0.1",
 	}
 }
@@ -239,25 +217,6 @@ func createTestShare(t *testing.T, store metadata.MetadataStore, name string) (*
 
 	err := store.AddShare(ctx, name, options, rootAttr)
 	require.NoError(t, err, "Failed to create test share")
-
-	rootHandle, err := store.GetShareRoot(ctx, name)
-	require.NoError(t, err, "Failed to get share root")
-
-	share, err := store.FindShare(ctx, name)
-	require.NoError(t, err, "Failed to find created share")
-
-	return share, rootHandle
-}
-
-// createTestShareWithOptions creates a share with custom options.
-func createTestShareWithOptions(t *testing.T, store metadata.MetadataStore, name string, options metadata.ShareOptions) (*metadata.Share, metadata.FileHandle) {
-	t.Helper()
-	ctx := context.Background()
-
-	rootAttr := DefaultRootDirAttr()
-
-	err := store.AddShare(ctx, name, options, rootAttr)
-	require.NoError(t, err, "Failed to create test share with options")
 
 	rootHandle, err := store.GetShareRoot(ctx, name)
 	require.NoError(t, err, "Failed to get share root")
@@ -366,20 +325,6 @@ func createTestDirectoryWithMode(t *testing.T, store metadata.MetadataStore, aut
 	return handle
 }
 
-// createTestDirectoryWithOwner creates a directory with specific ownership.
-func createTestDirectoryWithOwner(t *testing.T, store metadata.MetadataStore, authCtx *metadata.AuthContext, parentHandle metadata.FileHandle, name string, uid, gid uint32) metadata.FileHandle {
-	t.Helper()
-
-	attr := DefaultDirAttr()
-	attr.UID = uid
-	attr.GID = gid
-
-	handle, err := store.Create(authCtx, parentHandle, name, attr)
-	require.NoError(t, err, "Failed to create test directory with owner: %s", name)
-
-	return handle
-}
-
 // ============================================================================
 // Symlink Creation Helpers
 // ============================================================================
@@ -405,31 +350,6 @@ func createTestSymlink(t *testing.T, store metadata.MetadataStore, authCtx *meta
 
 	handle, err := store.CreateSymlink(authCtx, parentHandle, name, target, attr)
 	require.NoError(t, err, "Failed to create test symlink: %s -> %s", name, target)
-
-	return handle
-}
-
-// createTestSymlinkWithMode creates a symlink with specific permissions.
-func createTestSymlinkWithMode(t *testing.T, store metadata.MetadataStore, authCtx *metadata.AuthContext, parentHandle metadata.FileHandle, name string, target string, mode uint32) metadata.FileHandle {
-	t.Helper()
-
-	now := time.Now()
-	attr := &metadata.FileAttr{
-		Mode:  mode,
-		Atime: now,
-		Mtime: now,
-		Ctime: now,
-	}
-
-	if authCtx.Identity.UID != nil {
-		attr.UID = *authCtx.Identity.UID
-	}
-	if authCtx.Identity.GID != nil {
-		attr.GID = *authCtx.Identity.GID
-	}
-
-	handle, err := store.CreateSymlink(authCtx, parentHandle, name, target, attr)
-	require.NoError(t, err, "Failed to create test symlink with mode: %s -> %s", name, target)
 
 	return handle
 }
@@ -485,57 +405,9 @@ func setDirectoryPermissions(t *testing.T, store metadata.MetadataStore, authCtx
 	setFilePermissions(t, store, authCtx, handle, mode)
 }
 
-// setFileOwner changes the ownership of a file.
-func setFileOwner(t *testing.T, store metadata.MetadataStore, authCtx *metadata.AuthContext, handle metadata.FileHandle, uid, gid uint32) {
-	t.Helper()
-
-	attrs := &metadata.SetAttrs{
-		UID: &uid,
-		GID: &gid,
-	}
-
-	err := store.SetFileAttributes(authCtx, handle, attrs)
-	require.NoError(t, err, "Failed to set file owner to UID=%d GID=%d", uid, gid)
-}
-
-// setFileSize changes the size of a file (truncate/extend).
-func setFileSize(t *testing.T, store metadata.MetadataStore, authCtx *metadata.AuthContext, handle metadata.FileHandle, size uint64) {
-	t.Helper()
-
-	attrs := &metadata.SetAttrs{
-		Size: &size,
-	}
-
-	err := store.SetFileAttributes(authCtx, handle, attrs)
-	require.NoError(t, err, "Failed to set file size to %d", size)
-}
-
-// setFileTimestamps changes the access and modification times of a file.
-func setFileTimestamps(t *testing.T, store metadata.MetadataStore, authCtx *metadata.AuthContext, handle metadata.FileHandle, atime, mtime time.Time) {
-	t.Helper()
-
-	attrs := &metadata.SetAttrs{
-		Atime: &atime,
-		Mtime: &mtime,
-	}
-
-	err := store.SetFileAttributes(authCtx, handle, attrs)
-	require.NoError(t, err, "Failed to set file timestamps")
-}
-
 // ============================================================================
 // Lookup and Verification Helpers
 // ============================================================================
-
-// mustLookup performs a lookup and requires it to succeed.
-func mustLookup(t *testing.T, store metadata.MetadataStore, authCtx *metadata.AuthContext, dirHandle metadata.FileHandle, name string) (metadata.FileHandle, *metadata.FileAttr) {
-	t.Helper()
-
-	handle, attr, err := store.Lookup(authCtx, dirHandle, name)
-	require.NoError(t, err, "Lookup failed for: %s", name)
-
-	return handle, attr
-}
 
 // mustNotLookup performs a lookup and requires it to fail with ErrNotFound.
 func mustNotLookup(t *testing.T, store metadata.MetadataStore, authCtx *metadata.AuthContext, dirHandle metadata.FileHandle, name string) {
@@ -559,24 +431,6 @@ func mustGetFile(t *testing.T, store metadata.MetadataStore, handle metadata.Fil
 // ============================================================================
 // Permission Testing Helpers
 // ============================================================================
-
-// requirePermission asserts that a specific permission is granted.
-func requirePermission(t *testing.T, store metadata.MetadataStore, authCtx *metadata.AuthContext, handle metadata.FileHandle, permission metadata.Permission) {
-	t.Helper()
-
-	granted, err := store.CheckPermissions(authCtx, handle, permission)
-	require.NoError(t, err, "Permission check failed")
-	require.Equal(t, permission, granted, "Expected permission not granted")
-}
-
-// requireNoPermission asserts that a specific permission is denied.
-func requireNoPermission(t *testing.T, store metadata.MetadataStore, authCtx *metadata.AuthContext, handle metadata.FileHandle, permission metadata.Permission) {
-	t.Helper()
-
-	granted, err := store.CheckPermissions(authCtx, handle, permission)
-	require.NoError(t, err, "Permission check failed")
-	require.Equal(t, metadata.Permission(0), granted, "Expected permission to be denied")
-}
 
 // ============================================================================
 // Content Coordination Helpers
@@ -619,38 +473,9 @@ func prepareRead(t *testing.T, store metadata.MetadataStore, authCtx *metadata.A
 // Batch Creation Helpers
 // ============================================================================
 
-// createManyFiles creates multiple files with sequential naming.
-func createManyFiles(t *testing.T, store metadata.MetadataStore, authCtx *metadata.AuthContext, parentHandle metadata.FileHandle, prefix string, suffix string, count int) []metadata.FileHandle {
-	t.Helper()
-
-	handles := make([]metadata.FileHandle, count)
-	for i := 0; i < count; i++ {
-		name := fmt.Sprintf("%s%03d%s", prefix, i, suffix)
-		handles[i] = createTestFile(t, store, authCtx, parentHandle, name)
-	}
-
-	return handles
-}
-
 // ============================================================================
 // Assertion Helpers
 // ============================================================================
-
-// assertFileExists verifies that a file exists at the given path.
-func assertFileExists(t *testing.T, store metadata.MetadataStore, authCtx *metadata.AuthContext, dirHandle metadata.FileHandle, name string) {
-	t.Helper()
-
-	_, _, err := store.Lookup(authCtx, dirHandle, name)
-	require.NoError(t, err, "Expected file to exist: %s", name)
-}
-
-// assertFileNotExists verifies that a file does NOT exist at the given path.
-func assertFileNotExists(t *testing.T, store metadata.MetadataStore, authCtx *metadata.AuthContext, dirHandle metadata.FileHandle, name string) {
-	t.Helper()
-
-	_, _, err := store.Lookup(authCtx, dirHandle, name)
-	AssertErrorCode(t, metadata.ErrNotFound, err, "Expected file to not exist: %s", name)
-}
 
 // assertFileType verifies a file has the expected type.
 func assertFileType(t *testing.T, store metadata.MetadataStore, handle metadata.FileHandle, expectedType metadata.FileType) {
@@ -694,13 +519,6 @@ func assertTimestampAfter(t *testing.T, timestamp, reference time.Time, fieldNam
 	t.Helper()
 
 	require.True(t, timestamp.After(reference), "%s should be after reference time. Got %v, reference %v", fieldName, timestamp, reference)
-}
-
-// assertTimestampBefore verifies that a timestamp occurred before a reference time.
-func assertTimestampBefore(t *testing.T, timestamp, reference time.Time, fieldName string) {
-	t.Helper()
-
-	require.True(t, timestamp.Before(reference), "%s should be before reference time. Got %v, reference %v", fieldName, timestamp, reference)
 }
 
 // assertTimestampUnchanged verifies that a timestamp hasn't changed.
