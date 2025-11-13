@@ -114,6 +114,9 @@ type MetadataStore interface {
 	//   - error: ErrNotFound if share doesn't exist, or context cancellation error
 	GetShareRoot(ctx context.Context, name string) (FileHandle, error)
 
+	// GetActiveShares returns all currently active share sessions
+	GetActiveShares(ctx context.Context) ([]ShareSession, error) // Access Control
+
 	// ========================================================================
 	// Access Control
 	// ========================================================================

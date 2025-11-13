@@ -1,5 +1,7 @@
 package metadata
 
+import "time"
+
 // Share represents a filesystem path made available to clients with specific access rules.
 //
 // A share is the root point that clients connect to. It contains the name being
@@ -49,4 +51,10 @@ type ShareOptions struct {
 	// IdentityMapping defines how client identities are mapped
 	// Used for squashing (mapping users to anonymous) and other transformations
 	IdentityMapping *IdentityMapping
+}
+
+type ShareSession struct {
+	ShareName  string
+	ClientAddr string
+	MountedAt  time.Time
 }
