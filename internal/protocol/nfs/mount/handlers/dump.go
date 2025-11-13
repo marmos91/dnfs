@@ -127,9 +127,8 @@ type DumpContext struct {
 //	    }
 //	}
 //	fmt.Printf("Active mounts: %d\n", len(resp.Entries))
-func (h *DefaultMountHandler) Dump(ctx *DumpContext, repository metadata.Repository, req *DumpRequest) (*DumpResponse, error) {
+func (h *DefaultMountHandler) Dump(ctx *DumpContext, repository metadata.MetadataStore, req *DumpRequest) (*DumpResponse, error) {
 	// Check for cancellation before starting any work
-	// This handles the case where the client disconnects before we begin processing
 	select {
 	case <-ctx.Context.Done():
 		logger.Debug("Dump request cancelled before processing: client=%s error=%v", ctx.ClientAddr, ctx.Context.Err())
@@ -146,23 +145,7 @@ func (h *DefaultMountHandler) Dump(ctx *DumpContext, repository metadata.Reposit
 
 	logger.Info("Dump request: client=%s", clientIP)
 
-	// Check if client is allowed to call DUMP
-	if err := repository.CheckDumpAccess(ctx.Context, clientIP); err != nil {
-		if exportErr, ok := err.(*metadata.ExportError); ok {
-			logger.Warn("Dump access denied: client=%s reason=%s", clientIP, exportErr.Message)
-			// Return empty list instead of error (DUMP has no error status codes)
-			// The client gets an empty mount list, which is indistinguishable from
-			// a server with no mounts
-			return &DumpResponse{Entries: []DumpEntry{}}, nil
-		}
-
-		// Unknown error - internal server fault
-		logger.Error("Dump access check failed: client=%s error=%v", clientIP, err)
-		return nil, fmt.Errorf("failed to check dump access: %w", err)
-	}
-
-	// Check for cancellation before the potentially expensive mount list retrieval
-	// This is especially important if there are many mounts on the server
+	// Check for cancellation before the potentially expensive share list retrieval
 	select {
 	case <-ctx.Context.Done():
 		logger.Debug("Dump request cancelled during processing: client=%s error=%v", clientIP, ctx.Context.Err())
@@ -170,35 +153,34 @@ func (h *DefaultMountHandler) Dump(ctx *DumpContext, repository metadata.Reposit
 	default:
 	}
 
-	// Get all active mounts from the repository
-	// The repository should also respect context cancellation internally
-	mounts, err := repository.GetMounts(ctx.Context, "")
+	// Get all active share sessions from the repository
+	sessions, err := repository.GetActiveShares(ctx.Context)
 	if err != nil {
 		// Check if the error is due to context cancellation
 		if ctx.Context.Err() != nil {
-			logger.Debug("Dump request cancelled while retrieving mounts: client=%s error=%v", clientIP, ctx.Context.Err())
+			logger.Debug("Dump request cancelled while retrieving shares: client=%s error=%v", clientIP, ctx.Context.Err())
 			return nil, ctx.Context.Err()
 		}
 
-		logger.Error("Failed to get mounts: client=%s error=%v", clientIP, err)
-		return nil, fmt.Errorf("failed to retrieve mounts: %w", err)
+		logger.Error("Failed to get active shares: client=%s error=%v", clientIP, err)
+		return nil, fmt.Errorf("failed to retrieve active shares: %w", err)
 	}
 
-	// Convert repository mount entries to DUMP response format
-	entries := make([]DumpEntry, 0, len(mounts))
-	for _, mount := range mounts {
+	// Convert share sessions to DUMP response format
+	entries := make([]DumpEntry, 0, len(sessions))
+	for _, session := range sessions {
 		entries = append(entries, DumpEntry{
-			Hostname:  mount.ClientAddr,
-			Directory: mount.ExportPath,
+			Hostname:  session.ClientAddr,
+			Directory: session.ShareName,
 		})
 	}
 
-	logger.Info("Dump successful: client=%s returned=%d mount(s)", clientIP, len(entries))
+	logger.Info("Dump successful: client=%s returned=%d active share(s)", clientIP, len(entries))
 
 	// Log details at debug level
 	if len(entries) > 0 {
 		for _, entry := range entries {
-			logger.Debug("  Mount: client=%s path=%s", entry.Hostname, entry.Directory)
+			logger.Debug("  Active share: client=%s share=%s", entry.Hostname, entry.Directory)
 		}
 	}
 
