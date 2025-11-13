@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 
 	"github.com/marmos91/dittofs/pkg/metadata"
+
+	. "github.com/marmos91/dittofs/pkg/content"
 )
 
 // FSContentRepository implements ContentRepository using the local filesystem.
@@ -111,7 +113,7 @@ func (r *FSContentRepository) ReadContent(ctx context.Context, id metadata.Conte
 	file, err := os.Open(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("content not found: %s", id)
+			return nil, fmt.Errorf("content %s: %w", id, ErrContentNotFound)
 		}
 		return nil, fmt.Errorf("failed to open content: %w", err)
 	}
@@ -151,7 +153,7 @@ func (r *FSContentRepository) GetContentSize(ctx context.Context, id metadata.Co
 	info, err := os.Stat(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return 0, fmt.Errorf("content not found: %s", id)
+			return 0, fmt.Errorf("content %s: %w", id, ErrContentNotFound)
 		}
 		return 0, fmt.Errorf("failed to stat content: %w", err)
 	}
@@ -344,4 +346,280 @@ func (r *FSContentRepository) WriteAt(ctx context.Context, id metadata.ContentID
 	}
 
 	return nil
+}
+
+// Truncate changes the size of the content to the specified size.
+//
+// This implements the WritableContentStore.Truncate interface method.
+//
+// Truncate Semantics:
+//   - If newSize < currentSize: Content is truncated (trailing data removed)
+//   - If newSize > currentSize: Content is extended with zeros
+//   - If newSize == currentSize: No-op (succeeds immediately)
+//
+// Context Cancellation:
+// This operation checks the context before performing the truncate operation.
+//
+// Parameters:
+//   - ctx: Context for cancellation and timeouts
+//   - id: Content identifier
+//   - newSize: New size in bytes
+//
+// Returns:
+//   - error: Returns error if truncate fails or context is cancelled
+func (r *FSContentRepository) Truncate(ctx context.Context, id metadata.ContentID, newSize uint64) error {
+	// ========================================================================
+	// Step 1: Check context before filesystem operation
+	// ========================================================================
+
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	filePath := r.getFilePath(ctx, id)
+
+	// ========================================================================
+	// Step 2: Check if file exists
+	// ========================================================================
+
+	_, err := os.Stat(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("truncate failed for %s: %w", id, ErrContentNotFound)
+		}
+		return fmt.Errorf("failed to stat content for truncate: %w", err)
+	}
+
+	// ========================================================================
+	// Step 3: Truncate the file
+	// ========================================================================
+
+	if err := os.Truncate(filePath, int64(newSize)); err != nil {
+		return fmt.Errorf("failed to truncate content: %w", err)
+	}
+
+	return nil
+}
+
+// Delete removes content from the filesystem.
+//
+// This implements the WritableContentStore.Delete interface method.
+//
+// The operation is idempotent - deleting non-existent content returns nil.
+// Storage space is reclaimed immediately by the operating system.
+//
+// Context Cancellation:
+// This operation checks the context before performing deletion.
+//
+// Parameters:
+//   - ctx: Context for cancellation and timeouts
+//   - id: Content identifier to delete
+//
+// Returns:
+//   - error: Only returns error for context cancellation or filesystem failures,
+//     NOT for non-existent content (returns nil in that case)
+func (r *FSContentRepository) Delete(ctx context.Context, id metadata.ContentID) error {
+	// ========================================================================
+	// Step 1: Check context before filesystem operation
+	// ========================================================================
+
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	filePath := r.getFilePath(ctx, id)
+
+	// ========================================================================
+	// Step 2: Remove the file
+	// ========================================================================
+
+	err := os.Remove(filePath)
+	if err != nil {
+		// Check if file doesn't exist - this is OK (idempotent)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to delete content: %w", err)
+	}
+
+	return nil
+}
+
+// GetStorageStats returns statistics about the filesystem storage.
+//
+// This implements the ContentStore.GetStorageStats interface method.
+//
+// For filesystem-based storage, this uses the filesystem's statistics
+// to provide capacity and usage information.
+//
+// Note: This is a basic implementation that returns limited statistics.
+// ContentCount and AverageSize are set to 0 as calculating them would
+// require scanning the entire directory.
+//
+// Parameters:
+//   - ctx: Context for cancellation and timeouts
+//
+// Returns:
+//   - *StorageStats: Current storage statistics
+//   - error: Returns error for context cancellation or stat failures
+func (r *FSContentRepository) GetStorageStats(ctx context.Context) (*StorageStats, error) {
+	// ========================================================================
+	// Step 1: Check context before filesystem operation
+	// ========================================================================
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	// ========================================================================
+	// Step 2: Get filesystem statistics
+	// ========================================================================
+	// Note: This is a platform-specific operation. For now, we return
+	// placeholder values. A full implementation would use syscall.Statfs
+	// on Unix systems or GetDiskFreeSpaceEx on Windows.
+
+	return &StorageStats{
+		TotalSize:     0, // Would need platform-specific syscall
+		UsedSize:      0, // Would need to scan directory
+		AvailableSize: 0, // Would need platform-specific syscall
+		ContentCount:  0, // Would need to scan directory
+		AverageSize:   0, // Would need to scan directory
+	}, nil
+}
+
+// ListAllContent returns all content IDs stored in the filesystem.
+//
+// This implements the GarbageCollectableStore.ListAllContent interface method.
+//
+// This scans the base directory and returns all file names as ContentIDs.
+// For large stores with many files, this may be slow and consume memory.
+//
+// Context Cancellation:
+// This operation checks context periodically during directory scanning.
+//
+// Parameters:
+//   - ctx: Context for cancellation and timeouts
+//
+// Returns:
+//   - []metadata.ContentID: List of all content IDs
+//   - error: Returns error for context cancellation or filesystem failures
+func (r *FSContentRepository) ListAllContent(ctx context.Context) ([]metadata.ContentID, error) {
+	// ========================================================================
+	// Step 1: Check context before filesystem operation
+	// ========================================================================
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	// ========================================================================
+	// Step 2: Read directory entries
+	// ========================================================================
+
+	entries, err := os.ReadDir(r.basePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read content directory: %w", err)
+	}
+
+	// ========================================================================
+	// Step 3: Build list of content IDs
+	// ========================================================================
+
+	contentIDs := make([]metadata.ContentID, 0, len(entries))
+
+	for _, entry := range entries {
+		// Check context periodically (every 100 entries)
+		if len(contentIDs)%100 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
+
+		// Skip directories, only include regular files
+		if !entry.IsDir() {
+			contentIDs = append(contentIDs, metadata.ContentID(entry.Name()))
+		}
+	}
+
+	return contentIDs, nil
+}
+
+// DeleteBatch removes multiple content items in one operation.
+//
+// This implements the GarbageCollectableStore.DeleteBatch interface method.
+//
+// For filesystem storage, this performs deletions sequentially. The operation
+// is best-effort - partial failures are allowed and returned in the map.
+//
+// Context Cancellation:
+// This operation checks context periodically during batch deletion.
+//
+// Parameters:
+//   - ctx: Context for cancellation and timeouts
+//   - ids: Content identifiers to delete
+//
+// Returns:
+//   - map[metadata.ContentID]error: Map of failed deletions (empty = all succeeded)
+//   - error: Only returns error for context cancellation
+func (r *FSContentRepository) DeleteBatch(ctx context.Context, ids []metadata.ContentID) (map[metadata.ContentID]error, error) {
+	failures := make(map[metadata.ContentID]error)
+
+	for i, id := range ids {
+		// Check context periodically (every 10 deletions)
+		if i%10 == 0 {
+			if err := ctx.Err(); err != nil {
+				// Context cancelled - mark remaining as failed
+				for j := i; j < len(ids); j++ {
+					failures[ids[j]] = ctx.Err()
+				}
+				return failures, ctx.Err()
+			}
+		}
+
+		// Attempt to delete
+		if err := r.Delete(ctx, id); err != nil {
+			failures[id] = err
+		}
+	}
+
+	return failures, nil
+}
+
+// ReadContentSeekable returns a seekable reader for the content.
+//
+// This implements the SeekableContentStore.ReadContentSeekable interface method.
+//
+// The filesystem implementation supports efficient seeking, so we return
+// the same *os.File handle which implements io.ReadSeekCloser.
+//
+// Parameters:
+//   - ctx: Context for cancellation and timeouts
+//   - id: Content identifier to read
+//
+// Returns:
+//   - io.ReadSeekCloser: Seekable reader (must be closed by caller)
+//   - error: Returns error if content not found or context is cancelled
+func (r *FSContentRepository) ReadContentSeekable(ctx context.Context, id metadata.ContentID) (io.ReadSeekCloser, error) {
+	// ========================================================================
+	// Step 1: Check context before filesystem operation
+	// ========================================================================
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	// ========================================================================
+	// Step 2: Open the content file
+	// ========================================================================
+
+	filePath := r.getFilePath(ctx, id)
+	file, err := os.Open(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("content %s: %w", id, ErrContentNotFound)
+		}
+		return nil, fmt.Errorf("failed to open content: %w", err)
+	}
+
+	return file, nil
 }

@@ -7,7 +7,28 @@ import (
 	"github.com/marmos91/dittofs/pkg/metadata"
 )
 
+// ============================================================================
+// DEPRECATED: This file is deprecated. Use store.go instead.
+// ============================================================================
+//
+// The interfaces in this file are deprecated in favor of the new ContentStore
+// interface hierarchy defined in store.go. The new design provides:
+//
+//   - Better documentation and organization
+//   - Standard error handling (errors.go)
+//   - Additional capabilities (garbage collection, statistics, multipart)
+//   - Consistent naming with MetadataStore
+//
+// Migration Guide:
+//   - Repository → ContentStore
+//   - WriteRepository → WritableContentStore
+//   - SeekableContentRepository → SeekableContentStore
+//
+// This file will be removed in a future version.
+// ============================================================================
+
 // Repository defines the interface for reading file content
+// Deprecated: Use ContentStore instead
 type Repository interface {
 	// ReadContent returns a reader for the content identified by the given ID
 	// Returns an error if the content doesn't exist or can't be read
@@ -21,6 +42,8 @@ type Repository interface {
 	ContentExists(ctx context.Context, id metadata.ContentID) (bool, error)
 }
 
+// WriteRepository extends Repository with write operations.
+// Deprecated: Use WritableContentStore instead
 type WriteRepository interface {
 	Repository
 
@@ -36,6 +59,7 @@ type WriteRepository interface {
 
 // SeekableContentRepository is an optional extended interface
 // for repositories that support random access reads
+// Deprecated: Use SeekableContentStore instead
 type SeekableContentRepository interface {
 	Repository
 
