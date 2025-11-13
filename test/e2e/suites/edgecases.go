@@ -1,8 +1,10 @@
 package suites
 
 import (
+	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -146,7 +148,7 @@ func TestEdgeCases(t *testing.T, storeType framework.StoreType) {
 					return
 				}
 				if string(data) != string(content) {
-					done <- io.ErrUnexpectedEOF
+					done <- fmt.Errorf("content mismatch")
 					return
 				}
 				done <- nil
@@ -259,10 +261,7 @@ func TestEdgeCases(t *testing.T, storeType framework.StoreType) {
 
 		numFiles := 100
 		for i := 0; i < numFiles; i++ {
-			filename := dirname + "/" + strings.Repeat("f", 10) + string(rune('0'+i%10))
-			if i >= 10 {
-				filename = dirname + "/file_" + string(rune('0'+i/10)) + string(rune('0'+i%10)) + ".txt"
-			}
+			filename := filepath.Join(dirname, fmt.Sprintf("file_%03d.txt", i))
 			ctx.WriteFile(filename, []byte("data"), 0644)
 		}
 

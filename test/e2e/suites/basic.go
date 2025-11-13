@@ -87,10 +87,15 @@ func TestBasicOperations(t *testing.T, storeType framework.StoreType) {
 		}
 		_, err = file.Write([]byte("line2\n"))
 		if err != nil {
-			file.Close()
+			closeErr := file.Close()
+			if closeErr != nil {
+				t.Fatalf("Failed to append to file: %v; additionally, failed to close file: %v", err, closeErr)
+			}
 			t.Fatalf("Failed to append to file: %v", err)
 		}
-		file.Close()
+		if err := file.Close(); err != nil {
+			t.Fatalf("Failed to close file: %v", err)
+		}
 
 		// Verify content
 		expected := []byte("line1\nline2\n")
