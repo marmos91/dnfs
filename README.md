@@ -10,7 +10,7 @@
 
 **A modular virtual filesystem written entirely in Go**
 
-Decouple file interfaces from storage backends. Expose your data through multiple protocols (NFS, SMB, FTP) while maintaining complete control over how metadata and content are stored.
+Decouple file interfaces from storage backends. Currently supports **NFSv3** with pluggable metadata and content repositories. Designed for easy extension to additional protocols (SMB, WebDAV, etc.).
 
 </div>
 
@@ -37,29 +37,30 @@ This results in:
 DittoFS provides a modular architecture that separates concerns through three key abstractions:
 
 ```
-┌─────────────────────────────────────────┐
-│                Protocols                │
-│  ┌─────────┐  ┌─────────┐  ┌─────────┐  │
-│  │   NFS   │  │   SMB   │  │   FTP   │  │
-│  └────┬────┘  └────┬────┘  └────┬────┘  │
-└───────┼────────────┼────────────┼───────┘
-        │            │            │
-        └────────────┴────────────┘
-                     │
-        ┌────────────┴────────────┐
-        │     DittoFS Core        │
-        │   (Adapter Manager)     │
-        └────────┬──────────┬─────┘
-                 │          │
-                 ▼          ▼
-        ┌─────────────┐  ┌──────────────┐
-        │  Metadata   │  │   Content    │
-        │ Repository  │  │  Repository  │
-        └─────────────┘  └──────────────┘
-             │                  │
-             ▼                  ▼
-        Memory/BadgerDB    S3/Filesystem
-        Postgres/Redis     Custom Storage
+        ┌──────────────────────────────────────────────┐
+        │            Protocol Adapters                 │
+        │                                              │
+        │  ┌─────────┐  ╭ ─ ─ ─ ─ ╮  ╭ ─ ─ ─ ─ ─ ╮     │
+        │  │   NFS   │    SMB(soon)    WebDAV(TBD)     │
+        │  │   ✅    │  ╰ ─ ─ ─ ─ ╯  ╰ ─ ─ ─ ─ ─ ╯     │
+        │  └────┬────┘                                 │
+        └───────┼──────────────────────────────────────┘
+                │
+                ▼
+        ┌─────────────────────────────────┐
+        │           DittoFS Core          │
+        │         (Adapter Manager)       │
+        └─────────┬──────────────┬────────┘
+                  │              │
+                  ▼              ▼
+          ┌─────────────┐  ┌──────────────┐
+          │  Metadata   │  │   Content    │
+          │    Store    │  │    Store     │
+          └──────┬──────┘  └──────┬───────┘
+                 │                │
+                 ▼                ▼
+          Memory/BadgerDB    S3/Filesystem
+          (future: Redis)    (future: Dropbox)
 ```
 
 ### Key Concepts
@@ -70,28 +71,29 @@ DittoFS provides a modular architecture that separates concerns through three ke
 - Multiple adapters can run simultaneously
 - Adapters are lightweight wrappers that translate protocol operations
 
-**2. Metadata Repository**: Stores file structure and attributes
+**2. Metadata Store**: Stores file structure and attributes
 
 - File metadata (size, timestamps, permissions, extended attributes)
 - Directory hierarchy and relationships
 - File handles and export configuration
-- Pluggable backends (memory, BadgerDB, Redis, PostgreSQL, etc.)
+- Pluggable backends (memory, BadgerDB, SQLite)
 - **Built-in options**: In-memory (ephemeral) or BadgerDB (persistent)
 
-**3. Content Repository**: Stores actual file data
+**3. Content Store**: Stores actual file data
 
 - Read and write operations
 - Content addressing and chunking strategies
 - Pluggable backends (filesystem, S3, custom solutions)
+- **Built-in options**: Filesystem (local/network) or S3 (cloud)
 
 ### Key Benefits
 
-1. **Multi-Protocol Support**: Expose the same data through NFS, SMB, FTP, or custom protocols
+1. **Production-Ready NFSv3**: Fully functional NFS server with 28 implemented procedures
 2. **No Special Permissions**: Runs entirely in userspace - no FUSE, no kernel modules
-3. **Maximum Flexibility**: Mix and match any protocol adapter with any storage backend
-4. **Better Performance**: Direct protocol implementation, optimized I/O paths
-5. **Easy Integration**: Pure Go means easy embedding in existing applications
-6. **Cloud Native**: Perfect for distributed systems and cloud architectures
+3. **Pluggable Storage**: Mix and match protocols with any storage backend (S3, filesystem, custom)
+4. **Cloud-Native Architecture**: S3 backend with production optimizations for containerized workloads
+5. **Pure Go Implementation**: Easy deployment, cross-platform, simple integration
+6. **Extensible Design**: Clean adapter pattern ready for SMB, WebDAV, and custom protocols
 
 ## Use Cases
 
@@ -190,6 +192,7 @@ go test -v ./test/e2e -run TestE2E/memory/BasicOperations
 ```
 
 DittoFS includes comprehensive testing:
+
 - **Unit tests** for core components (RPC, XDR, metadata, content repositories)
 - **E2E tests** that mount real NFS filesystems and test complete workflows
 - **Test matrix** running all suites against multiple storage backends (memory, filesystem)
@@ -216,6 +219,7 @@ BENCH_TIME=30s BENCH_COUNT=5 ./scripts/benchmark.sh
 ```
 
 The benchmark suite measures:
+
 - **Throughput**: Read/write performance from 4KB to 100MB files
 - **Latency**: Per-operation timing for metadata and file operations
 - **Memory Usage**: Allocation patterns and memory footprint via profiling
@@ -223,12 +227,14 @@ The benchmark suite measures:
 - **Store Comparison**: Side-by-side comparison of all storage backends
 
 Results are saved to `benchmark_results/<timestamp>/` with:
+
 - Raw benchmark data and profiles (CPU, memory)
 - Generated reports (text and SVG graphs)
 - Summary report with throughput/latency comparisons
 - Comparison with previous runs (if `--compare` used)
 
 **Documentation**:
+
 - See [test/e2e/BENCHMARKS.md](test/e2e/BENCHMARKS.md) for detailed usage and interpretation
 - See [test/e2e/COMPARISON_GUIDE.md](test/e2e/COMPARISON_GUIDE.md) for comparing with FUSE-based and kernel NFS implementations
 
@@ -241,6 +247,7 @@ DittoFS uses a flexible configuration system with support for YAML/TOML files an
 **Default Location**: `$XDG_CONFIG_HOME/dittofs/config.yaml` (typically `~/.config/dittofs/config.yaml`)
 
 **Initialization**:
+
 ```bash
 # Generate default configuration file
 ./dittofs init
@@ -283,6 +290,7 @@ server:
 Configures where file content is stored.
 
 **Filesystem Backend** (default, recommended for local storage):
+
 ```yaml
 content:
   type: "filesystem"
@@ -291,6 +299,7 @@ content:
 ```
 
 **S3 Backend** (recommended for cloud deployments):
+
 ```yaml
 content:
   type: "s3"
@@ -303,9 +312,12 @@ content:
     access_key_id: ""                # Optional: AWS credentials
     secret_access_key: ""            # Leave empty to use AWS credential chain
     part_size: 10485760              # Multipart upload part size (10MB)
+    stats_cache_ttl: "5m"            # Cache storage stats (default: 5 minutes)
+    # metrics: (optional)            # Metrics interface for observability
 ```
 
 **In-Memory Backend** (development/testing only):
+
 ```yaml
 content:
   type: "memory"
@@ -315,13 +327,23 @@ content:
 
 > **Note**: Memory content store is not yet implemented. Use `filesystem` or `s3` type.
 >
-> **S3 Path Design**: The S3 store uses path-based object keys (e.g., `export/docs/report.pdf`) that mirror the filesystem structure. This enables easy bucket inspection and metadata reconstruction for disaster recovery. See `config-s3-example.yaml` for detailed configuration.
+> **S3 Path Design**: The S3 store uses path-based object keys (e.g., `export/docs/report.pdf`) that mirror the filesystem structure. This enables easy bucket inspection and metadata reconstruction for disaster recovery.
+>
+> **S3 Phase 1 Production Features**: The S3 content store includes production-ready optimizations:
+>
+> - **Range Reads**: Efficient partial reads using S3 byte-range requests (100x faster for small reads from large files)
+> - **Streaming Multipart Uploads**: Automatic multipart uploads for large files (98% memory reduction)
+> - **Stats Caching**: Intelligent caching reduces expensive S3 ListObjects calls by 99%+
+> - **Metrics Support**: Optional instrumentation for Prometheus/observability
+>
+> See `pkg/content/s3/PHASE1_SUMMARY.md` for details. Example config: `config-s3-example.yaml`
 
 #### 4. Metadata Store
 
 Configures where file metadata (structure, attributes) is stored.
 
 **BadgerDB Backend** (default, recommended for production):
+
 ```yaml
 metadata:
   type: "badger"
@@ -330,6 +352,7 @@ metadata:
 ```
 
 **In-Memory Backend** (ephemeral, for development/testing only):
+
 ```yaml
 metadata:
   type: "memory"
@@ -337,6 +360,7 @@ metadata:
 ```
 
 **Common Configuration** (applies to all metadata stores):
+
 ```yaml
 metadata:
   # Filesystem capabilities and limits
@@ -402,6 +426,7 @@ shares:
 Configures protocol-specific settings:
 
 **NFS Adapter**:
+
 ```yaml
 adapters:
   nfs:
@@ -420,11 +445,13 @@ adapters:
 Override configuration using environment variables with the `DITTOFS_` prefix:
 
 **Format**: `DITTOFS_<SECTION>_<SUBSECTION>_<KEY>`
+
 - Use uppercase
 - Replace dots with underscores
 - Nested paths use underscores
 
 **Examples**:
+
 ```bash
 # Logging
 export DITTOFS_LOGGING_LEVEL=DEBUG
@@ -455,6 +482,7 @@ Settings are applied in the following order (highest to lowest priority):
 3. **Default Values** - Lowest priority
 
 Example:
+
 ```bash
 # config.yaml has port: 2049
 # This overrides it to 12049
@@ -788,6 +816,11 @@ with DittoFS. Instead, use direct mount commands or the provided test clients.
 - In-memory metadata repository (ephemeral, fully functional)
 - BadgerDB metadata repository (persistent, path-based handles, fully functional)
 - Filesystem content repository (fully functional)
+- S3 content repository (production-ready with Phase 1 optimizations):
+  - Range read support (ReadAt) for efficient partial reads - 100x faster for small reads
+  - Streaming multipart uploads for large files - 98% memory reduction
+  - Storage stats caching with configurable TTL - 99%+ cost reduction
+  - Optional metrics instrumentation infrastructure
 
 **Infrastructure**
 
@@ -802,12 +835,14 @@ with DittoFS. Instead, use direct mount commands or the provided test clients.
 DittoFS offers two metadata storage options:
 
 **In-Memory (Ephemeral)**
+
 - All metadata stored in RAM
 - Fast access and zero persistence overhead
 - **Data is lost when server stops**
 - Ideal for: Development, testing, temporary workloads
 
 **BadgerDB (Persistent)**
+
 - All metadata stored on disk using BadgerDB (embedded key-value database)
 - **Survives server restarts** - file handles, directory structure, permissions persist
 - Path-based file handles: `"shareName:/path/to/file"` format enables stable references
@@ -817,6 +852,7 @@ DittoFS offers two metadata storage options:
 **Path-Based File Handles**
 
 BadgerDB uses a deterministic path-based handle strategy:
+
 - Handles are derived from the full file path: `"export:/documents/report.pdf"`
 - Stable across server restarts (same file = same handle)
 - Enables future features: import existing filesystems, migrate between stores, backup/restore
@@ -840,46 +876,56 @@ metadata:
 
 > **Note**: Metadata stores are not currently compatible. Switching backends requires recreating shares and file structure.
 
-### 🚧 Roadmap
+### 🚀 Roadmap
 
-**Phase 1: Performance Optimization & Refactoring**
+**Completed ✅**
 
-- [ ] Code refactoring and cleanup
-- [ ] Memory leak prevention and profiling
-- [ ] Performance optimization (zero-copy I/O where possible)
-- [ ] Connection pool management
-- [x] Modular configuration system
+- NFSv3 + Mount protocol (28 procedures)
+- In-memory metadata repository
+- BadgerDB metadata repository (persistent, path-based handles)
+- Filesystem content repository
+- S3 content repository with Phase 1 production improvements:
+  - Range reads (ReadAt) - 100x faster for partial reads
+  - Streaming multipart uploads - 98% memory reduction
+  - Storage stats caching - 99%+ cost reduction
+  - Metrics instrumentation infrastructure
+- Comprehensive E2E test suite
+- Performance benchmark framework
+- Modular configuration system
 
-**Phase 2: Testing**
+**Phase 1: NFSv3 Production Hardening** (Current Focus)
 
-- [x] Comprehensive E2E test suite
-- [x] Unit test coverage for core components (RPC, XDR, Content, Metadata)
-- [ ] NFS protocol compliance tests
-- [ ] Coverage reporting and CI/CD integration
+- [ ] Prometheus metrics integration
+- [ ] Health check endpoints (Kubernetes readiness/liveness)
+- [ ] Enhanced graceful shutdown
+- [ ] Connection pooling optimization
+- [ ] Request rate limiting
+- [ ] Admin API for monitoring
 
-**Phase 3: Prometheus Metrics**
+**Phase 2: Kubernetes Integration**
 
-- [ ] Metrics export endpoints
-- [ ] Operation counters and latency histograms
-- [ ] Connection and resource tracking
-
-**Phase 4: Load and Stress Testing**
-
-- [ ] Performance benchmarks and comparison
+- [ ] CSI driver implementation
+- [ ] Helm chart for deployment
+- [ ] StatefulSet examples
+- [ ] PersistentVolume provisioning
 - [ ] Load testing with realistic workloads
-- [ ] Stress testing and failure scenarios
 
-**Phase 5: Production-Ready Backends**
+**Phase 3: SMB Protocol Adapter** (Optional)
 
-- [ ] S3-compatible content repository
-- [x] BadgerDB metadata repository (persistent, path-based handles)
-- [ ] SQLite metadata repository (planned)
-
-**Phase 6: SMB Protocol Adapter**
-
-- [ ] SMB/CIFS protocol implementation
+- [ ] SMB2/3 protocol implementation (19 commands)
+- [ ] NTLM authentication
+- [ ] Session/tree management
+- [ ] Core file operations
 - [ ] Windows client compatibility
-- [ ] Concurrent NFS + SMB access
+
+**Phase 4: Advanced Features**
+
+- [ ] NFSv4 support
+- [ ] Kerberos authentication (AUTH_GSS)
+- [ ] Advanced caching strategies
+- [ ] Multi-region content replication
+- [ ] WebDAV adapter
+- [ ] SQLite metadata repository
 
 ## Protocol Implementation Status
 
@@ -1031,6 +1077,7 @@ DittoFS includes a comprehensive end-to-end testing framework that validates rea
 - **Testing all combinations** of adapters and storage backends
 
 Test suites cover:
+
 - Basic file operations (create, read, write, delete)
 - Directory operations (mkdir, readdir, rename)
 - Symbolic and hard links
