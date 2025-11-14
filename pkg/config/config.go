@@ -79,8 +79,8 @@ type ServerConfig struct {
 // Only the corresponding type-specific configuration section is used.
 type ContentConfig struct {
 	// Type specifies which content store implementation to use
-	// Valid values: filesystem, memory
-	Type string `mapstructure:"type" validate:"required,oneof=filesystem memory"`
+	// Valid values: filesystem, memory, s3
+	Type string `mapstructure:"type" validate:"required,oneof=filesystem memory s3"`
 
 	// Filesystem contains filesystem-specific configuration
 	// Only used when Type = "filesystem"
@@ -89,6 +89,10 @@ type ContentConfig struct {
 	// Memory contains memory-specific configuration
 	// Only used when Type = "memory"
 	Memory map[string]any `mapstructure:"memory"`
+
+	// S3 contains S3-specific configuration
+	// Only used when Type = "s3"
+	S3 map[string]any `mapstructure:"s3"`
 }
 
 // MetadataConfig specifies metadata store configuration.
