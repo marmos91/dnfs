@@ -3,7 +3,6 @@ package s3
 import (
 	"bytes"
 	"context"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"sort"
@@ -24,6 +23,14 @@ import (
 //   - MultipartContentStore support for large files (>5MB)
 //   - GarbageCollectableStore support for cleanup
 //
+// Path-Based Key Design:
+//   - ContentID is the relative file path from share root
+//   - Format: "shareName/path/to/file" (e.g., "export/docs/report.pdf")
+//   - No leading "/" and no ":content" suffix
+//   - S3 bucket mirrors the actual filesystem structure
+//   - Enables metadata reconstruction from S3 (disaster recovery)
+//   - Human-readable and inspectable S3 bucket contents
+//
 // S3 Characteristics:
 //   - Object storage (no true random access like filesystem)
 //   - Supports range reads (for partial reads)
@@ -32,11 +39,10 @@ import (
 //   - High durability and availability
 //
 // Implementation Details:
-//   - ContentID is hex-encoded and used as S3 object key
 //   - WriteAt is implemented using read-modify-write for small files
 //   - For large files, consider using multipart uploads directly
 //   - No local caching (every read hits S3)
-//   - Supports custom endpoint for S3-compatible storage (MinIO, Localstack)
+//   - Supports custom endpoint for S3-compatible storage (Cubbit DS3, etc.)
 //
 // Thread Safety:
 // This implementation is safe for concurrent use by multiple goroutines.
@@ -137,17 +143,34 @@ func NewS3ContentStore(ctx context.Context, cfg S3ContentStoreConfig) (*S3Conten
 
 // getObjectKey returns the full S3 object key for a given content ID.
 //
-// This converts the ContentID to a hex-encoded string and adds the configured
-// key prefix if present.
+// Design Decision: Path-Based Keys
+// ---------------------------------
+// The ContentID is used directly as the S3 object key (with optional prefix).
+// This means the S3 bucket mirrors the actual file structure, enabling:
+//   - Easy inspection of S3 contents
+//   - Metadata reconstruction from S3 (disaster recovery)
+//   - Simple migration and backup strategies
+//   - Human-readable S3 bucket structure
+//
+// ContentID Format:
+//   The metadata store generates ContentID as: "shareName/path/to/file"
+//   - No leading "/" (relative path)
+//   - No ":content" suffix
+//   - Share name included as root prefix
+//
+// Example:
+//   ContentID:  "export/documents/report.pdf"
+//   Key Prefix: "dittofs/"
+//   S3 Key:     "dittofs/export/documents/report.pdf"
 //
 // Parameters:
-//   - id: Content identifier
+//   - id: Content identifier (share-relative path)
 //
 // Returns:
 //   - string: Full S3 object key
 func (s *S3ContentStore) getObjectKey(id metadata.ContentID) string {
-	// Hex-encode the content ID to make it S3-safe
-	key := hex.EncodeToString([]byte(id))
+	// Use ContentID directly as the key (it should be the full file path)
+	key := string(id)
 
 	if s.keyPrefix != "" {
 		return s.keyPrefix + key
@@ -853,13 +876,13 @@ func (s *S3ContentStore) AbortMultipartUpload(ctx context.Context, id metadata.C
 // ListAllContent returns all content IDs in the S3 bucket.
 //
 // This lists all objects with the configured key prefix and returns their
-// content IDs.
+// content IDs (which are the full file paths).
 //
 // Parameters:
 //   - ctx: Context for cancellation and timeouts
 //
 // Returns:
-//   - []metadata.ContentID: List of all content IDs
+//   - []metadata.ContentID: List of all content IDs (file paths)
 //   - error: Returns error for S3 failures or context cancellation
 func (s *S3ContentStore) ListAllContent(ctx context.Context) ([]metadata.ContentID, error) {
 	if err := ctx.Err(); err != nil {
@@ -889,20 +912,13 @@ func (s *S3ContentStore) ListAllContent(ctx context.Context) ([]metadata.Content
 				continue
 			}
 
-			// Remove prefix to get content ID
+			// Remove prefix to get content ID (which is the file path)
 			key := *obj.Key
 			if s.keyPrefix != "" && len(key) > len(s.keyPrefix) {
 				key = key[len(s.keyPrefix):]
 			}
 
-			// Decode hex to get original ContentID
-			idBytes, err := hex.DecodeString(key)
-			if err != nil {
-				// Skip invalid keys
-				continue
-			}
-
-			contentIDs = append(contentIDs, metadata.ContentID(idBytes))
+			contentIDs = append(contentIDs, metadata.ContentID(key))
 		}
 	}
 
@@ -972,17 +988,13 @@ func (s *S3ContentStore) DeleteBatch(ctx context.Context, ids []metadata.Content
 				continue
 			}
 
-			// Find the ContentID for this key
+			// Find the ContentID for this key (remove prefix to get path)
 			key := *deleteErr.Key
 			if s.keyPrefix != "" && len(key) > len(s.keyPrefix) {
 				key = key[len(s.keyPrefix):]
 			}
-			idBytes, err := hex.DecodeString(key)
-			if err != nil {
-				continue
-			}
 
-			id := metadata.ContentID(idBytes)
+			id := metadata.ContentID(key)
 			errMsg := "unknown error"
 			if deleteErr.Code != nil && deleteErr.Message != nil {
 				errMsg = fmt.Sprintf("%s: %s", *deleteErr.Code, *deleteErr.Message)

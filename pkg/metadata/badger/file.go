@@ -642,10 +642,11 @@ func (s *BadgerMetadataStore) Create(
 
 		// Type-specific initialization
 		if attr.Type == metadata.FileTypeRegular {
-			// Generate deterministic ContentID for regular files
-			contentPath := fullPath + ":content"
-			contentHandle, _ := generateFileHandle(parentData.ShareName, contentPath)
-			newAttr.ContentID = metadata.ContentID(handleToKey(contentHandle))
+			// Generate ContentID for regular files
+			// Format: shareName/path/to/file (e.g., "export/docs/report.pdf")
+			// This mirrors the filesystem structure in S3 for easy inspection and recovery
+			contentID := buildContentID(parentData.ShareName, fullPath)
+			newAttr.ContentID = metadata.ContentID(contentID)
 		} else {
 			newAttr.ContentID = ""
 		}
