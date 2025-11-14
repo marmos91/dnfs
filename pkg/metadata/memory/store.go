@@ -424,6 +424,49 @@ func (store *MemoryMetadataStore) buildFullPath(handle metadata.FileHandle, name
 	return builder.String()
 }
 
+// buildContentID constructs a ContentID from share name and full path.
+//
+// This creates a path-based ContentID suitable for S3 storage that:
+//   - Removes leading "/" from both shareName and path
+//   - Results in keys like "export/docs/report.pdf"
+//
+// This format enables:
+//   - Easy S3 bucket inspection (human-readable)
+//   - Metadata reconstruction from S3 (disaster recovery)
+//   - Simple migrations and backups
+//
+// Parameters:
+//   - shareName: The share/export name (e.g., "/export" or "export")
+//   - fullPath: Full path with leading "/" (e.g., "/docs/report.pdf")
+//
+// Returns:
+//   - string: ContentID in format "shareName/path" (e.g., "export/docs/report.pdf")
+//
+// Examples:
+//   - buildContentID("/export", "/file.txt") → "export/file.txt"
+//   - buildContentID("/export", "/docs/report.pdf") → "export/docs/report.pdf"
+//   - buildContentID("export", "/docs/report.pdf") → "export/docs/report.pdf"
+func buildContentID(shareName, fullPath string) string {
+	// Remove leading "/" from shareName
+	share := shareName
+	if len(share) > 0 && share[0] == '/' {
+		share = share[1:]
+	}
+
+	// Remove leading "/" from fullPath
+	path := fullPath
+	if len(path) > 0 && path[0] == '/' {
+		path = path[1:]
+	}
+
+	// Combine share with path
+	if len(path) == 0 {
+		return share
+	}
+
+	return share + "/" + path
+}
+
 // generateFileHandle creates a unique file handle using deterministic hashing.
 //
 // The handle generation uses SHA-256 hashing of the share name and file path,

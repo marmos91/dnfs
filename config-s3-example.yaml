@@ -23,6 +23,26 @@ server:
 # =============================================================================
 # Content Store Configuration - S3
 # =============================================================================
+#
+# S3 Path-Based Design:
+#   The S3 content store uses relative file paths as object keys, mirroring the
+#   filesystem structure in the S3 bucket. This enables:
+#     - Easy inspection of S3 contents (human-readable keys)
+#     - Metadata reconstruction from S3 (disaster recovery)
+#     - Simple migration and backup strategies
+#
+#   ContentID Format: "shareName/path/to/file"
+#     - Leading "/" removed from share name and path
+#     - No ":content" suffix
+#     - Share name included as root prefix
+#
+#   Example:
+#     Share Name: /export
+#     NFS Path: /export/documents/report.pdf
+#     ContentID: export/documents/report.pdf
+#     S3 Key: export/documents/report.pdf
+#     (or with prefix: dittofs/export/documents/report.pdf)
+#
 content:
   type: s3  # Use S3 content store
 
@@ -42,8 +62,8 @@ content:
     # -------------------------------------------------------------------------
 
     # Key prefix for all objects (optional)
-    # Useful for sharing bucket with other applications
-    # Example: "dittofs/" results in keys like "dittofs/abc123..."
+    # Useful for sharing bucket with other applications or namespacing
+    # Example: "dittofs/" results in keys like "dittofs/export/documents/report.pdf"
     key_prefix: ""
 
     # Custom endpoint for S3-compatible storage (optional)
