@@ -8,6 +8,7 @@ import (
 	"io"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -15,6 +16,31 @@ import (
 	"github.com/marmos91/dittofs/pkg/content"
 	"github.com/marmos91/dittofs/pkg/metadata"
 )
+
+// S3Metrics provides observability for S3 operations.
+//
+// Implementations can use this interface to collect metrics about S3 operations,
+// latency, throughput, and errors. This is optional - if not provided, metrics
+// collection is skipped.
+//
+// Example implementations:
+//   - Prometheus metrics
+//   - StatsD metrics
+//   - CloudWatch metrics
+//   - In-memory counters for testing
+type S3Metrics interface {
+	// ObserveOperation records an S3 operation with its duration and outcome
+	ObserveOperation(operation string, duration time.Duration, err error)
+
+	// RecordBytes records bytes transferred for read/write operations
+	RecordBytes(operation string, bytes int64)
+}
+
+// noopMetrics is a default no-op metrics implementation
+type noopMetrics struct{}
+
+func (noopMetrics) ObserveOperation(operation string, duration time.Duration, err error) {}
+func (noopMetrics) RecordBytes(operation string, bytes int64)                            {}
 
 // S3ContentStore implements ContentStore using Amazon S3 or S3-compatible storage.
 //
@@ -58,6 +84,17 @@ type S3ContentStore struct {
 	// Multipart upload state (per-instance)
 	uploadSessions   map[string]*multipartUpload
 	uploadSessionsMu sync.RWMutex
+
+	// Storage stats cache
+	statsCache struct {
+		stats     *content.StorageStats
+		timestamp time.Time
+		ttl       time.Duration
+		mu        sync.RWMutex
+	}
+
+	// Metrics
+	metrics S3Metrics
 }
 
 // S3ContentStoreConfig contains configuration for S3 content store.
@@ -75,6 +112,13 @@ type S3ContentStoreConfig struct {
 	// PartSize is the size of each part for multipart uploads (default: 10MB)
 	// Must be between 5MB and 5GB
 	PartSize int64
+
+	// StatsCacheTTL is the duration to cache storage stats (default: 5 minutes)
+	// Set to 0 to disable caching
+	StatsCacheTTL time.Duration
+
+	// Metrics is an optional metrics collector
+	Metrics S3Metrics
 }
 
 // NewS3ContentStore creates a new S3-based content store.
@@ -138,13 +182,31 @@ func NewS3ContentStore(ctx context.Context, cfg S3ContentStoreConfig) (*S3Conten
 		return nil, fmt.Errorf("failed to access bucket %q: %w", cfg.Bucket, err)
 	}
 
-	return &S3ContentStore{
+	// Set default stats cache TTL
+	statsCacheTTL := cfg.StatsCacheTTL
+	if statsCacheTTL == 0 {
+		statsCacheTTL = 5 * time.Minute // Default: 5 minutes
+	}
+
+	// Set default metrics (no-op if not provided)
+	metrics := cfg.Metrics
+	if metrics == nil {
+		metrics = noopMetrics{}
+	}
+
+	store := &S3ContentStore{
 		client:         cfg.Client,
 		bucket:         cfg.Bucket,
 		keyPrefix:      cfg.KeyPrefix,
 		partSize:       partSize,
 		uploadSessions: make(map[string]*multipartUpload),
-	}, nil
+		metrics:        metrics,
+	}
+
+	// Initialize stats cache
+	store.statsCache.ttl = statsCacheTTL
+
+	return store, nil
 }
 
 // getObjectKey returns the full S3 object key for a given content ID.
@@ -208,6 +270,11 @@ func (s *S3ContentStore) getObjectKey(id metadata.ContentID) string {
 //   - io.ReadCloser: Reader for the content (must be closed by caller)
 //   - error: Returns error if content not found, download fails, or context is cancelled
 func (s *S3ContentStore) ReadContent(ctx context.Context, id metadata.ContentID) (io.ReadCloser, error) {
+	start := time.Now()
+	defer func() {
+		s.metrics.ObserveOperation("ReadContent", time.Since(start), nil)
+	}()
+
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -222,12 +289,95 @@ func (s *S3ContentStore) ReadContent(ctx context.Context, id metadata.ContentID)
 		// Check if object doesn't exist
 		var notFound *types.NoSuchKey
 		if errors.As(err, &notFound) {
+			s.metrics.ObserveOperation("ReadContent", time.Since(start), content.ErrContentNotFound)
 			return nil, fmt.Errorf("content %s: %w", id, content.ErrContentNotFound)
 		}
+		s.metrics.ObserveOperation("ReadContent", time.Since(start), err)
 		return nil, fmt.Errorf("failed to get object from S3: %w", err)
 	}
 
-	return result.Body, nil
+	// Wrap the body to track bytes read
+	return &metricsReadCloser{
+		ReadCloser: result.Body,
+		metrics:    s.metrics,
+		operation:  "read",
+	}, nil
+}
+
+// ReadAt reads data from the specified offset without downloading the entire object.
+//
+// This uses S3 byte-range requests to efficiently read portions of large files.
+// This is significantly more efficient than downloading the entire file when only
+// a small portion is needed (e.g., NFS READ operations).
+//
+// Context Cancellation:
+// The S3 GetObject operation respects context cancellation.
+//
+// Parameters:
+//   - ctx: Context for cancellation and timeouts
+//   - id: Content identifier to read
+//   - p: Buffer to read into
+//   - offset: Byte offset to start reading from
+//
+// Returns:
+//   - n: Number of bytes read
+//   - error: Returns error if content not found, read fails, or context is cancelled
+//     Returns io.EOF if offset is at or beyond end of content
+func (s *S3ContentStore) ReadAt(ctx context.Context, id metadata.ContentID, p []byte, offset int64) (n int, err error) {
+	start := time.Now()
+	defer func() {
+		s.metrics.ObserveOperation("ReadAt", time.Since(start), err)
+		if n > 0 {
+			s.metrics.RecordBytes("read", int64(n))
+		}
+	}()
+
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+
+	if len(p) == 0 {
+		return 0, nil
+	}
+
+	key := s.getObjectKey(id)
+
+	// Build range request: "bytes=offset-end"
+	// S3 range is inclusive, so end = offset + len(p) - 1
+	end := offset + int64(len(p)) - 1
+	rangeStr := fmt.Sprintf("bytes=%d-%d", offset, end)
+
+	result, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(key),
+		Range:  aws.String(rangeStr),
+	})
+	if err != nil {
+		// Check if object doesn't exist
+		var notFound *types.NoSuchKey
+		if errors.As(err, &notFound) {
+			return 0, fmt.Errorf("content %s: %w", id, content.ErrContentNotFound)
+		}
+
+		// S3 returns InvalidRange error code in the error string for invalid ranges
+		// This typically happens when offset is beyond the file size
+		if err.Error() != "" && (errors.Is(err, io.EOF) || err.Error() == "InvalidRange") {
+			return 0, io.EOF
+		}
+
+		return 0, fmt.Errorf("failed to read from S3: %w", err)
+	}
+	defer result.Body.Close()
+
+	// Read the data
+	n, err = io.ReadFull(result.Body, p)
+	if err == io.ErrUnexpectedEOF {
+		// This happens if the object is smaller than requested range
+		// Return what we got and no error (like io.ReaderAt)
+		return n, nil
+	}
+
+	return n, err
 }
 
 // GetContentSize returns the size of the content in bytes.
@@ -324,10 +474,25 @@ func (s *S3ContentStore) ContentExists(ctx context.Context, id metadata.ContentI
 //   - *content.StorageStats: Storage statistics
 //   - error: Returns error for S3 failures or context cancellation
 func (s *S3ContentStore) GetStorageStats(ctx context.Context) (*content.StorageStats, error) {
+	start := time.Now()
+	defer func() {
+		s.metrics.ObserveOperation("GetStorageStats", time.Since(start), nil)
+	}()
+
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
+	// Check cache first
+	s.statsCache.mu.RLock()
+	if s.statsCache.stats != nil && time.Since(s.statsCache.timestamp) < s.statsCache.ttl {
+		cached := s.statsCache.stats
+		s.statsCache.mu.RUnlock()
+		return cached, nil
+	}
+	s.statsCache.mu.RUnlock()
+
+	// Cache miss or expired - compute stats
 	var totalSize uint64
 	var objectCount uint64
 
@@ -339,11 +504,13 @@ func (s *S3ContentStore) GetStorageStats(ctx context.Context) (*content.StorageS
 
 	for paginator.HasMorePages() {
 		if err := ctx.Err(); err != nil {
+			s.metrics.ObserveOperation("GetStorageStats", time.Since(start), err)
 			return nil, err
 		}
 
 		page, err := paginator.NextPage(ctx)
 		if err != nil {
+			s.metrics.ObserveOperation("GetStorageStats", time.Since(start), err)
 			return nil, fmt.Errorf("failed to list objects: %w", err)
 		}
 
@@ -363,13 +530,21 @@ func (s *S3ContentStore) GetStorageStats(ctx context.Context) (*content.StorageS
 		averageSize = totalSize / objectCount
 	}
 
-	return &content.StorageStats{
+	stats := &content.StorageStats{
 		TotalSize:     maxUint64,
 		UsedSize:      totalSize,
 		AvailableSize: maxUint64,
 		ContentCount:  objectCount,
 		AverageSize:   averageSize,
-	}, nil
+	}
+
+	// Update cache
+	s.statsCache.mu.Lock()
+	s.statsCache.stats = stats
+	s.statsCache.timestamp = time.Now()
+	s.statsCache.mu.Unlock()
+
+	return stats, nil
 }
 
 // ============================================================================
@@ -626,8 +801,18 @@ func (s *S3ContentStore) WriteContent(ctx context.Context, id metadata.ContentID
 
 // OpenWriter returns a writer for streaming content writes.
 //
-// The returned writer buffers data in memory and uploads to S3 when closed.
-// For very large files, consider using multipart uploads instead.
+// The returned writer uses multipart uploads for large files to avoid buffering
+// the entire content in memory. Data is uploaded in parts as it's written, with
+// automatic part management.
+//
+// Write Behavior:
+//   - Small writes are buffered until partSize is reached
+//   - Once a part is full, it's uploaded to S3 in the background
+//   - Close() finalizes the multipart upload or does a simple PutObject for small content
+//
+// Memory Usage:
+//   - Maximum memory = ~2x partSize (one buffer filling, one uploading)
+//   - Default partSize = 10MB, so ~20MB max memory per writer
 //
 // Parameters:
 //   - ctx: Context for cancellation and timeouts
@@ -638,10 +823,11 @@ func (s *S3ContentStore) WriteContent(ctx context.Context, id metadata.ContentID
 //   - error: Returns error if writer cannot be created
 func (s *S3ContentStore) OpenWriter(ctx context.Context, id metadata.ContentID) (io.WriteCloser, error) {
 	return &s3Writer{
-		store:  s,
-		ctx:    ctx,
-		id:     id,
-		buffer: &bytes.Buffer{},
+		store:    s,
+		ctx:      ctx,
+		id:       id,
+		buffer:   &bytes.Buffer{},
+		partSize: s.partSize,
 	}, nil
 }
 
@@ -661,19 +847,119 @@ func (s *S3ContentStore) OpenReader(ctx context.Context, id metadata.ContentID) 
 }
 
 // s3Writer implements io.WriteCloser for streaming writes to S3.
+// It automatically uses multipart uploads for large files.
 type s3Writer struct {
-	store  *S3ContentStore
-	ctx    context.Context
-	id     metadata.ContentID
-	buffer *bytes.Buffer
+	store      *S3ContentStore
+	ctx        context.Context
+	id         metadata.ContentID
+	buffer     *bytes.Buffer
+	partSize   int64
+	uploadID   string
+	partNum    int
+	totalBytes int64
+	err        error
 }
 
 func (w *s3Writer) Write(p []byte) (n int, err error) {
-	return w.buffer.Write(p)
+	if w.err != nil {
+		return 0, w.err
+	}
+
+	n, err = w.buffer.Write(p)
+	if err != nil {
+		w.err = err
+		return n, err
+	}
+
+	w.totalBytes += int64(n)
+
+	// If buffer has reached partSize, upload a part
+	if int64(w.buffer.Len()) >= w.partSize {
+		if err := w.uploadPart(); err != nil {
+			w.err = err
+			return n, err
+		}
+	}
+
+	return n, nil
+}
+
+func (w *s3Writer) uploadPart() error {
+	if w.buffer.Len() == 0 {
+		return nil
+	}
+
+	// Start multipart upload on first part
+	if w.uploadID == "" {
+		uploadID, err := w.store.BeginMultipartUpload(w.ctx, w.id)
+		if err != nil {
+			return fmt.Errorf("failed to begin multipart upload: %w", err)
+		}
+		w.uploadID = uploadID
+	}
+
+	w.partNum++
+	data := w.buffer.Bytes()
+
+	// Upload the part
+	if err := w.store.UploadPart(w.ctx, w.id, w.uploadID, w.partNum, data); err != nil {
+		// Abort the multipart upload on error
+		w.store.AbortMultipartUpload(context.Background(), w.id, w.uploadID)
+		return fmt.Errorf("failed to upload part %d: %w", w.partNum, err)
+	}
+
+	// Record metrics
+	w.store.metrics.RecordBytes("write", int64(len(data)))
+
+	// Clear buffer for next part
+	w.buffer.Reset()
+
+	return nil
 }
 
 func (w *s3Writer) Close() error {
-	return w.store.WriteContent(w.ctx, w.id, w.buffer.Bytes())
+	start := time.Now()
+	defer func() {
+		w.store.metrics.ObserveOperation("OpenWriter.Close", time.Since(start), w.err)
+	}()
+
+	if w.err != nil {
+		// If there was an error during writes, abort any in-progress upload
+		if w.uploadID != "" {
+			w.store.AbortMultipartUpload(context.Background(), w.id, w.uploadID)
+		}
+		return w.err
+	}
+
+	// If we never started a multipart upload, use simple PutObject
+	if w.uploadID == "" {
+		data := w.buffer.Bytes()
+		if err := w.store.WriteContent(w.ctx, w.id, data); err != nil {
+			return err
+		}
+		w.store.metrics.RecordBytes("write", int64(len(data)))
+		return nil
+	}
+
+	// Upload final part if there's remaining data
+	if w.buffer.Len() > 0 {
+		if err := w.uploadPart(); err != nil {
+			return err
+		}
+	}
+
+	// Complete the multipart upload
+	partNumbers := make([]int, w.partNum)
+	for i := 0; i < w.partNum; i++ {
+		partNumbers[i] = i + 1
+	}
+
+	if err := w.store.CompleteMultipartUpload(w.ctx, w.id, w.uploadID, partNumbers); err != nil {
+		w.store.AbortMultipartUpload(context.Background(), w.id, w.uploadID)
+		return fmt.Errorf("failed to complete multipart upload: %w", err)
+	}
+
+	return nil
 }
 
 // ============================================================================
@@ -685,6 +971,29 @@ type multipartUpload struct {
 	uploadID       string
 	completedParts []types.CompletedPart
 	mu             sync.Mutex
+}
+
+// metricsReadCloser wraps an io.ReadCloser to track bytes read
+type metricsReadCloser struct {
+	io.ReadCloser
+	metrics   S3Metrics
+	operation string
+	bytesRead int64
+}
+
+func (m *metricsReadCloser) Read(p []byte) (n int, err error) {
+	n, err = m.ReadCloser.Read(p)
+	if n > 0 {
+		m.bytesRead += int64(n)
+	}
+	return n, err
+}
+
+func (m *metricsReadCloser) Close() error {
+	if m.bytesRead > 0 {
+		m.metrics.RecordBytes(m.operation, m.bytesRead)
+	}
+	return m.ReadCloser.Close()
 }
 
 // BeginMultipartUpload initiates a multipart upload session.
