@@ -42,11 +42,11 @@ func TestValidate_InvalidLogFormat(t *testing.T) {
 
 func TestValidate_InvalidContentType(t *testing.T) {
 	cfg := GetDefaultConfig()
-	cfg.Content.Type = "s3"
+	cfg.Content.Type = "invalid"
 
 	err := Validate(cfg)
 	if err == nil {
-		t.Fatal("Expected validation error for unimplemented content type")
+		t.Fatal("Expected validation error for invalid content type")
 	}
 }
 

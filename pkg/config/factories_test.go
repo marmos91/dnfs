@@ -60,7 +60,7 @@ func TestCreateContentStore_Memory(t *testing.T) {
 func TestCreateContentStore_UnknownType(t *testing.T) {
 	ctx := context.Background()
 	cfg := &ContentConfig{
-		Type: "s3",
+		Type: "unknown",
 	}
 
 	_, err := CreateContentStore(ctx, cfg)

@@ -262,6 +262,11 @@ func readConfigFile(v *viper.Viper, configPath string) error {
 			// Config file not found is acceptable - use defaults
 			return nil
 		}
+		// Also check for os.PathError when explicit config file doesn't exist
+		if os.IsNotExist(err) {
+			// Config file not found is acceptable - use defaults
+			return nil
+		}
 		// Other errors are problems
 		return fmt.Errorf("failed to read config file: %w", err)
 	}
