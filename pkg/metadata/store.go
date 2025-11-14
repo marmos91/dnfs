@@ -31,6 +31,44 @@ import (
 //   - Flexible content storage backends (local disk, S3, distributed storage)
 //   - Safe handling of hard links (content persists until all links removed)
 //
+// File Handle Implementation Strategy:
+//
+// Implementations MUST use path-based file handles to enable filesystem import/export
+// and metadata reconstruction from content stores. The recommended format is:
+//
+//	Format: "shareName:fullPath"
+//	Example: []byte("/export:/images/photo.jpg")
+//
+// This path-based approach provides:
+//   - Determinism: Same path always generates the same handle
+//   - Reversibility: Path can be extracted from handle for import/export
+//   - Stability: Handles remain stable across server restarts
+//   - Human-readable: Easy to debug and inspect
+//   - Import-ready: Enables future filesystem import features
+//
+// For implementations requiring NFS compatibility (64-byte handle limit), consider
+// a hybrid approach:
+//   - Path-based format for short paths (≤ 64 bytes)
+//   - Hash-based fallback with reverse mapping for long paths
+//
+// See pkg/metadata/badger/handle.go for a reference implementation of the hybrid
+// approach with automatic fallback for long paths.
+//
+// File ID Generation:
+//
+// Protocol handlers may need to convert FileHandle ([]byte) to uint64 file IDs
+// for directory listings. Use FNV-1a hashing for consistent results:
+//
+//	func fileHandleToID(handle FileHandle) uint64 {
+//	    const offset64, prime64 = 14695981039346656037, 1099511628211
+//	    hash := uint64(offset64)
+//	    for _, b := range handle {
+//	        hash ^= uint64(b)
+//	        hash *= prime64
+//	    }
+//	    return hash
+//	}
+//
 // Design Principles:
 //   - Protocol-agnostic: No NFS/SMB/FTP-specific types or values
 //   - Consistent error handling: All operations return StoreError for business logic errors

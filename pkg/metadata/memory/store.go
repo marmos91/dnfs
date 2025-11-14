@@ -2,7 +2,6 @@ package memory
 
 import (
 	"crypto/sha256"
-	"encoding/binary"
 	"sort"
 	"strings"
 	"sync"
@@ -87,16 +86,19 @@ type deviceNumber struct {
 //
 // Handle Generation:
 //
-// File handles are generated using UUIDs (Universally Unique Identifiers).
-// This approach ensures:
-//   - Uniqueness: UUIDs provide statistically guaranteed uniqueness
-//   - Unpredictability: Random generation makes handles non-guessable
-//   - Fixed size: All handles are exactly 16 bytes (128 bits)
-//   - Stability: Handles don't change once assigned to a file
-//   - Stateless: No counters or seeds to maintain, serialize, or manage
+// File handles are generated using path-based identifiers in the format:
+// "shareName:fullPath" (e.g., "/export:/images/photo.jpg").
 //
-// The UUID approach is standard, well-understood, and eliminates the need
-// for any handle generation state in the store.
+// This approach ensures:
+//   - Determinism: Same path always generates the same handle
+//   - Reversibility: Path can be extracted from handle for import/export
+//   - Stability: Handles remain stable across server restarts
+//   - Human-readable: Easy to debug and inspect
+//   - Import-ready: Enables future filesystem import features
+//
+// The path-based approach matches the BadgerDB metadata store implementation,
+// ensuring consistent behavior across all metadata store backends. This
+// consistency is critical for implementing metadata import/export features.
 //
 // Consistency Guarantees:
 //
@@ -431,67 +433,77 @@ func buildContentID(shareName, fullPath string) string {
 	return internal.BuildContentID(shareName, fullPath)
 }
 
-// generateFileHandle creates a unique file handle using deterministic hashing.
+// generateFileHandle creates a deterministic file handle from a share name and path.
 //
-// The handle generation uses SHA-256 hashing of the share name and file path,
-// which provides:
+// This function implements a hybrid handle generation strategy, choosing between
+// path-based and hash-based formats depending on the total length:
 //
-// Determinism:
-// The same share/path combination always produces the same handle. This ensures
-// file handles remain stable across server restarts, allowing clients to cache
-// handles and continue operations without remounting.
+// Path-Based (Primary) - For paths that fit in NFS limit:
 //
-// Uniqueness:
-// SHA-256 provides cryptographic collision resistance, ensuring that different
-// paths produce different handles. The probability of collision is negligible.
+//	Format: "shareName:fullPath"
+//	Example: "/export:/images/photo.jpg" → []byte("/export:/images/photo.jpg")
+//	Size: Variable, typically 20-50 bytes
+//	Used when: len(shareName + ":" + fullPath) <= 64 bytes
 //
-// Fixed Size:
-// All handles are exactly 16 bytes (128 bits), using the first 16 bytes of the
-// SHA-256 hash, which provides:
-//   - Consistent memory usage
-//   - Predictable network serialization
-//   - Sufficient space for collision-free operation
+// Hash-Based (Fallback) - For very long paths exceeding NFS limit:
 //
-// Stability:
-// Handles are stable across server restarts as long as:
-//   - The same synthetic file structure is created
-//   - Files are created in the same order with the same paths
-//   - The share names remain consistent
+//	Format: "H:" + sha256(shareName:fullPath)[:30]
+//	Example: "/export:/very/long/path..." → []byte("H:" + hash[:30])
+//	Size: Fixed 32 bytes (2 byte prefix + 30 bytes hash)
+//	Used when: len(shareName + ":" + fullPath) > 64 bytes
 //
-// Protocol Compatibility:
-// The 16-byte size works well with file sharing protocols:
-//   - NFS: Supports variable-length file handles up to 64 bytes
-//   - SMB: Uses 8-byte file IDs (we extract from first 8 bytes)
+// This hybrid approach provides:
+//   - Direct path extraction for import/export (when using path-based)
+//   - NFS compatibility (max 64 bytes per RFC 1813)
+//   - Graceful handling of edge cases (very long filenames)
+//   - Deterministic generation (reproducible across restarts)
 //
 // Parameters:
 //   - shareName: The share name this file belongs to
 //   - fullPath: The full path of the file within the share (e.g., "/images/photo.jpg")
 //
 // Returns:
-//   - FileHandle: A deterministic 16-byte file handle
+//   - FileHandle: A deterministic file handle (path-based or hash-based)
 func (store *MemoryMetadataStore) generateFileHandle(shareName, fullPath string) metadata.FileHandle {
-	// Create a deterministic handle by hashing the share name and full path
-	// This ensures the same file always gets the same handle across restarts
-	h := sha256.New()
-	h.Write([]byte(shareName))
-	h.Write([]byte(":"))
-	h.Write([]byte(fullPath))
-	hash := h.Sum(nil)
+	const (
+		// maxNFSHandleSize is the maximum file handle size supported by NFSv3 (RFC 1813)
+		maxNFSHandleSize = 64
+		// hashPrefixSize is the size of the "H:" prefix for hash-based handles
+		hashPrefixSize = 2
+		// hashHandleDataSize is the number of hash bytes included in hash-based handles
+		hashHandleDataSize = 30
+		// hashHandlePrefix identifies hash-based handles
+		hashHandlePrefix = "H:"
+	)
 
-	// Use first 16 bytes of the hash as the handle
-	return hash[:16]
+	// Construct the path-based handle format
+	pathBased := shareName + ":" + fullPath
+
+	// If it fits in the NFS limit, use path-based format (preferred)
+	if len(pathBased) <= maxNFSHandleSize {
+		return metadata.FileHandle([]byte(pathBased))
+	}
+
+	// For long paths, use hash-based format
+	// Format: "H:" + sha256(pathBased)[:30]
+	h := sha256.Sum256([]byte(pathBased))
+	handle := make([]byte, hashPrefixSize+hashHandleDataSize)
+	copy(handle, []byte(hashHandlePrefix))
+	copy(handle[hashPrefixSize:], h[:hashHandleDataSize])
+
+	return metadata.FileHandle(handle)
 }
 
 // extractFileIDFromHandle derives a 64-bit file ID from a file handle.
 //
 // Some protocols (like NFS and SMB) require numeric file IDs in addition to
-// or instead of opaque file handles. This function extracts a stable 64-bit
-// identifier from the first 8 bytes of the handle.
+// or instead of opaque file handles. This function computes a stable 64-bit
+// identifier from the handle using FNV-1a hashing.
 //
 // Properties:
 //   - Stable: Same handle always produces the same file ID
-//   - Unique: Different handles (almost certainly) produce different IDs
-//   - Efficient: Simple byte extraction, no computation required
+//   - Unique: Different handles produce different IDs (with high probability)
+//   - Efficient: Fast non-cryptographic hash
 //
 // The file ID is used for:
 //   - Directory entry listings (NFS READDIR, SMB directory queries)
@@ -501,16 +513,30 @@ func (store *MemoryMetadataStore) generateFileHandle(shareName, fullPath string)
 // Note: File IDs are not guaranteed to be sequential or have any particular
 // ordering. They are simply unique identifiers derived from handles.
 //
+// This matches the approach used in badger/handle.go:fileHandleToID to ensure
+// consistent file IDs across different metadata store implementations.
+//
 // Parameters:
-//   - handle: The file handle to extract from
+//   - handle: The file handle to compute ID from
 //
 // Returns:
-//   - uint64: The extracted file ID, or 0 if handle is too short
+//   - uint64: The computed file ID, or 0 if handle is empty
 func extractFileIDFromHandle(handle metadata.FileHandle) uint64 {
-	if len(handle) < 8 {
+	if len(handle) == 0 {
 		return 0
 	}
-	return binary.BigEndian.Uint64(handle[:8])
+
+	// FNV-1a hash (same as badger implementation)
+	const offset64 = 14695981039346656037
+	const prime64 = 1099511628211
+
+	hash := uint64(offset64)
+	for _, b := range handle {
+		hash ^= uint64(b)
+		hash *= prime64
+	}
+
+	return hash
 }
 
 // copyFileAttr creates a copy of FileAttr using the sync.Pool for efficiency.
