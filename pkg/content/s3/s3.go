@@ -153,15 +153,17 @@ func NewS3ContentStore(ctx context.Context, cfg S3ContentStoreConfig) (*S3Conten
 //   - Human-readable S3 bucket structure
 //
 // ContentID Format:
-//   The metadata store generates ContentID as: "shareName/path/to/file"
-//   - No leading "/" (relative path)
-//   - No ":content" suffix
-//   - Share name included as root prefix
+//
+//	The metadata store generates ContentID as: "shareName/path/to/file"
+//	- No leading "/" (relative path)
+//	- No ":content" suffix
+//	- Share name included as root prefix
 //
 // Example:
-//   ContentID:  "export/documents/report.pdf"
-//   Key Prefix: "dittofs/"
-//   S3 Key:     "dittofs/export/documents/report.pdf"
+//
+//	ContentID:  "export/documents/report.pdf"
+//	Key Prefix: "dittofs/"
+//	S3 Key:     "dittofs/export/documents/report.pdf"
 //
 // Parameters:
 //   - id: Content identifier (share-relative path)
