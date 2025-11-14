@@ -2,10 +2,17 @@ package config
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsConfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/marmos91/dittofs/internal/logger"
 	"github.com/marmos91/dittofs/pkg/content"
 	contentFs "github.com/marmos91/dittofs/pkg/content/fs"
+	contentS3 "github.com/marmos91/dittofs/pkg/content/s3"
 	"github.com/marmos91/dittofs/pkg/metadata"
 	"github.com/marmos91/dittofs/pkg/metadata/badger"
 	"github.com/marmos91/dittofs/pkg/metadata/memory"
@@ -21,6 +28,7 @@ import (
 // Supported types:
 //   - "filesystem": Uses pkg/content/fs (local filesystem storage)
 //   - "memory": Uses in-memory storage (future implementation)
+//   - "s3": Uses pkg/content/s3 (Amazon S3 or compatible storage)
 //
 // Parameters:
 //   - ctx: Context for initialization operations
@@ -35,6 +43,8 @@ func CreateContentStore(ctx context.Context, cfg *ContentConfig) (content.Writab
 		return createFilesystemContentStore(ctx, cfg.Filesystem)
 	case "memory":
 		return nil, fmt.Errorf("memory content store is not available - use 'filesystem' instead (planned for future release)")
+	case "s3":
+		return createS3ContentStore(ctx, cfg.S3)
 	default:
 		return nil, fmt.Errorf("unknown content store type: %q", cfg.Type)
 	}
@@ -63,6 +73,104 @@ func createFilesystemContentStore(ctx context.Context, options map[string]any) (
 	if err != nil {
 		return nil, fmt.Errorf("failed to create filesystem content store: %w", err)
 	}
+
+	return store, nil
+}
+
+// createS3ContentStore creates an S3-based content store.
+func createS3ContentStore(ctx context.Context, options map[string]any) (content.WritableContentStore, error) {
+	// Define the configuration struct for S3 content store
+	type S3ContentStoreConfig struct {
+		Region          string `mapstructure:"region"`
+		Bucket          string `mapstructure:"bucket"`
+		KeyPrefix       string `mapstructure:"key_prefix"`
+		Endpoint        string `mapstructure:"endpoint"`
+		AccessKeyID     string `mapstructure:"access_key_id"`
+		SecretAccessKey string `mapstructure:"secret_access_key"`
+		PartSize        int64  `mapstructure:"part_size"`
+	}
+
+	// Decode the options into the config struct
+	var storeCfg S3ContentStoreConfig
+	if err := mapstructure.Decode(options, &storeCfg); err != nil {
+		return nil, fmt.Errorf("failed to decode S3 content store config: %w", err)
+	}
+
+	// Validate required fields
+	if storeCfg.Bucket == "" {
+		return nil, fmt.Errorf("S3 content store: bucket is required")
+	}
+
+	if storeCfg.Region == "" {
+		return nil, fmt.Errorf("S3 content store: region is required")
+	}
+
+	// ========================================================================
+	// Step 1: Build AWS Config
+	// ========================================================================
+
+	var configOptions []func(*awsConfig.LoadOptions) error
+
+	// Set region
+	configOptions = append(configOptions, awsConfig.WithRegion(storeCfg.Region))
+
+	// Set custom endpoint if provided (for MinIO, Localstack, etc.)
+	if storeCfg.Endpoint != "" {
+		customResolver := aws.EndpointResolverWithOptionsFunc(
+			func(service, region string, options ...interface{}) (aws.Endpoint, error) {
+				return aws.Endpoint{
+					URL:               storeCfg.Endpoint,
+					HostnameImmutable: true,
+					Source:            aws.EndpointSourceCustom,
+				}, nil
+			},
+		)
+		configOptions = append(configOptions, awsConfig.WithEndpointResolverWithOptions(customResolver))
+	}
+
+	// Set credentials if provided, otherwise use default credential chain
+	if storeCfg.AccessKeyID != "" && storeCfg.SecretAccessKey != "" {
+		credProvider := credentials.NewStaticCredentialsProvider(
+			storeCfg.AccessKeyID,
+			storeCfg.SecretAccessKey,
+			"", // session token (empty for static credentials)
+		)
+		configOptions = append(configOptions, awsConfig.WithCredentialsProvider(credProvider))
+	}
+
+	// Load AWS config
+	cfg, err := awsConfig.LoadDefaultConfig(ctx, configOptions...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load AWS config: %w", err)
+	}
+
+	// ========================================================================
+	// Step 2: Create S3 Client
+	// ========================================================================
+
+	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
+		// Force path-style addressing for compatibility with MinIO/Localstack
+		if storeCfg.Endpoint != "" {
+			o.UsePathStyle = true
+		}
+	})
+
+	// ========================================================================
+	// Step 3: Create S3 Content Store
+	// ========================================================================
+
+	store, err := contentS3.NewS3ContentStore(ctx, contentS3.S3ContentStoreConfig{
+		Client:    client,
+		Bucket:    storeCfg.Bucket,
+		KeyPrefix: storeCfg.KeyPrefix,
+		PartSize:  storeCfg.PartSize,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create S3 content store: %w", err)
+	}
+
+	logger.Info("S3 content store initialized: bucket=%s, region=%s, prefix=%s",
+		storeCfg.Bucket, storeCfg.Region, storeCfg.KeyPrefix)
 
 	return store, nil
 }
@@ -205,12 +313,76 @@ func CreateShares(ctx context.Context, store metadata.MetadataStore, shares []Sh
 			Size: 4096, // Standard directory size
 		}
 
-		// Add the share
+		// Add the share (idempotent - skip if already exists)
 		if err := store.AddShare(ctx, shareCfg.Name, options, rootAttr); err != nil {
+			// Check if the share already exists (expected on server restart with persistent metadata)
+			var storeErr *metadata.StoreError
+			if errors.As(err, &storeErr) && storeErr.Code == metadata.ErrAlreadyExists {
+				logger.Info("Share %q already exists, skipping creation", shareCfg.Name)
+				continue
+			}
+			// Any other error is a real problem
 			return fmt.Errorf("failed to add share[%d] %q: %w", i, shareCfg.Name, err)
+		}
+
+		logger.Info("Created share: %s", shareCfg.Name)
+	}
+
+	// Log actual share configurations from metadata store for verification
+	if err := logShareConfigurations(ctx, store, shares); err != nil {
+		logger.Warn("Failed to log share configurations: %v", err)
+	}
+
+	return nil
+}
+
+// logShareConfigurations queries and logs the actual share configurations from the metadata store.
+//
+// This helps verify that the shares are configured as expected, especially when shares
+// already exist and were skipped during creation.
+func logShareConfigurations(ctx context.Context, store metadata.MetadataStore, shares []ShareConfig) error {
+	logger.Info("=== Active Share Configurations ===")
+
+	for _, shareCfg := range shares {
+		// Query the actual share from metadata store
+		share, err := store.FindShare(ctx, shareCfg.Name)
+		if err != nil {
+			logger.Warn("Failed to query share %q: %v", shareCfg.Name, err)
+			continue
+		}
+
+		// Get the root directory attributes
+		rootHandle, err := store.GetShareRoot(ctx, shareCfg.Name)
+		if err != nil {
+			logger.Warn("Failed to get root handle for share %q: %v", shareCfg.Name, err)
+			continue
+		}
+
+		rootAttr, err := store.GetFile(ctx, rootHandle)
+		if err != nil {
+			logger.Warn("Failed to get root attributes for share %q: %v", shareCfg.Name, err)
+			continue
+		}
+
+		// Log share configuration details
+		logger.Info("Share: %s", share.Name)
+		logger.Info("  Read-Only: %v", share.Options.ReadOnly)
+		logger.Info("  Root Directory: uid=%d gid=%d mode=%04o", rootAttr.UID, rootAttr.GID, rootAttr.Mode)
+
+		if share.Options.IdentityMapping != nil {
+			logger.Info("  Identity Mapping:")
+			logger.Info("    - All Squash (map_all_to_anonymous): %v", share.Options.IdentityMapping.MapAllToAnonymous)
+			logger.Info("    - Root Squash (map_privileged_to_anonymous): %v", share.Options.IdentityMapping.MapPrivilegedToAnonymous)
+			if share.Options.IdentityMapping.AnonymousUID != nil {
+				logger.Info("    - Anonymous UID: %d", *share.Options.IdentityMapping.AnonymousUID)
+			}
+			if share.Options.IdentityMapping.AnonymousGID != nil {
+				logger.Info("    - Anonymous GID: %d", *share.Options.IdentityMapping.AnonymousGID)
+			}
 		}
 	}
 
+	logger.Info("==================================")
 	return nil
 }
 
