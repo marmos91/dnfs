@@ -55,9 +55,12 @@ adapters:
 // TestLoad_WithOverrides removed - we only support environment variable overrides now
 
 func TestLoad_NoConfigFile(t *testing.T) {
-	// Try to load with empty path (uses default location which might not exist)
-	// This should use defaults and not error
-	cfg, err := Load("")
+	// Use a temporary directory with a non-existent config file path
+	// This ensures we don't load the user's config from ~/.config/dittofs/
+	tmpDir := t.TempDir()
+	nonExistentPath := filepath.Join(tmpDir, "nonexistent.yaml")
+
+	cfg, err := Load(nonExistentPath)
 	if err != nil {
 		t.Fatalf("Expected no error with missing config file, got: %v", err)
 	}
