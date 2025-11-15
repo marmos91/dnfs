@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -176,22 +177,14 @@ func runStart() {
 			Port: cfg.Server.Metrics.Port,
 		})
 
-		metricsReady := make(chan error, 1)
 		go func() {
-			err := metricsServer.Start(ctx)
-			metricsReady <- err
-			if err != nil && err != context.Canceled {
+			if err := metricsServer.Start(ctx); err != nil && !errors.Is(err, context.Canceled) {
 				logger.Error("Metrics server error: %v", err)
 			}
 		}()
 
-		// Wait for metrics server to signal readiness
-		if err := <-metricsReady; err != nil && err != context.Canceled {
-			log.Fatalf("Failed to start metrics server: %v", err)
-		} else {
-			logger.Info("Metrics server started on port %d", cfg.Server.Metrics.Port)
-			logger.Info("Metrics available at: http://localhost:%d/metrics", cfg.Server.Metrics.Port)
-		}
+		logger.Info("Metrics server starting on port %d", cfg.Server.Metrics.Port)
+		logger.Info("Metrics will be available at: http://localhost:%d/metrics", cfg.Server.Metrics.Port)
 	} else {
 		logger.Debug("Metrics collection disabled")
 	}
@@ -250,6 +243,17 @@ func runStart() {
 
 	logger.Info("Server is running. Press Ctrl+C to stop.")
 
+	// Helper function to stop metrics server before exit
+	stopMetricsServer := func() {
+		if metricsServer != nil {
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.Server.ShutdownTimeout)
+			defer shutdownCancel()
+			if err := metricsServer.Stop(shutdownCtx); err != nil {
+				logger.Error("Metrics server shutdown error: %v", err)
+			}
+		}
+	}
+
 	select {
 	case <-sigChan:
 		signal.Stop(sigChan) // Stop signal notification immediately after receiving signal
@@ -259,36 +263,23 @@ func runStart() {
 		// Wait for server to shut down gracefully
 		if err := <-serverDone; err != nil {
 			logger.Error("Server shutdown error: %v", err)
+			stopMetricsServer()
 			os.Exit(1)
 		}
 		logger.Info("Server stopped gracefully")
-
-		// Stop metrics server if running
-		if metricsServer != nil {
-			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.Server.ShutdownTimeout)
-			defer shutdownCancel()
-			if err := metricsServer.Stop(shutdownCtx); err != nil {
-				logger.Error("Metrics server shutdown error: %v", err)
-			}
-		}
 
 	case err := <-serverDone:
 		signal.Stop(sigChan) // Stop signal notification when server stops
 		if err != nil {
 			logger.Error("Server error: %v", err)
+			stopMetricsServer()
 			os.Exit(1)
 		}
 		logger.Info("Server stopped")
-
-		// Stop metrics server if running
-		if metricsServer != nil {
-			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.Server.ShutdownTimeout)
-			defer shutdownCancel()
-			if err := metricsServer.Stop(shutdownCtx); err != nil {
-				logger.Error("Metrics server shutdown error: %v", err)
-			}
-		}
 	}
+
+	// Stop metrics server if running (common for both paths)
+	stopMetricsServer()
 }
 
 // getConfigSource returns a description of where the config was loaded from

@@ -129,7 +129,7 @@ SIGINT/SIGTERM → Cancel Context → Close Listener → Wait (up to timeout) �
 ### Connection Pooling & Performance
 
 - **Buffer Pooling**: Three-tier `sync.Pool` (4KB/64KB/1MB) reduces allocations by ~90%
-- **Lock-Free Tracking**: `sync.Map` for connection registry (better than mutex under high churn)
+- **Concurrent-Safe Tracking**: `sync.Map` for connection registry (optimized for high churn scenarios)
 - **Goroutine-Per-Connection**: Correct model for stateful NFS protocol
 - **Zero-Copy Operations**: Procedure data references pooled buffers directly
 - **Optimized Accept Loop**: Minimal select overhead in hot path
@@ -145,7 +145,7 @@ Optional metrics collection with zero overhead when disabled:
 - Active connection gauge
 - Connection lifecycle counters (accepted/closed/force-closed)
 
-Metrics exposed on port 9090 at `/metrics` endpoint.
+Metrics exposed on port 9090 at the `/metrics` endpoint.
 
 ## Architecture
 

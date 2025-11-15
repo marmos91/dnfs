@@ -97,7 +97,7 @@ type NFSAdapter struct {
 
 	// activeConnections tracks all active TCP connections for forced closure
 	// Maps connection remote address (string) to net.Conn for forced shutdown
-	// Uses sync.Map for lock-free concurrent access (better performance under high churn)
+	// Uses sync.Map for concurrent-safe access optimized for high churn scenarios
 	activeConnections sync.Map
 
 	// listenerReady is closed when the listener is ready to accept connections
@@ -264,7 +264,7 @@ func New(config NFSConfig, nfsMetrics metrics.NFSMetrics) *NFSAdapter {
 
 	// Use no-op metrics if none provided
 	if nfsMetrics == nil {
-		nfsMetrics = &noopNFSMetrics{}
+		nfsMetrics = metrics.NewNoopNFSMetrics()
 	}
 
 	return &NFSAdapter{
@@ -280,18 +280,6 @@ func New(config NFSConfig, nfsMetrics metrics.NFSMetrics) *NFSAdapter {
 		// activeConnections is initialized as zero-value sync.Map (ready to use)
 	}
 }
-
-// noopNFSMetrics provides a local no-op implementation when metrics package is not used
-type noopNFSMetrics struct{}
-
-func (noopNFSMetrics) RecordRequest(procedure string, duration time.Duration, err error) {}
-func (noopNFSMetrics) RecordRequestStart(procedure string)                               {}
-func (noopNFSMetrics) RecordRequestEnd(procedure string)                                 {}
-func (noopNFSMetrics) RecordBytesTransferred(direction string, bytes int64)              {}
-func (noopNFSMetrics) SetActiveConnections(count int32)                                  {}
-func (noopNFSMetrics) RecordConnectionAccepted()                                         {}
-func (noopNFSMetrics) RecordConnectionClosed()                                           {}
-func (noopNFSMetrics) RecordConnectionForceClosed()                                      {}
 
 // SetStores injects the shared metadata and content stores.
 //
@@ -421,7 +409,6 @@ func (s *NFSAdapter) Serve(ctx context.Context) error {
 		s.connCount.Add(1)
 
 		// Register connection for forced closure capability
-		// Use sync.Map for lock-free concurrent access (better performance under high churn)
 		connAddr := tcpConn.RemoteAddr().String()
 		s.activeConnections.Store(connAddr, tcpConn)
 
@@ -439,7 +426,7 @@ func (s *NFSAdapter) Serve(ctx context.Context) error {
 		conn := s.newConn(tcpConn)
 		go func(addr string, tcp net.Conn) {
 			defer func() {
-				// Unregister connection (lock-free with sync.Map)
+				// Unregister connection from tracking map
 				s.activeConnections.Delete(addr)
 
 				// Cleanup on connection close
@@ -583,12 +570,13 @@ func (s *NFSAdapter) gracefulShutdown() error {
 //   - No data loss (in-flight requests were already cancelled by context)
 //
 // Thread safety:
-// Safe to call once during shutdown. Uses sync.Map for lock-free iteration.
+// Safe to call once during shutdown. Uses sync.Map for concurrent-safe iteration.
 func (s *NFSAdapter) forceCloseConnections() {
 	logger.Info("Force-closing active NFS connections")
 
 	// Close all tracked connections
-	// sync.Map iteration is safe concurrent with modifications
+	// sync.Map iteration (Range) is safe to call concurrently with Store/Delete operations,
+	// though concurrent modifications may or may not be visible during iteration
 	closedCount := 0
 	s.activeConnections.Range(func(key, value any) bool {
 		addr := key.(string)

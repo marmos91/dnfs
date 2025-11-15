@@ -25,9 +25,9 @@ import (
 
 var (
 	// registry is the global Prometheus registry for all DittoFS metrics
+	// Protected by registryOnce for write-once, read-many pattern
 	registry     *prometheus.Registry
 	registryOnce sync.Once
-	registryMu   sync.RWMutex
 )
 
 // InitRegistry initializes the global Prometheus registry.
@@ -37,6 +37,10 @@ var (
 //
 // If not called, GetRegistry() will return nil and all metrics constructors
 // will return no-op implementations.
+//
+// Thread safety:
+// sync.Once provides the necessary memory barriers to ensure the registry
+// write is visible to all subsequent reads.
 func InitRegistry() {
 	registryOnce.Do(func() {
 		registry = prometheus.NewRegistry()
@@ -47,9 +51,11 @@ func InitRegistry() {
 //
 // Returns nil if InitRegistry() has not been called, indicating metrics
 // are disabled.
+//
+// Thread safety:
+// Safe to call concurrently. The sync.Once in InitRegistry() provides
+// a happens-before relationship ensuring the registry value is visible.
 func GetRegistry() *prometheus.Registry {
-	registryMu.RLock()
-	defer registryMu.RUnlock()
 	return registry
 }
 

@@ -77,6 +77,7 @@ type ServerConfig struct {
 }
 
 // MetricsConfig configures the Prometheus metrics HTTP server.
+// When Enabled is false, no metrics are collected (zero overhead).
 type MetricsConfig struct {
 	// Enabled controls whether metrics collection and HTTP server are enabled
 	Enabled bool `mapstructure:"enabled"`

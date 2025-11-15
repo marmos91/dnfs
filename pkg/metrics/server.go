@@ -151,7 +151,11 @@ func (s *Server) Start(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 		logger.Info("Metrics server shutdown signal received")
-		return s.Stop(ctx)
+		// Create new context with timeout for graceful shutdown
+		// Don't use the cancelled ctx as it would cause immediate shutdown
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return s.Stop(shutdownCtx)
 	case err := <-errChan:
 		return fmt.Errorf("metrics server failed: %w", err)
 	}

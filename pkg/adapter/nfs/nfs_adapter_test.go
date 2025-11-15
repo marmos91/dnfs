@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/marmos91/dittofs/pkg/metrics"
 )
 
 // TestGracefulShutdown verifies that the adapter waits for connections to complete
@@ -341,7 +343,7 @@ func TestMetricsIntegration(t *testing.T) {
 	}
 
 	// Test with no-op metrics struct
-	mockMetrics := &noopNFSMetrics{}
+	mockMetrics := metrics.NewNoopNFSMetrics()
 	adapter2 := New(config, mockMetrics)
 	if adapter2.metrics == nil {
 		t.Error("Expected metrics to be set, got nil")

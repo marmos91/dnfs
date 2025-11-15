@@ -211,3 +211,9 @@ func (noopNFSMetrics) SetActiveConnections(count int32)                         
 func (noopNFSMetrics) RecordConnectionAccepted()                                         {}
 func (noopNFSMetrics) RecordConnectionClosed()                                           {}
 func (noopNFSMetrics) RecordConnectionForceClosed()                                      {}
+
+// NewNoopNFSMetrics returns a no-op implementation of NFSMetrics.
+// This is useful for testing or when metrics collection is disabled.
+func NewNoopNFSMetrics() NFSMetrics {
+	return &noopNFSMetrics{}
+}
