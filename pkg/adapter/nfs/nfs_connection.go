@@ -337,14 +337,25 @@ func (c *NFSConnection) handleNFSProcedure(ctx context.Context, call *rpc.RPCCal
 	default:
 	}
 
-	// Dispatch to handler with context
-	return procInfo.Handler(
+	// Record request start in metrics
+	c.server.metrics.RecordRequestStart(procInfo.Name)
+	defer c.server.metrics.RecordRequestEnd(procInfo.Name)
+
+	// Dispatch to handler with context and record metrics
+	startTime := time.Now()
+	replyData, err := procInfo.Handler(
 		authCtx,
 		c.server.nfsHandler,
 		c.server.metadataStore,
 		c.server.content,
 		data,
 	)
+	duration := time.Since(startTime)
+
+	// Record request completion in metrics
+	c.server.metrics.RecordRequest(procInfo.Name, duration, err)
+
+	return replyData, err
 }
 
 // handleMountProcedure dispatches a MOUNT procedure call to the appropriate handler.
@@ -384,13 +395,25 @@ func (c *NFSConnection) handleMountProcedure(ctx context.Context, call *rpc.RPCC
 	default:
 	}
 
-	// Dispatch to handler with context
-	return procInfo.Handler(
+	// Record request start in metrics (use MOUNT_ prefix to distinguish from NFS)
+	procedureName := "MOUNT_" + procInfo.Name
+	c.server.metrics.RecordRequestStart(procedureName)
+	defer c.server.metrics.RecordRequestEnd(procedureName)
+
+	// Dispatch to handler with context and record metrics
+	startTime := time.Now()
+	replyData, err := procInfo.Handler(
 		authCtx,
 		c.server.mountHandler,
 		c.server.metadataStore,
 		data,
 	)
+	duration := time.Since(startTime)
+
+	// Record request completion in metrics
+	c.server.metrics.RecordRequest(procedureName, duration, err)
+
+	return replyData, err
 }
 
 // sendReply sends an RPC reply to the client.

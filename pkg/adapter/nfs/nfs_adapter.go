@@ -13,6 +13,7 @@ import (
 	v3 "github.com/marmos91/dittofs/internal/protocol/nfs/v3/handlers"
 	"github.com/marmos91/dittofs/pkg/content"
 	"github.com/marmos91/dittofs/pkg/metadata"
+	"github.com/marmos91/dittofs/pkg/metrics"
 )
 
 // NFSAdapter implements the adapter.Adapter interface for NFSv3 protocol.
@@ -60,6 +61,10 @@ type NFSAdapter struct {
 	// content provides access to file content (data blocks)
 	content content.ContentStore
 
+	// metrics provides optional Prometheus metrics collection
+	// If nil, no metrics are collected (zero overhead)
+	metrics metrics.NFSMetrics
+
 	// activeConns tracks all currently active connections for graceful shutdown
 	// Each connection calls Add(1) when starting and Done() when complete
 	activeConns sync.WaitGroup
@@ -89,6 +94,18 @@ type NFSAdapter struct {
 	// cancelRequests cancels shutdownCtx during shutdown
 	// This triggers request cancellation across all active connections
 	cancelRequests context.CancelFunc
+
+	// activeConnections tracks all active TCP connections for forced closure
+	// Maps connection remote address (string) to net.Conn for forced shutdown
+	// Uses sync.Map for concurrent-safe access optimized for high churn scenarios
+	activeConnections sync.Map
+
+	// listenerReady is closed when the listener is ready to accept connections
+	// Used by tests to synchronize with server startup
+	listenerReady chan struct{}
+
+	// listenerMu protects access to the listener field
+	listenerMu sync.RWMutex
 }
 
 // NFSConfig holds configuration parameters for the NFS server.
@@ -219,11 +236,12 @@ func (c *NFSConfig) validate() error {
 //
 // Parameters:
 //   - config: Server configuration (ports, timeouts, limits)
+//   - nfsMetrics: Optional metrics collector (nil for no metrics)
 //
 // Returns a configured but not yet started NFSAdapter.
 //
 // Panics if config validation fails.
-func New(config NFSConfig) *NFSAdapter {
+func New(config NFSConfig, nfsMetrics metrics.NFSMetrics) *NFSAdapter {
 	// Apply defaults for zero values
 	config.applyDefaults()
 
@@ -244,14 +262,22 @@ func New(config NFSConfig) *NFSAdapter {
 	// Create shutdown context for request cancellation
 	shutdownCtx, cancelRequests := context.WithCancel(context.Background())
 
+	// Use no-op metrics if none provided
+	if nfsMetrics == nil {
+		nfsMetrics = metrics.NewNoopNFSMetrics()
+	}
+
 	return &NFSAdapter{
 		config:         config,
 		nfsHandler:     &v3.DefaultNFSHandler{},
 		mountHandler:   &mount.DefaultMountHandler{},
+		metrics:        nfsMetrics,
 		shutdown:       make(chan struct{}),
 		connSemaphore:  connSemaphore,
 		shutdownCtx:    shutdownCtx,
 		cancelRequests: cancelRequests,
+		listenerReady:  make(chan struct{}),
+		// activeConnections is initialized as zero-value sync.Map (ready to use)
 	}
 }
 
@@ -316,7 +342,12 @@ func (s *NFSAdapter) Serve(ctx context.Context) error {
 		return fmt.Errorf("failed to create NFS listener on port %d: %w", s.config.Port, err)
 	}
 
+	// Store listener with mutex protection and signal readiness
+	s.listenerMu.Lock()
 	s.listener = listener
+	s.listenerMu.Unlock()
+	close(s.listenerReady)
+
 	logger.Info("NFS server listening on port %d", s.config.Port)
 	logger.Debug("NFS config: max_connections=%d read_timeout=%v write_timeout=%v idle_timeout=%v",
 		s.config.MaxConnections, s.config.ReadTimeout, s.config.WriteTimeout, s.config.IdleTimeout)
@@ -335,14 +366,11 @@ func (s *NFSAdapter) Serve(ctx context.Context) error {
 	}
 
 	// Accept connections until shutdown
+	// Note: We don't check s.shutdown at the top of the loop because:
+	// 1. listener.Accept() will fail immediately after shutdown (listener closed)
+	// 2. We check s.shutdown in error handling path
+	// 3. This reduces redundant select overhead in the hot path
 	for {
-		// Check if shutdown has been initiated
-		select {
-		case <-s.shutdown:
-			return s.gracefulShutdown()
-		default:
-		}
-
 		// Acquire connection semaphore if connection limiting is enabled
 		// This blocks if we're at MaxConnections until a connection closes
 		if s.connSemaphore != nil {
@@ -380,28 +408,47 @@ func (s *NFSAdapter) Serve(ctx context.Context) error {
 		s.activeConns.Add(1)
 		s.connCount.Add(1)
 
+		// Register connection for forced closure capability
+		connAddr := tcpConn.RemoteAddr().String()
+		s.activeConnections.Store(connAddr, tcpConn)
+
+		// Record metrics for connection accepted
+		s.metrics.RecordConnectionAccepted()
+		currentConns := s.connCount.Load()
+		s.metrics.SetActiveConnections(currentConns)
+
 		// Log new connection (debug level to avoid log spam under load)
 		logger.Debug("NFS connection accepted from %s (active: %d)",
-			tcpConn.RemoteAddr(), s.connCount.Load())
+			tcpConn.RemoteAddr(), currentConns)
 
 		// Handle connection in separate goroutine
+		// Capture connAddr and tcpConn in closure to avoid races
 		conn := s.newConn(tcpConn)
-		go func() {
+		go func(addr string, tcp net.Conn) {
 			defer func() {
+				// Unregister connection from tracking map
+				s.activeConnections.Delete(addr)
+
 				// Cleanup on connection close
 				s.activeConns.Done()
 				s.connCount.Add(-1)
 				if s.connSemaphore != nil {
 					<-s.connSemaphore
 				}
+
+				// Record metrics for connection closed
+				s.metrics.RecordConnectionClosed()
+				currentConns := s.connCount.Load()
+				s.metrics.SetActiveConnections(currentConns)
+
 				logger.Debug("NFS connection closed from %s (active: %d)",
-					tcpConn.RemoteAddr(), s.connCount.Load())
+					tcp.RemoteAddr(), currentConns)
 			}()
 
 			// Handle connection requests
 			// Pass shutdownCtx so requests can detect shutdown and abort
 			conn.Serve(s.shutdownCtx)
-		}()
+		}(connAddr, tcpConn)
 	}
 }
 
@@ -457,13 +504,23 @@ func (s *NFSAdapter) initiateShutdown() {
 //   - All active connections complete naturally
 //   - ShutdownTimeout expires
 //
-// After timeout, any remaining connections are considered non-responsive
-// and are abandoned (their goroutines will eventually clean up when they
-// complete or detect the closed listener).
+// Shutdown Flow:
+//  1. Wait for all connections to complete naturally (up to ShutdownTimeout)
+//  2. If timeout expires, force-close all remaining TCP connections
+//  3. Context cancellation (already done in initiateShutdown) triggers handlers to abort
+//  4. TCP close causes connection reads/writes to fail, accelerating cleanup
+//
+// Force Closure Strategy:
+// After timeout, we actively close TCP connections to trigger immediate cleanup.
+// This is safer than leaving goroutines running because:
+//   - Closes TCP socket (releases OS resources)
+//   - Triggers immediate error in ongoing reads/writes
+//   - Connection handlers detect errors and exit
+//   - Context cancellation prevents starting new work
 //
 // Returns:
 //   - nil if all connections completed gracefully
-//   - error if shutdown timeout was exceeded
+//   - error if shutdown timeout exceeded (connections were force-closed)
 //
 // Thread safety:
 // Should only be called once, from the Serve() method.
@@ -487,10 +544,65 @@ func (s *NFSAdapter) gracefulShutdown() error {
 
 	case <-time.After(s.config.ShutdownTimeout):
 		remaining := s.connCount.Load()
-		logger.Warn("NFS shutdown timeout exceeded: %d connection(s) still active after %v",
+		logger.Warn("NFS shutdown timeout exceeded: %d connection(s) still active after %v - forcing closure",
 			remaining, s.config.ShutdownTimeout)
-		return fmt.Errorf("NFS shutdown timeout: %d connections still active", remaining)
+
+		// Force-close all remaining connections
+		s.forceCloseConnections()
+
+		return fmt.Errorf("NFS shutdown timeout: %d connections force-closed", remaining)
 	}
+}
+
+// forceCloseConnections closes all active TCP connections to accelerate shutdown.
+//
+// This method is called after the graceful shutdown timeout expires. It iterates
+// through all active connections and closes their underlying TCP sockets.
+//
+// Why Force Close:
+//  1. Context cancellation (shutdownCtx) signals handlers to stop gracefully
+//  2. TCP close forces immediate failure of any ongoing I/O operations
+//  3. This combination ensures connections exit quickly even if stuck in I/O
+//
+// Effect on Clients:
+//   - Clients receive TCP RST or FIN, depending on connection state
+//   - NFS clients will see connection errors and reconnect/retry
+//   - No data loss (in-flight requests were already cancelled by context)
+//
+// Thread safety:
+// Safe to call once during shutdown. Uses sync.Map for concurrent-safe iteration.
+func (s *NFSAdapter) forceCloseConnections() {
+	logger.Info("Force-closing active NFS connections")
+
+	// Close all tracked connections
+	// sync.Map iteration (Range) is safe to call concurrently with Store/Delete operations,
+	// though concurrent modifications may or may not be visible during iteration
+	closedCount := 0
+	s.activeConnections.Range(func(key, value any) bool {
+		addr := key.(string)
+		conn := value.(net.Conn)
+
+		if err := conn.Close(); err != nil {
+			logger.Debug("Error force-closing connection to %s: %v", addr, err)
+		} else {
+			closedCount++
+			logger.Debug("Force-closed connection to %s", addr)
+			// Record metric for each force-closed connection
+			s.metrics.RecordConnectionForceClosed()
+		}
+
+		// Continue iteration
+		return true
+	})
+
+	if closedCount == 0 {
+		logger.Debug("No connections to force-close")
+	} else {
+		logger.Info("Force-closed %d connection(s)", closedCount)
+	}
+
+	// Note: sync.Map entries are automatically deleted by deferred cleanup in Serve()
+	// No need to manually clear the map
 }
 
 // Stop initiates graceful shutdown of the NFS server.
@@ -585,6 +697,30 @@ func (s *NFSAdapter) logMetrics(ctx context.Context) {
 // Safe to call concurrently. Uses atomic operations.
 func (s *NFSAdapter) GetActiveConnections() int32 {
 	return s.connCount.Load()
+}
+
+// GetListenerAddr returns the address the server is listening on.
+// This method blocks until the listener is ready, making it safe for tests
+// to use without race conditions.
+//
+// Returns:
+//   - The listener address as a string (e.g., "127.0.0.1:2049")
+//   - Empty string if the server failed to start
+//
+// Thread safety:
+// Safe to call concurrently. Waits for listener to be ready before accessing.
+func (s *NFSAdapter) GetListenerAddr() string {
+	// Wait for listener to be ready
+	<-s.listenerReady
+
+	// Read listener with mutex protection
+	s.listenerMu.RLock()
+	defer s.listenerMu.RUnlock()
+
+	if s.listener == nil {
+		return ""
+	}
+	return s.listener.Addr().String()
 }
 
 // newConn creates a new connection wrapper for a TCP connection.

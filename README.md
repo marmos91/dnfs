@@ -895,15 +895,13 @@ metadata:
 
 **Phase 1: NFSv3 Production Hardening** (Current Focus)
 
-- [ ] Prometheus metrics integration
-- [ ] Health check endpoints (Kubernetes readiness/liveness)
-- [ ] Enhanced graceful shutdown
-- [ ] Connection pooling optimization
+- [x] Prometheus metrics integration
+- [x] Enhanced graceful shutdown
 - [ ] Request rate limiting
-- [ ] Admin API for monitoring
 
 **Phase 2: Kubernetes Integration**
 
+- [ ] Health check endpoints (Kubernetes readiness/liveness)
 - [ ] CSI driver implementation
 - [ ] Helm chart for deployment
 - [ ] StatefulSet examples
