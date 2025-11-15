@@ -62,6 +62,18 @@ func applyServerDefaults(cfg *ServerConfig) {
 	if cfg.ShutdownTimeout == 0 {
 		cfg.ShutdownTimeout = 30 * time.Second
 	}
+
+	// Apply metrics defaults
+	applyMetricsDefaults(&cfg.Metrics)
+}
+
+// applyMetricsDefaults sets metrics defaults.
+func applyMetricsDefaults(cfg *MetricsConfig) {
+	// Enabled defaults to false (opt-in for metrics)
+	// Port defaults to 9090 if metrics are enabled
+	if cfg.Enabled && cfg.Port == 0 {
+		cfg.Port = 9090
+	}
 }
 
 // applyContentDefaults sets content store defaults.

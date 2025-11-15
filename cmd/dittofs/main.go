@@ -12,6 +12,7 @@ import (
 	"github.com/marmos91/dittofs/internal/logger"
 	"github.com/marmos91/dittofs/pkg/adapter/nfs"
 	"github.com/marmos91/dittofs/pkg/config"
+	"github.com/marmos91/dittofs/pkg/metrics"
 	dittoServer "github.com/marmos91/dittofs/pkg/server"
 )
 
@@ -158,6 +159,35 @@ func runStart() {
 	logger.Info("Log level: %s", cfg.Logging.Level)
 	logger.Info("Configuration loaded from: %s", getConfigSource(*configFile))
 
+	// Initialize metrics if enabled
+	var metricsServer *metrics.Server
+	var nfsMetrics metrics.NFSMetrics
+	if cfg.Server.Metrics.Enabled {
+		logger.Info("Metrics collection enabled")
+
+		// Initialize global Prometheus registry
+		metrics.InitRegistry()
+
+		// Create NFS metrics collector
+		nfsMetrics = metrics.NewNFSMetrics()
+
+		// Start metrics HTTP server
+		metricsServer = metrics.NewServer(metrics.ServerConfig{
+			Port: cfg.Server.Metrics.Port,
+		})
+
+		go func() {
+			if err := metricsServer.Start(ctx); err != nil && err != context.Canceled {
+				logger.Error("Metrics server error: %v", err)
+			}
+		}()
+
+		logger.Info("Metrics server started on port %d", cfg.Server.Metrics.Port)
+		logger.Info("Metrics available at: http://localhost:%d/metrics", cfg.Server.Metrics.Port)
+	} else {
+		logger.Debug("Metrics collection disabled")
+	}
+
 	// Create content store
 	contentStore, err := config.CreateContentStore(ctx, &cfg.Content)
 	if err != nil {
@@ -192,7 +222,8 @@ func runStart() {
 	// Add enabled adapters
 	if cfg.Adapters.NFS.Enabled {
 		// Use the config's NFSConfig directly (no manual mapping needed)
-		nfsAdapter := nfs.New(cfg.Adapters.NFS)
+		// Pass metrics if enabled (nil if disabled - adapter will use no-op)
+		nfsAdapter := nfs.New(cfg.Adapters.NFS, nfsMetrics)
 		if err := dittoSrv.AddAdapter(nfsAdapter); err != nil {
 			log.Fatalf("Failed to add NFS adapter: %v", err)
 		}
@@ -224,6 +255,15 @@ func runStart() {
 		}
 		logger.Info("Server stopped gracefully")
 
+		// Stop metrics server if running
+		if metricsServer != nil {
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.Server.ShutdownTimeout)
+			defer shutdownCancel()
+			if err := metricsServer.Stop(shutdownCtx); err != nil {
+				logger.Error("Metrics server shutdown error: %v", err)
+			}
+		}
+
 	case err := <-serverDone:
 		signal.Stop(sigChan) // Stop signal notification when server stops
 		if err != nil {
@@ -231,6 +271,15 @@ func runStart() {
 			os.Exit(1)
 		}
 		logger.Info("Server stopped")
+
+		// Stop metrics server if running
+		if metricsServer != nil {
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.Server.ShutdownTimeout)
+			defer shutdownCancel()
+			if err := metricsServer.Stop(shutdownCtx); err != nil {
+				logger.Error("Metrics server shutdown error: %v", err)
+			}
+		}
 	}
 }
 

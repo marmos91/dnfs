@@ -71,6 +71,19 @@ type LoggingConfig struct {
 type ServerConfig struct {
 	// ShutdownTimeout is the maximum time to wait for graceful shutdown
 	ShutdownTimeout time.Duration `mapstructure:"shutdown_timeout" validate:"required,gt=0"`
+
+	// Metrics contains Prometheus metrics server configuration
+	Metrics MetricsConfig `mapstructure:"metrics"`
+}
+
+// MetricsConfig configures the Prometheus metrics HTTP server.
+type MetricsConfig struct {
+	// Enabled controls whether metrics collection and HTTP server are enabled
+	Enabled bool `mapstructure:"enabled"`
+
+	// Port is the HTTP port for the metrics endpoint
+	// Default: 9090
+	Port int `mapstructure:"port" validate:"omitempty,min=0,max=65535"`
 }
 
 // ContentConfig specifies content store configuration.
