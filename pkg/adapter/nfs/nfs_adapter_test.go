@@ -15,9 +15,9 @@ func TestGracefulShutdown(t *testing.T) {
 	// Create adapter with short shutdown timeout
 	config := NFSConfig{
 		Port:            0, // OS assigns random port
-		ShutdownTimeout: 2 * time.Second,
+		Timeouts: NFSTimeoutsConfig{Shutdown: 2 * time.Second},
 	}
-	adapter := New(config, nil) // nil = no metrics
+	adapter := New(config, nil, nil) // nil = no metrics
 
 	// Start server in background
 	ctx, cancel := context.WithCancel(context.Background())
@@ -69,9 +69,9 @@ func TestForcedConnectionClosure(t *testing.T) {
 	// Create adapter with very short shutdown timeout
 	config := NFSConfig{
 		Port:            0, // OS assigns random port
-		ShutdownTimeout: 500 * time.Millisecond,
+		Timeouts: NFSTimeoutsConfig{Shutdown: 500 * time.Millisecond},
 	}
-	adapter := New(config, nil)
+	adapter := New(config, nil, nil)
 
 	// Start server in background
 	ctx, cancel := context.WithCancel(context.Background())
@@ -131,9 +131,9 @@ func TestConnectionLimiting(t *testing.T) {
 	config := NFSConfig{
 		Port:            0, // OS assigns random port
 		MaxConnections:  2,
-		ShutdownTimeout: 1 * time.Second,
+		Timeouts: NFSTimeoutsConfig{Shutdown: 1 * time.Second},
 	}
-	adapter := New(config, nil)
+	adapter := New(config, nil, nil)
 
 	// Start server in background
 	ctx, cancel := context.WithCancel(context.Background())
@@ -184,9 +184,9 @@ func TestDrainMode(t *testing.T) {
 	// Create adapter
 	config := NFSConfig{
 		Port:            0, // OS assigns random port
-		ShutdownTimeout: 2 * time.Second,
+		Timeouts: NFSTimeoutsConfig{Shutdown: 2 * time.Second},
 	}
-	adapter := New(config, nil)
+	adapter := New(config, nil, nil)
 
 	// Start server in background
 	ctx, cancel := context.WithCancel(context.Background())
@@ -227,9 +227,9 @@ func TestDrainMode(t *testing.T) {
 func TestConcurrentShutdown(t *testing.T) {
 	config := NFSConfig{
 		Port:            0,
-		ShutdownTimeout: 1 * time.Second,
+		Timeouts: NFSTimeoutsConfig{Shutdown: 1 * time.Second},
 	}
-	adapter := New(config, nil)
+	adapter := New(config, nil, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	serverDone := make(chan error, 1)
@@ -268,9 +268,9 @@ func TestConcurrentShutdown(t *testing.T) {
 func TestConnectionTracking(t *testing.T) {
 	config := NFSConfig{
 		Port:            0,
-		ShutdownTimeout: 1 * time.Second,
+		Timeouts: NFSTimeoutsConfig{Shutdown: 1 * time.Second},
 	}
-	adapter := New(config, nil)
+	adapter := New(config, nil, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -333,18 +333,18 @@ func TestMetricsIntegration(t *testing.T) {
 	// Full integration testing would require implementing the full interface
 	config := NFSConfig{
 		Port:            0,
-		ShutdownTimeout: 1 * time.Second,
+		Timeouts: NFSTimeoutsConfig{Shutdown: 1 * time.Second},
 	}
 
 	// Test with nil metrics (no-op)
-	adapter := New(config, nil)
+	adapter := New(config, nil, nil)
 	if adapter.metrics == nil {
 		t.Error("Expected metrics to be set (no-op), got nil")
 	}
 
 	// Test with no-op metrics struct
 	mockMetrics := metrics.NewNoopNFSMetrics()
-	adapter2 := New(config, mockMetrics)
+	adapter2 := New(config, nil, mockMetrics)
 	if adapter2.metrics == nil {
 		t.Error("Expected metrics to be set, got nil")
 	}
