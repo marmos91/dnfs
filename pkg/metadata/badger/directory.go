@@ -37,8 +37,8 @@ func (s *BadgerMetadataStore) ReadDirectory(
 		return nil, err
 	}
 
-	// Try cache if reading from start (token="") and not paginating
-	if token == "" {
+	// Try cache if reading from start (token="") and cache is enabled
+	if token == "" && s.readdirCache.enabled {
 		if cached := s.getReaddirCached(dirHandle); cached != nil {
 			atomic.AddUint64(&s.readdirCache.hits, 1)
 			// Convert cached data back to ReadDirPage format
@@ -222,9 +222,9 @@ func (s *BadgerMetadataStore) ReadDirectory(
 		return nil, err
 	}
 
-	// Cache directory listing if we read from start (even if paginated)
+	// Cache directory listing if we read from start (even if paginated or empty)
 	// The cache stores the complete listing we've seen so far
-	if token == "" && len(allChildren) > 0 {
+	if token == "" {
 		s.putReaddirCached(dirHandle, allChildren, nil, allNames)
 	}
 

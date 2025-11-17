@@ -40,8 +40,8 @@ func (s *BadgerMetadataStore) Lookup(
 		return nil, nil, err
 	}
 
-	// Try cache (only for regular names, not "." or "..")
-	if name != "." && name != ".." {
+	// Try cache (only for regular names, not "." or "..", and only if cache is enabled)
+	if name != "." && name != ".." && s.lookupCache.enabled {
 		if cached := s.getLookupCached(dirHandle, name); cached != nil {
 			atomic.AddUint64(&s.lookupCache.hits, 1)
 			attrCopy := *cached.attr
