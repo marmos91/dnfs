@@ -9,6 +9,7 @@ import (
 	"github.com/marmos91/dittofs/internal/logger"
 	"github.com/marmos91/dittofs/pkg/adapter"
 	"github.com/marmos91/dittofs/pkg/content"
+	"github.com/marmos91/dittofs/pkg/gc"
 	"github.com/marmos91/dittofs/pkg/metadata"
 )
 
@@ -52,6 +53,9 @@ type DittoServer struct {
 	// adapters contains all registered protocol adapters
 	adapters []adapter.Adapter
 
+	// gc is the garbage collector for orphaned content (optional)
+	gc *gc.Collector
+
 	// mu protects the adapters slice and serving flag
 	mu sync.RWMutex
 
@@ -89,6 +93,36 @@ func New(metadata metadata.MetadataStore, content content.ContentStore) *DittoSe
 		metadata: metadata,
 		content:  content,
 		adapters: make([]adapter.Adapter, 0, 4), // Pre-allocate for common case of 2-4 adapters
+	}
+}
+
+// SetGC sets the garbage collector for the server.
+//
+// The garbage collector identifies and removes orphaned content that is no longer
+// referenced by metadata. This is optional - if not set, orphaned content will
+// accumulate over time.
+//
+// SetGC() must be called before Serve() is called.
+//
+// Parameters:
+//   - collector: The garbage collector instance (may be nil to disable GC)
+//
+// Panics if Serve() has already been called.
+//
+// Thread safety:
+// Safe to call concurrently with AddAdapter() before Serve() is called.
+func (s *DittoServer) SetGC(collector *gc.Collector) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.served {
+		panic("cannot set GC after Serve() has been called")
+	}
+
+	s.gc = collector
+
+	if collector != nil {
+		logger.Info("Garbage collector registered")
 	}
 }
 
@@ -241,6 +275,11 @@ func (s *DittoServer) serve(ctx context.Context) error {
 
 	logger.Info("Starting DittoServer with %d adapter(s)", len(adapters))
 
+	// Start garbage collector if configured
+	if s.gc != nil {
+		s.gc.Start()
+	}
+
 	// Channel to collect errors from adapter goroutines
 	// Buffered to prevent goroutine leaks if multiple adapters fail simultaneously
 	errChan := make(chan adapterError, len(adapters))
@@ -299,6 +338,16 @@ func (s *DittoServer) serve(ctx context.Context) error {
 	// Wait for all adapter goroutines to complete
 	logger.Debug("Waiting for all adapters to complete shutdown")
 	wg.Wait()
+
+	// Stop garbage collector if running
+	if s.gc != nil {
+		gcCtx, gcCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer gcCancel()
+
+		if err := s.gc.Stop(gcCtx); err != nil {
+			logger.Error("Garbage collector shutdown error: %v", err)
+		}
+	}
 
 	logger.Info("DittoServer stopped gracefully")
 

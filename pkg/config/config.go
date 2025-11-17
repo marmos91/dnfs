@@ -50,6 +50,9 @@ type Config struct {
 
 	// Adapters contains protocol adapter configurations
 	Adapters AdaptersConfig `mapstructure:"adapters"`
+
+	// GC contains garbage collection configuration
+	GC GCConfig `mapstructure:"gc"`
 }
 
 // LoggingConfig controls logging behavior.
@@ -228,6 +231,33 @@ type AdaptersConfig struct {
 	// NFS contains NFS protocol configuration.
 	// Uses the nfs.NFSConfig type directly to avoid duplication.
 	NFS nfs.NFSConfig `mapstructure:"nfs"`
+}
+
+// GCConfig contains garbage collection configuration.
+//
+// Garbage collection identifies and removes content that is no longer
+// referenced by any metadata (orphaned content). This can occur due to:
+//   - Server crashes during delete operations
+//   - Failed delete operations
+//   - Buffered deletions lost in memory
+//
+// The collector is generic and works with any MetadataStore and ContentStore
+// implementation that supports the required interfaces.
+type GCConfig struct {
+	// Enabled controls whether garbage collection is active (default: true)
+	Enabled bool `mapstructure:"enabled"`
+
+	// Interval is how often to run garbage collection (default: 24h)
+	// Format: duration string (e.g., "24h", "12h", "30m")
+	Interval time.Duration `mapstructure:"interval"`
+
+	// BatchSize is how many orphaned items to delete per batch (default: 1000)
+	// S3 supports up to 1000 objects per DeleteObjects call
+	BatchSize int `mapstructure:"batch_size"`
+
+	// DryRun mode logs what would be deleted without actually deleting (default: false)
+	// Useful for testing and validation
+	DryRun bool `mapstructure:"dry_run"`
 }
 
 // Load loads configuration from file, environment, and defaults.
