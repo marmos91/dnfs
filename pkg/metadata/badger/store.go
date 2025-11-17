@@ -142,7 +142,6 @@ type BadgerMetadataStore struct {
 // readdirCacheEntry stores cached directory listing.
 type readdirCacheEntry struct {
 	children  []metadata.FileHandle
-	attrs     []*metadata.FileAttr
 	names     []string
 	timestamp time.Time
 	lruNode   *list.Element
@@ -537,7 +536,7 @@ func (s *BadgerMetadataStore) getReaddirCached(handle metadata.FileHandle) *read
 }
 
 // putReaddirCached stores directory listing in cache.
-func (s *BadgerMetadataStore) putReaddirCached(handle metadata.FileHandle, children []metadata.FileHandle, attrs []*metadata.FileAttr, names []string) {
+func (s *BadgerMetadataStore) putReaddirCached(handle metadata.FileHandle, children []metadata.FileHandle, names []string) {
 	if !s.readdirCache.enabled {
 		return
 	}
@@ -550,7 +549,6 @@ func (s *BadgerMetadataStore) putReaddirCached(handle metadata.FileHandle, child
 	// Update existing entry
 	if existing, exists := s.readdirCache.cache[key]; exists {
 		existing.children = children
-		existing.attrs = attrs
 		existing.names = names
 		existing.timestamp = time.Now()
 		s.readdirCache.lruList.MoveToFront(existing.lruNode)
@@ -565,7 +563,6 @@ func (s *BadgerMetadataStore) putReaddirCached(handle metadata.FileHandle, child
 	// Create new entry
 	entry := &readdirCacheEntry{
 		children:  children,
-		attrs:     attrs,
 		names:     names,
 		timestamp: time.Now(),
 	}

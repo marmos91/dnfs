@@ -6,7 +6,6 @@ package fs
 
 import (
 	"context"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -75,6 +74,12 @@ func NewFSContentStore(ctx context.Context, basePath string) (*FSContentStore, e
 // This is a lightweight helper function that performs no I/O and does not
 // need context cancellation checks.
 //
+// Implementation Note:
+// We used to hex-encode the full ContentID, but this caused issues with very
+// long paths (deep directory nesting) exceeding OS filename limits (255 chars
+// on macOS). Instead, we now store files directly using the ContentID as the
+// path, which is already filesystem-safe (e.g., "export/dir/file.txt").
+//
 // Parameters:
 //   - ctx: Context (unused but kept for interface consistency)
 //   - id: Content identifier
@@ -82,9 +87,9 @@ func NewFSContentStore(ctx context.Context, basePath string) (*FSContentStore, e
 // Returns:
 //   - string: Full filesystem path for the content
 func (r *FSContentStore) getFilePath(_ context.Context, id metadata.ContentID) string {
-	// Hex-encode the content ID to make it filesystem-safe
-	// Binary data like SHA-256 hashes contain illegal byte sequences
-	return filepath.Join(r.basePath, hex.EncodeToString([]byte(id)))
+	// ContentID is already in a filesystem-safe format (e.g., "export/path/to/file.txt")
+	// Just join it with the base path
+	return filepath.Join(r.basePath, string(id))
 }
 
 // GetStorageStats returns statistics about the filesystem storage.

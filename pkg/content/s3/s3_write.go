@@ -107,10 +107,13 @@ func (s *S3ContentStore) WriteAt(ctx context.Context, id metadata.ContentID, dat
 		}
 		s.writeBuffers[idStr] = buffer
 	}
+
+	// Lock this specific buffer before releasing the map lock to prevent
+	// race conditions where another goroutine could access the same buffer
+	// between releasing writeBuffersMu and acquiring buffer.mu
+	buffer.mu.Lock()
 	s.writeBuffersMu.Unlock()
 
-	// Lock this specific buffer
-	buffer.mu.Lock()
 	defer buffer.mu.Unlock()
 
 	// Check if this is a sequential append
@@ -233,11 +236,15 @@ func (s *S3ContentStore) FlushWrites(ctx context.Context, id metadata.ContentID)
 		s.writeBuffersMu.Unlock()
 		return nil // No buffer, nothing to flush
 	}
-	// Remove from map
+
+	// Lock the buffer before removing from map to prevent race conditions
+	// where WriteAt could create a new buffer between delete and lock,
+	// potentially losing data
+	buffer.mu.Lock()
+	// Remove from map while holding both locks
 	delete(s.writeBuffers, idStr)
 	s.writeBuffersMu.Unlock()
 
-	buffer.mu.Lock()
 	defer buffer.mu.Unlock()
 
 	// Flush any remaining data

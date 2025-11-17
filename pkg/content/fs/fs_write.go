@@ -9,10 +9,38 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/marmos91/dittofs/pkg/content"
 	"github.com/marmos91/dittofs/pkg/metadata"
 )
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+// ensureParentDir creates the parent directory for a file path if it doesn't exist.
+//
+// This is necessary because ContentIDs can contain path separators (e.g., "export/dir/file.txt"),
+// and we need to ensure the directory structure exists before creating files.
+//
+// Parameters:
+//   - filePath: Full path to the file
+//
+// Returns:
+//   - error: Returns error if directory creation fails
+func ensureParentDir(filePath string) error {
+	dir := filepath.Dir(filePath)
+	if dir == "." || dir == "/" {
+		return nil
+	}
+
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("failed to create parent directory: %w", err)
+	}
+
+	return nil
+}
 
 // ============================================================================
 // ContentStore Interface Implementation
@@ -47,7 +75,15 @@ func (r *FSContentStore) WriteContent(ctx context.Context, id metadata.ContentID
 	filePath := r.getFilePath(ctx, id)
 
 	// ========================================================================
-	// Step 2: Write content with chunking for large files
+	// Step 2: Ensure parent directory exists
+	// ========================================================================
+
+	if err := ensureParentDir(filePath); err != nil {
+		return err
+	}
+
+	// ========================================================================
+	// Step 3: Write content with chunking for large files
 	// ========================================================================
 
 	// For small files (<10MB), write directly
@@ -116,7 +152,15 @@ func (r *FSContentStore) WriteAt(ctx context.Context, id metadata.ContentID, dat
 	filePath := r.getFilePath(ctx, id)
 
 	// ========================================================================
-	// Step 2: Per-file locking and FD cache lookup
+	// Step 2: Ensure parent directory exists
+	// ========================================================================
+
+	if err := ensureParentDir(filePath); err != nil {
+		return err
+	}
+
+	// ========================================================================
+	// Step 3: Per-file locking and FD cache lookup
 	// ========================================================================
 
 	r.fdCache.LockFile(id)
@@ -140,7 +184,7 @@ func (r *FSContentStore) WriteAt(ctx context.Context, id metadata.ContentID, dat
 	}
 
 	// ========================================================================
-	// Step 3: Seek to offset
+	// Step 4: Seek to offset
 	// ========================================================================
 
 	if err := ctx.Err(); err != nil {
@@ -153,7 +197,7 @@ func (r *FSContentStore) WriteAt(ctx context.Context, id metadata.ContentID, dat
 	}
 
 	// ========================================================================
-	// Step 4: Write data with chunking for large writes
+	// Step 5: Write data with chunking for large writes
 	// ========================================================================
 
 	// For small writes (<1MB), write directly

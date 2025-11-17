@@ -217,16 +217,22 @@ func (s *BadgerMetadataStore) ReadDirectory(
 				return err
 			}
 
+			// Skip entries before offset (but still track for caching)
+			if currentOffset < offset {
+				// Track all children for caching (if reading from start)
+				// Must track even skipped entries to build complete cache
+				if token == "" {
+					allChildren = append(allChildren, childHandle)
+					allNames = append(allNames, childName)
+				}
+				currentOffset++
+				continue
+			}
+
 			// Track all children for caching (if reading from start)
 			if token == "" {
 				allChildren = append(allChildren, childHandle)
 				allNames = append(allNames, childName)
-			}
-
-			// Skip entries before offset
-			if currentOffset < offset {
-				currentOffset++
-				continue
 			}
 
 			// Create directory entry
@@ -270,7 +276,7 @@ func (s *BadgerMetadataStore) ReadDirectory(
 	// Cache directory listing if we read from start (even if paginated or empty)
 	// The cache stores the complete listing we've seen so far
 	if token == "" {
-		s.putReaddirCached(dirHandle, allChildren, nil, allNames)
+		s.putReaddirCached(dirHandle, allChildren, allNames)
 	}
 
 	return page, nil
