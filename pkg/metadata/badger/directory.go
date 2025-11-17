@@ -3,6 +3,7 @@ package badger
 import (
 	"fmt"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
@@ -36,10 +37,78 @@ func (s *BadgerMetadataStore) ReadDirectory(
 		return nil, err
 	}
 
+	// Acquire read lock BEFORE checking cache to ensure cache consistency
+	// This prevents returning stale cached data during concurrent writes
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	// Try cache if cache is enabled
+	// Note: token can be non-empty for paginated reads from cache
+	if s.readdirCache.enabled {
+		if cached := s.getReaddirCached(dirHandle); cached != nil {
+			atomic.AddUint64(&s.readdirCache.hits, 1)
+
+			// Parse pagination token
+			startIdx := 0
+			if token != "" {
+				var err error
+				startIdx, err = strconv.Atoi(token)
+				if err != nil || startIdx < 0 || startIdx > len(cached.names) {
+					return nil, &metadata.StoreError{
+						Code:    metadata.ErrInvalidArgument,
+						Message: "invalid pagination token",
+					}
+				}
+			}
+
+			// Use default maxBytes if not specified (same as uncached path)
+			pageSize := maxBytes
+			if pageSize == 0 {
+				pageSize = 8192 // Default from NFS spec
+			}
+
+			// Apply pagination to cached entries
+			var entries []metadata.DirEntry
+			var totalBytes uint32
+			nextIdx := startIdx
+
+			for nextIdx < len(cached.names) {
+				entry := metadata.DirEntry{
+					ID:   fileHandleToID(cached.children[nextIdx]),
+					Name: cached.names[nextIdx],
+				}
+				// Estimate entry size: 8 bytes for ID + len(Name) + 16 bytes overhead
+				entrySize := uint32(8 + len(entry.Name) + 16)
+
+				// If adding this entry would exceed pageSize and we have at least one entry, stop
+				if totalBytes+entrySize > pageSize && len(entries) > 0 {
+					break
+				}
+
+				totalBytes += entrySize
+				entries = append(entries, entry)
+				nextIdx++
+			}
+
+			// Determine if there are more entries
+			hasMore := nextIdx < len(cached.names)
+			nextToken := ""
+			if hasMore {
+				nextToken = strconv.Itoa(nextIdx)
+			}
+
+			return &metadata.ReadDirPage{
+				Entries:   entries,
+				NextToken: nextToken,
+				HasMore:   hasMore,
+			}, nil
+		}
+		atomic.AddUint64(&s.readdirCache.misses, 1)
+	}
+
 	var page *metadata.ReadDirPage
+	var allChildren []metadata.FileHandle
+	var allNames []string
 
 	err := s.db.View(func(txn *badger.Txn) error {
 		// Get directory data
@@ -128,12 +197,6 @@ func (s *BadgerMetadataStore) ReadDirectory(
 				}
 			}
 
-			// Skip entries before offset
-			if currentOffset < offset {
-				currentOffset++
-				continue
-			}
-
 			item := it.Item()
 			key := item.Key()
 
@@ -152,6 +215,24 @@ func (s *BadgerMetadataStore) ReadDirectory(
 			})
 			if err != nil {
 				return err
+			}
+
+			// Skip entries before offset (but still track for caching)
+			if currentOffset < offset {
+				// Track all children for caching (if reading from start)
+				// Must track even skipped entries to build complete cache
+				if token == "" {
+					allChildren = append(allChildren, childHandle)
+					allNames = append(allNames, childName)
+				}
+				currentOffset++
+				continue
+			}
+
+			// Track all children for caching (if reading from start)
+			if token == "" {
+				allChildren = append(allChildren, childHandle)
+				allNames = append(allNames, childName)
 			}
 
 			// Create directory entry
@@ -190,6 +271,12 @@ func (s *BadgerMetadataStore) ReadDirectory(
 
 	if err != nil {
 		return nil, err
+	}
+
+	// Cache directory listing if we read from start (even if paginated or empty)
+	// The cache stores the complete listing we've seen so far
+	if token == "" {
+		s.putReaddirCached(dirHandle, allChildren, allNames)
 	}
 
 	return page, nil
@@ -492,6 +579,9 @@ func (s *BadgerMetadataStore) CreateSymlink(
 		return nil, err
 	}
 
+	// Invalidate directory caches for parent directory
+	s.invalidateDirectory(parentHandle)
+
 	return newHandle, nil
 }
 
@@ -730,6 +820,9 @@ func (s *BadgerMetadataStore) CreateSpecialFile(
 	if err != nil {
 		return nil, err
 	}
+
+	// Invalidate directory caches for parent directory
+	s.invalidateDirectory(parentHandle)
 
 	return newHandle, nil
 }

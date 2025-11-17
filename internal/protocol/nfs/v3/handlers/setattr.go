@@ -374,6 +374,31 @@ func (h *DefaultNFSHandler) SetAttr(
 	wccBefore := xdr.CaptureWccAttr(currentAttr)
 
 	// ========================================================================
+	// Handle Empty SETATTR (No-Op)
+	// ========================================================================
+	// If no attributes are specified, return success immediately with current
+	// attributes. This is valid NFS behavior - macOS Finder and other clients
+	// sometimes send empty SETATTR requests (possibly for access verification).
+	// Note: This is a true no-op; ctime is NOT updated for empty SETATTR.
+
+	if req.NewAttr.Mode == nil && req.NewAttr.UID == nil && req.NewAttr.GID == nil &&
+		req.NewAttr.Size == nil && req.NewAttr.Atime == nil && req.NewAttr.Mtime == nil {
+
+		logger.Debug("SETATTR: no attributes specified (no-op): handle=%x client=%s",
+			req.Handle, clientIP)
+
+		// Return current attributes without modification
+		fileID := xdr.ExtractFileID(fileHandle)
+		wccAfter := xdr.MetadataToNFS(currentAttr, fileID)
+
+		return &SetAttrResponse{
+			Status:     types.NFS3OK,
+			AttrBefore: wccBefore,
+			AttrAfter:  wccAfter,
+		}, nil
+	}
+
+	// ========================================================================
 	// Context Cancellation Check - After Metadata Lookup
 	// ========================================================================
 	// Check again after metadata lookup, before guard check and attribute update
@@ -585,25 +610,24 @@ func validateSetAttrRequest(req *SetAttrRequest) *setAttrValidationError {
 		}
 	}
 
-	// Check that at least one attribute is being set
-	if req.NewAttr.Mode == nil && req.NewAttr.UID == nil && req.NewAttr.GID == nil &&
-		req.NewAttr.Size == nil && req.NewAttr.Atime == nil && req.NewAttr.Mtime == nil {
-		return &setAttrValidationError{
-			message:   "no attributes specified for update",
-			nfsStatus: types.NFS3ErrInval,
-		}
-	}
+	// Note: Empty SETATTR (no attributes specified) is valid per NFS RFC.
+	// Some clients (like macOS Finder) send empty SETATTR to verify access
+	// or update ctime. We allow this and handle it as a no-op later in the
+	// handler, returning current attributes without modification.
 
-	// Validate mode value if being set (only use lower 12 bits)
+	// Validate and normalize mode value if being set
+	// NOTE: This function modifies req.NewAttr.Mode in place for normalization.
+	// This mutation is intentional and normalizes client-provided modes to a
+	// canonical form before further processing.
 	if req.NewAttr.Mode != nil {
-		// Mode should only use file type and permission bits (lower 12 bits)
-		// The upper bits are reserved and should be zero
-		if *req.NewAttr.Mode > 0o7777 {
-			return &setAttrValidationError{
-				message:   fmt.Sprintf("invalid mode value: 0%o (max 0o7777)", *req.NewAttr.Mode),
-				nfsStatus: types.NFS3ErrInval,
-			}
-		}
+		// Some clients (like macOS Finder) send mode values that include file type bits
+		// in the upper bits (e.g., 0100644 for regular file, 040755 for directory).
+		// We only use the permission bits (lower 12 bits) and ignore file type bits.
+		// This is standard behavior - SETATTR cannot change file type, only permissions.
+
+		// Strip file type bits and keep only permission bits (lower 12 bits)
+		// This modifies the request in place to normalize the value for downstream processing.
+		*req.NewAttr.Mode = *req.NewAttr.Mode & 0o7777
 	}
 
 	// Size validation is done by the store as it depends on file type

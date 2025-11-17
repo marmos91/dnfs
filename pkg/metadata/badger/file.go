@@ -4,9 +4,12 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
+	"github.com/marmos91/dittofs/internal/logger"
 	"github.com/marmos91/dittofs/pkg/metadata"
 )
 
@@ -37,8 +40,20 @@ func (s *BadgerMetadataStore) Lookup(
 		return nil, nil, err
 	}
 
+	// Acquire read lock BEFORE checking cache to ensure cache consistency
+	// This prevents returning stale cached data during concurrent writes
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
+	// Try cache (only for regular names, not "." or "..", and only if cache is enabled)
+	if name != "." && name != ".." && s.lookupCache.enabled {
+		if cached := s.getLookupCached(dirHandle, name); cached != nil {
+			atomic.AddUint64(&s.lookupCache.hits, 1)
+			attrCopy := *cached.attr
+			return cached.handle, &attrCopy, nil
+		}
+		atomic.AddUint64(&s.lookupCache.misses, 1)
+	}
 
 	var targetHandle metadata.FileHandle
 	var targetAttr *metadata.FileAttr
@@ -190,6 +205,11 @@ func (s *BadgerMetadataStore) Lookup(
 		return nil, nil, err
 	}
 
+	// Cache regular lookups (not "." or "..")
+	if name != "." && name != ".." {
+		s.putLookupCached(dirHandle, name, targetHandle, targetAttr)
+	}
+
 	// Return a copy of attributes to prevent external modification
 	attrCopy := *targetAttr
 	return targetHandle, &attrCopy, nil
@@ -226,8 +246,20 @@ func (s *BadgerMetadataStore) GetFile(
 		}
 	}
 
+	// Acquire read lock BEFORE checking cache to ensure cache consistency
+	// This prevents returning stale cached data during concurrent writes
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
+	// Try cache if enabled
+	if s.getfileCache.enabled {
+		if cached := s.getGetfileCached(handle); cached != nil {
+			atomic.AddUint64(&s.getfileCache.hits, 1)
+			attrCopy := *cached.attr
+			return &attrCopy, nil
+		}
+		atomic.AddUint64(&s.getfileCache.misses, 1)
+	}
 
 	var attr *metadata.FileAttr
 
@@ -257,9 +289,86 @@ func (s *BadgerMetadataStore) GetFile(
 		return nil, err
 	}
 
+	// Cache the result
+	s.putGetfileCached(handle, attr)
+
 	// Return a copy to prevent external modification
 	attrCopy := *attr
 	return &attrCopy, nil
+}
+
+// GetShareNameForHandle returns the share name for a given file handle.
+//
+// This works with both path-based and hash-based handles by looking up the
+// file metadata which contains the ShareName field.
+//
+// Parameters:
+//   - ctx: Context for cancellation
+//   - handle: File handle (path-based or hash-based)
+//
+// Returns:
+//   - string: Share name the file belongs to
+//   - error: ErrNotFound if handle is invalid, context errors
+func (s *BadgerMetadataStore) GetShareNameForHandle(
+	ctx context.Context,
+	handle metadata.FileHandle,
+) (string, error) {
+	// Check context cancellation
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+
+	// Check for invalid (empty) handle
+	if len(handle) == 0 {
+		return "", &metadata.StoreError{
+			Code:    metadata.ErrInvalidHandle,
+			Message: "invalid file handle",
+		}
+	}
+
+	// Try cache first
+	if cached := s.getShareNameCached(handle); cached != nil {
+		atomic.AddUint64(&s.shareNameCache.hits, 1)
+		return cached.shareName, nil
+	}
+
+	atomic.AddUint64(&s.shareNameCache.misses, 1)
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var shareName string
+
+	err := s.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(keyFile(handle))
+		if err == badger.ErrKeyNotFound {
+			return &metadata.StoreError{
+				Code:    metadata.ErrNotFound,
+				Message: "file not found",
+			}
+		}
+		if err != nil {
+			return fmt.Errorf("failed to get file: %w", err)
+		}
+
+		return item.Value(func(val []byte) error {
+			fileData, err := decodeFileData(val)
+			if err != nil {
+				return err
+			}
+			shareName = fileData.ShareName
+			return nil
+		})
+	})
+
+	if err != nil {
+		return "", err
+	}
+
+	// Cache the result
+	s.putShareNameCached(handle, shareName)
+
+	return shareName, nil
 }
 
 // SetFileAttributes updates file attributes with validation and access control.
@@ -473,6 +582,9 @@ func (s *BadgerMetadataStore) SetFileAttributes(
 			if err := txn.Set(keyFile(handle), fileBytes); err != nil {
 				return fmt.Errorf("failed to update file data: %w", err)
 			}
+
+			// Invalidate getfile cache
+			s.invalidateGetfile(handle)
 		}
 
 		return nil
@@ -645,8 +757,23 @@ func (s *BadgerMetadataStore) Create(
 			// Generate ContentID for regular files
 			// Format: shareName/path/to/file (e.g., "export/docs/report.pdf")
 			// This mirrors the filesystem structure in S3 for easy inspection and recovery
-			contentID := buildContentID(parentData.ShareName, fullPath)
+
+			// Extract relative path from fullPath
+			// fullPath format: /<shareName>:/<relative-path>
+			// Example: /export:/scripts/file.txt -> /scripts/file.txt
+			// Note: In some contexts (e.g., tests), fullPath may not have a share prefix,
+			// in which case we use the entire path as the relative path.
+			relativePath := fullPath
+			if colonIndex := strings.Index(fullPath, ":"); colonIndex != -1 {
+				relativePath = fullPath[colonIndex+1:]
+			}
+
+			contentID := buildContentID(parentData.ShareName, relativePath)
 			newAttr.ContentID = metadata.ContentID(contentID)
+
+			// Log ContentID generation for debugging (only at Debug level to avoid log spam)
+			logger.Debug("Generated ContentID: file='%s' fullPath='%s' relativePath='%s' contentID='%s'",
+				name, fullPath, relativePath, contentID)
 		} else {
 			newAttr.ContentID = ""
 		}
@@ -703,6 +830,12 @@ func (s *BadgerMetadataStore) Create(
 		return nil, err
 	}
 
+	// Invalidate stats cache since we created a new file
+	s.invalidateStatsCache()
+
+	// Invalidate directory caches for parent directory
+	s.invalidateDirectory(parentHandle)
+
 	return newHandle, nil
 }
 
@@ -744,7 +877,7 @@ func (s *BadgerMetadataStore) CreateHardLink(
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return s.db.Update(func(txn *badger.Txn) error {
+	err := s.db.Update(func(txn *badger.Txn) error {
 		// Verify target exists and is not a directory
 		targetItem, err := txn.Get(keyFile(targetHandle))
 		if err == badger.ErrKeyNotFound {
@@ -887,6 +1020,13 @@ func (s *BadgerMetadataStore) CreateHardLink(
 
 		return nil
 	})
+
+	if err == nil {
+		// Invalidate directory caches for parent directory
+		s.invalidateDirectory(dirHandle)
+	}
+
+	return err
 }
 
 // Move moves or renames a file or directory atomically.
@@ -935,7 +1075,10 @@ func (s *BadgerMetadataStore) Move(
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	return s.db.Update(func(txn *badger.Txn) error {
+	var movedHandle metadata.FileHandle
+	var replacedHandle metadata.FileHandle
+
+	err := s.db.Update(func(txn *badger.Txn) error {
 		// Get source handle
 		sourceItem, err := txn.Get(keyChild(fromDir, fromName))
 		if err == badger.ErrKeyNotFound {
@@ -952,6 +1095,7 @@ func (s *BadgerMetadataStore) Move(
 		var sourceHandle metadata.FileHandle
 		err = sourceItem.Value(func(val []byte) error {
 			sourceHandle = metadata.FileHandle(val)
+			movedHandle = sourceHandle // Save for cache invalidation
 			return nil
 		})
 		if err != nil {
@@ -1017,6 +1161,7 @@ func (s *BadgerMetadataStore) Move(
 			var destHandle metadata.FileHandle
 			err = destChildItem.Value(func(val []byte) error {
 				destHandle = metadata.FileHandle(val)
+				replacedHandle = destHandle // Save for cache invalidation
 				return nil
 			})
 			if err != nil {
@@ -1184,4 +1329,25 @@ func (s *BadgerMetadataStore) Move(
 
 		return nil
 	})
+
+	if err == nil {
+		// Invalidate directory caches for both source and destination
+		s.invalidateDirectory(fromDir)
+		if !slices.Equal(fromDir, toDir) {
+			s.invalidateDirectory(toDir)
+		}
+		// Invalidate getfile cache for moved file and replaced file (if any)
+		s.invalidateGetfile(movedHandle)
+		if len(replacedHandle) > 0 {
+			s.invalidateGetfile(replacedHandle)
+		}
+		// Note: We do NOT invalidate sharename cache here because a file's share
+		// is determined by its location in the directory tree and remains constant
+		// during Move operations. A file can only be moved within the same share
+		// (cross-share moves are not supported), so the sharename association never
+		// changes. RemoveFile invalidates sharename cache for completeness, but in
+		// both cases the share association is effectively immutable per file handle.
+	}
+
+	return err
 }
