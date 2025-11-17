@@ -1342,11 +1342,11 @@ func (s *BadgerMetadataStore) Move(
 			s.invalidateGetfile(replacedHandle)
 		}
 		// Note: We do NOT invalidate sharename cache here because a file's share
-		// cannot change during a Move operation within the same filesystem. Shares
-		// are root-level mount points, and all files within a share remain in that
-		// share even when moved to different directories. This is different from
-		// RemoveFile, which may affect the file's share association if deleting
-		// cross-share references.
+		// is determined by its location in the directory tree and remains constant
+		// during Move operations. A file can only be moved within the same share
+		// (cross-share moves are not supported), so the sharename association never
+		// changes. RemoveFile invalidates sharename cache for completeness, but in
+		// both cases the share association is effectively immutable per file handle.
 	}
 
 	return err

@@ -507,22 +507,32 @@ func (s *BadgerMetadataStore) getReaddirCached(handle metadata.FileHandle) *read
 		return nil
 	}
 
-	s.readdirCache.mu.RLock()
-	defer s.readdirCache.mu.RUnlock()
-
 	key := readdirCacheKey(handle)
+
+	// First, acquire read lock to check cache and TTL
+	s.readdirCache.mu.RLock()
 	entry, exists := s.readdirCache.cache[key]
 	if !exists {
+		s.readdirCache.mu.RUnlock()
 		return nil
 	}
 
 	// Check TTL
 	if time.Since(entry.timestamp) > s.readdirCache.ttl {
+		s.readdirCache.mu.RUnlock()
 		return nil
 	}
+	s.readdirCache.mu.RUnlock()
 
-	// Update LRU
-	s.readdirCache.lruList.MoveToFront(entry.lruNode)
+	// Update LRU - requires write lock
+	s.readdirCache.mu.Lock()
+	// Re-check that entry still exists and is valid (could have been evicted)
+	entry, exists = s.readdirCache.cache[key]
+	if exists && time.Since(entry.timestamp) <= s.readdirCache.ttl {
+		s.readdirCache.lruList.MoveToFront(entry.lruNode)
+	}
+	s.readdirCache.mu.Unlock()
+
 	return entry
 }
 
@@ -585,22 +595,32 @@ func (s *BadgerMetadataStore) getLookupCached(parentHandle metadata.FileHandle, 
 		return nil
 	}
 
-	s.lookupCache.mu.RLock()
-	defer s.lookupCache.mu.RUnlock()
-
 	key := lookupCacheKey(parentHandle, name)
+
+	// First, acquire read lock to check cache and TTL
+	s.lookupCache.mu.RLock()
 	entry, exists := s.lookupCache.cache[key]
 	if !exists {
+		s.lookupCache.mu.RUnlock()
 		return nil
 	}
 
 	// Check TTL
 	if time.Since(entry.timestamp) > s.lookupCache.ttl {
+		s.lookupCache.mu.RUnlock()
 		return nil
 	}
+	s.lookupCache.mu.RUnlock()
 
-	// Update LRU
-	s.lookupCache.lruList.MoveToFront(entry.lruNode)
+	// Update LRU - requires write lock
+	s.lookupCache.mu.Lock()
+	// Re-check that entry still exists and is valid (could have been evicted)
+	entry, exists = s.lookupCache.cache[key]
+	if exists && time.Since(entry.timestamp) <= s.lookupCache.ttl {
+		s.lookupCache.lruList.MoveToFront(entry.lruNode)
+	}
+	s.lookupCache.mu.Unlock()
+
 	return entry
 }
 
@@ -699,21 +719,31 @@ func (s *BadgerMetadataStore) getGetfileCached(handle metadata.FileHandle) *getf
 		return nil
 	}
 
-	s.getfileCache.mu.RLock()
-	defer s.getfileCache.mu.RUnlock()
+	key := string(handle)
 
-	entry, exists := s.getfileCache.cache[string(handle)]
+	// First, acquire read lock to check cache and TTL
+	s.getfileCache.mu.RLock()
+	entry, exists := s.getfileCache.cache[key]
 	if !exists {
+		s.getfileCache.mu.RUnlock()
 		return nil
 	}
 
 	// Check TTL
 	if time.Since(entry.timestamp) > s.getfileCache.ttl {
+		s.getfileCache.mu.RUnlock()
 		return nil
 	}
+	s.getfileCache.mu.RUnlock()
 
-	// Update LRU
-	s.getfileCache.lruList.MoveToFront(entry.lruNode)
+	// Update LRU - requires write lock
+	s.getfileCache.mu.Lock()
+	// Re-check that entry still exists and is valid (could have been evicted)
+	entry, exists = s.getfileCache.cache[key]
+	if exists && time.Since(entry.timestamp) <= s.getfileCache.ttl {
+		s.getfileCache.lruList.MoveToFront(entry.lruNode)
+	}
+	s.getfileCache.mu.Unlock()
 
 	return entry
 }
@@ -787,21 +817,31 @@ func (s *BadgerMetadataStore) getShareNameCached(handle metadata.FileHandle) *sh
 		return nil
 	}
 
-	s.shareNameCache.mu.RLock()
-	defer s.shareNameCache.mu.RUnlock()
+	key := string(handle)
 
-	entry, exists := s.shareNameCache.cache[string(handle)]
+	// First, acquire read lock to check cache and TTL
+	s.shareNameCache.mu.RLock()
+	entry, exists := s.shareNameCache.cache[key]
 	if !exists {
+		s.shareNameCache.mu.RUnlock()
 		return nil
 	}
 
 	// Check TTL
 	if time.Since(entry.timestamp) > s.shareNameCache.ttl {
+		s.shareNameCache.mu.RUnlock()
 		return nil
 	}
+	s.shareNameCache.mu.RUnlock()
 
-	// Update LRU
-	s.shareNameCache.lruList.MoveToFront(entry.lruNode)
+	// Update LRU - requires write lock
+	s.shareNameCache.mu.Lock()
+	// Re-check that entry still exists and is valid (could have been evicted)
+	entry, exists = s.shareNameCache.cache[key]
+	if exists && time.Since(entry.timestamp) <= s.shareNameCache.ttl {
+		s.shareNameCache.lruList.MoveToFront(entry.lruNode)
+	}
+	s.shareNameCache.mu.Unlock()
 
 	return entry
 }
