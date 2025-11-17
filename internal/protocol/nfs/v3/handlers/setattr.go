@@ -378,7 +378,8 @@ func (h *DefaultNFSHandler) SetAttr(
 	// ========================================================================
 	// If no attributes are specified, return success immediately with current
 	// attributes. This is valid NFS behavior - macOS Finder and other clients
-	// sometimes send empty SETATTR to verify access or update ctime.
+	// sometimes send empty SETATTR requests (possibly for access verification).
+	// Note: This is a true no-op; ctime is NOT updated for empty SETATTR.
 
 	if req.NewAttr.Mode == nil && req.NewAttr.UID == nil && req.NewAttr.GID == nil &&
 		req.NewAttr.Size == nil && req.NewAttr.Atime == nil && req.NewAttr.Mtime == nil {

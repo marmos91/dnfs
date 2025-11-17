@@ -132,29 +132,23 @@ func (s *S3ContentStore) WriteAt(ctx context.Context, id metadata.ContentID, dat
 		return nil
 	}
 
-	// Non-sequential write detected - this is rare but needs special handling
-	// For correctness, we need to flush the buffer to S3 before doing a
-	// read-modify-write cycle. But since PutObject replaces the object,
-	// we need to merge the buffer with existing S3 data.
-	if len(buffer.data) > 0 {
-		logger.Warn("Non-sequential write detected with buffered data - this requires read-modify-write: content_id=%s buffer_size=%d offset=%d expected_offset=%d",
-			string(id), len(buffer.data), offset, buffer.expectedSize)
-
-		// For now, discard the buffer and log a warning.
-		// A proper implementation would:
-		// 1. Read existing S3 object (if any)
-		// 2. Merge buffered data at the correct offset
-		// 3. Handle the new write
-		// 4. Upload the complete result
-		buffer.data = buffer.data[:0]
-		buffer.expectedSize = 0
-	}
-
 	// ========================================================================
 	// FALLBACK: Non-sequential write (rare - random access or overwrites)
 	// ========================================================================
-	// This is slower but handles all cases correctly.
+	// When a non-sequential write is detected, we need to:
+	// 1. Read existing S3 object (if any)
+	// 2. Merge any buffered sequential writes (which start at offset 0)
+	// 3. Apply the new non-sequential write
+	// 4. Upload the complete merged result
+	// This ensures no data is lost from the buffer.
 
+	hasBufferedData := len(buffer.data) > 0
+	if hasBufferedData {
+		logger.Warn("Non-sequential write detected with buffered data - performing read-modify-write to preserve all data: content_id=%s buffer_size=%d offset=%d expected_offset=%d",
+			string(id), len(buffer.data), offset, buffer.expectedSize)
+	}
+
+	// Step 1: Read existing S3 object (if any)
 	existingData := []byte{}
 	exists, err := s.ContentExists(ctx, id)
 	if err != nil {
@@ -174,25 +168,43 @@ func (s *S3ContentStore) WriteAt(ctx context.Context, id metadata.ContentID, dat
 		}
 	}
 
-	// Extend existing data if needed for sparse writes
-	requiredSize := offset + int64(len(data))
-	if int64(len(existingData)) < requiredSize {
-		newData := make([]byte, requiredSize)
-		copy(newData, existingData)
-		existingData = newData
+	// Step 2: Determine the final size needed
+	// Must accommodate: existing data, buffered data (starts at 0), and new write at offset
+	finalSize := int64(len(existingData))
+	if hasBufferedData && buffer.expectedSize > finalSize {
+		finalSize = buffer.expectedSize
+	}
+	newWriteEnd := offset + int64(len(data))
+	if newWriteEnd > finalSize {
+		finalSize = newWriteEnd
 	}
 
-	// Write new data at offset
-	copy(existingData[offset:], data)
+	// Create merged data buffer
+	mergedData := make([]byte, finalSize)
 
-	// Upload modified content
+	// Copy existing S3 data
+	copy(mergedData, existingData)
+
+	// Step 3: Merge buffered data (overwrites starting from offset 0)
+	if hasBufferedData {
+		copy(mergedData, buffer.data)
+		// Clear buffer after merging
+		buffer.data = buffer.data[:0]
+		buffer.expectedSize = 0
+		buffer.lastWrite = time.Time{}
+	}
+
+	// Step 4: Apply the new non-sequential write
+	copy(mergedData[offset:], data)
+
+	// Step 5: Upload the complete merged result
 	_, err = s.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(key),
-		Body:   bytes.NewReader(existingData),
+		Body:   bytes.NewReader(mergedData),
 	})
 	if err != nil {
-		return fmt.Errorf("failed to write modified object to S3: %w", err)
+		return fmt.Errorf("failed to write merged object to S3: %w", err)
 	}
 
 	return nil

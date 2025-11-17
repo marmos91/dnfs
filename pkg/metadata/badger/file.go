@@ -40,6 +40,11 @@ func (s *BadgerMetadataStore) Lookup(
 		return nil, nil, err
 	}
 
+	// Acquire read lock BEFORE checking cache to ensure cache consistency
+	// This prevents returning stale cached data during concurrent writes
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	// Try cache (only for regular names, not "." or "..", and only if cache is enabled)
 	if name != "." && name != ".." && s.lookupCache.enabled {
 		if cached := s.getLookupCached(dirHandle, name); cached != nil {
@@ -49,9 +54,6 @@ func (s *BadgerMetadataStore) Lookup(
 		}
 		atomic.AddUint64(&s.lookupCache.misses, 1)
 	}
-
-	s.mu.RLock()
-	defer s.mu.RUnlock()
 
 	var targetHandle metadata.FileHandle
 	var targetAttr *metadata.FileAttr
@@ -244,6 +246,11 @@ func (s *BadgerMetadataStore) GetFile(
 		}
 	}
 
+	// Acquire read lock BEFORE checking cache to ensure cache consistency
+	// This prevents returning stale cached data during concurrent writes
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
 	// Try cache if enabled
 	if s.getfileCache.enabled {
 		if cached := s.getGetfileCached(handle); cached != nil {
@@ -253,9 +260,6 @@ func (s *BadgerMetadataStore) GetFile(
 		}
 		atomic.AddUint64(&s.getfileCache.misses, 1)
 	}
-
-	s.mu.RLock()
-	defer s.mu.RUnlock()
 
 	var attr *metadata.FileAttr
 
@@ -322,6 +326,14 @@ func (s *BadgerMetadataStore) GetShareNameForHandle(
 		}
 	}
 
+	// Try cache first
+	if cached := s.getShareNameCached(handle); cached != nil {
+		atomic.AddUint64(&s.shareNameCache.hits, 1)
+		return cached.shareName, nil
+	}
+
+	atomic.AddUint64(&s.shareNameCache.misses, 1)
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -352,6 +364,9 @@ func (s *BadgerMetadataStore) GetShareNameForHandle(
 	if err != nil {
 		return "", err
 	}
+
+	// Cache the result
+	s.putShareNameCached(handle, shareName)
 
 	return shareName, nil
 }
@@ -754,8 +769,8 @@ func (s *BadgerMetadataStore) Create(
 			contentID := buildContentID(parentData.ShareName, relativePath)
 			newAttr.ContentID = metadata.ContentID(contentID)
 
-			// Log ContentID generation for debugging (temporary)
-			logger.Info("Generated ContentID: file='%s' fullPath='%s' relativePath='%s' contentID='%s'",
+			// Log ContentID generation for debugging (only at Debug level to avoid log spam)
+			logger.Debug("Generated ContentID: file='%s' fullPath='%s' relativePath='%s' contentID='%s'",
 				name, fullPath, relativePath, contentID)
 		} else {
 			newAttr.ContentID = ""

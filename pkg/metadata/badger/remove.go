@@ -249,6 +249,7 @@ func (s *BadgerMetadataStore) RemoveFile(
 	s.invalidateStatsCache()
 	s.invalidateDirectory(parentHandle)
 	s.invalidateGetfile(removedHandle)
+	s.invalidateShareName(removedHandle)
 
 	return returnAttr, nil
 }
@@ -487,6 +488,7 @@ func (s *BadgerMetadataStore) RemoveDirectory(
 	s.invalidateStatsCache()
 	s.invalidateDirectory(parentHandle)
 	s.invalidateGetfile(removedHandle)
+	s.invalidateShareName(removedHandle)
 
 	return nil
 }

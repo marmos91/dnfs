@@ -7,7 +7,6 @@ package cache
 
 import (
 	"container/list"
-	"context"
 	"sync"
 	"time"
 

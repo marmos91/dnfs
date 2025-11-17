@@ -123,6 +123,20 @@ type BadgerMetadataStore struct {
 		hits         uint64
 		misses       uint64
 	}
+
+	// shareNameCache caches share names by handle (LRU + TTL).
+	// Share names are immutable for a given handle, making them ideal for caching.
+	// This avoids expensive DB lookups on every NFS operation that needs auth context.
+	shareNameCache struct {
+		enabled    bool
+		ttl        time.Duration
+		maxEntries int
+		cache      map[string]*shareNameCacheEntry
+		lruList    *list.List
+		mu         sync.RWMutex
+		hits       uint64
+		misses     uint64
+	}
 }
 
 // readdirCacheEntry stores cached directory listing.
@@ -145,6 +159,13 @@ type lookupCacheEntry struct {
 // getfileCacheEntry stores cached file attributes.
 type getfileCacheEntry struct {
 	attr      *metadata.FileAttr
+	timestamp time.Time
+	lruNode   *list.Element
+}
+
+// shareNameCacheEntry stores cached share name.
+type shareNameCacheEntry struct {
+	shareName string
 	timestamp time.Time
 	lruNode   *list.Element
 }
@@ -323,8 +344,19 @@ func NewBadgerMetadataStore(ctx context.Context, config BadgerMetadataStoreConfi
 		store.getfileCache.cache = make(map[string]*getfileCacheEntry)
 		store.getfileCache.lruList = list.New()
 
-		logger.Info("Metadata cache enabled: ttl=%v readdir_max=%d lookup_max=%d getfile_max=%d invalidate_on_write=%v",
-			ttl, store.readdirCache.maxEntries, store.lookupCache.maxEntries, store.getfileCache.maxEntries, invalidOnMod)
+		// ShareName cache (same size as getfile - one entry per file)
+		// Share names are immutable and frequently accessed on every NFS operation
+		store.shareNameCache.enabled = true
+		store.shareNameCache.ttl = ttl
+		store.shareNameCache.maxEntries = config.CacheMaxEntries * 10
+		if config.CacheMaxEntries == 0 {
+			store.shareNameCache.maxEntries = 10000
+		}
+		store.shareNameCache.cache = make(map[string]*shareNameCacheEntry)
+		store.shareNameCache.lruList = list.New()
+
+		logger.Info("Metadata cache enabled: ttl=%v readdir_max=%d lookup_max=%d getfile_max=%d sharename_max=%d invalidate_on_write=%v",
+			ttl, store.readdirCache.maxEntries, store.lookupCache.maxEntries, store.getfileCache.maxEntries, store.shareNameCache.maxEntries, invalidOnMod)
 	}
 
 	// Initialize singleton keys if they don't exist
@@ -741,6 +773,95 @@ func (s *BadgerMetadataStore) invalidateGetfile(handle metadata.FileHandle) {
 	if entry, exists := s.getfileCache.cache[key]; exists {
 		s.getfileCache.lruList.Remove(entry.lruNode)
 		delete(s.getfileCache.cache, key)
+	}
+}
+
+// getShareNameCached retrieves cached share name if valid.
+func (s *BadgerMetadataStore) getShareNameCached(handle metadata.FileHandle) *shareNameCacheEntry {
+	if !s.shareNameCache.enabled {
+		return nil
+	}
+
+	s.shareNameCache.mu.RLock()
+	defer s.shareNameCache.mu.RUnlock()
+
+	key := string(handle)
+	entry, exists := s.shareNameCache.cache[key]
+	if !exists {
+		return nil
+	}
+
+	// Check TTL
+	if time.Since(entry.timestamp) > s.shareNameCache.ttl {
+		return nil
+	}
+
+	// Update LRU
+	s.shareNameCache.lruList.MoveToFront(entry.lruNode)
+
+	return entry
+}
+
+// putShareNameCached stores share name in cache.
+func (s *BadgerMetadataStore) putShareNameCached(handle metadata.FileHandle, shareName string) {
+	if !s.shareNameCache.enabled {
+		return
+	}
+
+	s.shareNameCache.mu.Lock()
+	defer s.shareNameCache.mu.Unlock()
+
+	key := string(handle)
+
+	// Update existing entry
+	if existing, exists := s.shareNameCache.cache[key]; exists {
+		existing.shareName = shareName
+		existing.timestamp = time.Now()
+		s.shareNameCache.lruList.MoveToFront(existing.lruNode)
+		return
+	}
+
+	// Evict if full
+	if len(s.shareNameCache.cache) >= s.shareNameCache.maxEntries {
+		s.evictOldestShareName()
+	}
+
+	// Create new entry
+	entry := &shareNameCacheEntry{
+		shareName: shareName,
+		timestamp: time.Now(),
+	}
+	entry.lruNode = s.shareNameCache.lruList.PushFront(key)
+	s.shareNameCache.cache[key] = entry
+}
+
+// evictOldestShareName removes the least recently used sharename cache entry.
+func (s *BadgerMetadataStore) evictOldestShareName() {
+	if s.shareNameCache.lruList.Len() == 0 {
+		return
+	}
+
+	oldest := s.shareNameCache.lruList.Back()
+	if oldest != nil {
+		key := oldest.Value.(string)
+		delete(s.shareNameCache.cache, key)
+		s.shareNameCache.lruList.Remove(oldest)
+	}
+}
+
+// invalidateShareName invalidates cached share name for a specific handle.
+func (s *BadgerMetadataStore) invalidateShareName(handle metadata.FileHandle) {
+	if !s.shareNameCache.enabled {
+		return
+	}
+
+	s.shareNameCache.mu.Lock()
+	defer s.shareNameCache.mu.Unlock()
+
+	key := string(handle)
+	if entry, exists := s.shareNameCache.cache[key]; exists {
+		s.shareNameCache.lruList.Remove(entry.lruNode)
+		delete(s.shareNameCache.cache, key)
 	}
 }
 

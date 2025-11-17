@@ -37,29 +37,74 @@ func (s *BadgerMetadataStore) ReadDirectory(
 		return nil, err
 	}
 
-	// Try cache if reading from start (token="") and cache is enabled
-	if token == "" && s.readdirCache.enabled {
+	// Acquire read lock BEFORE checking cache to ensure cache consistency
+	// This prevents returning stale cached data during concurrent writes
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	// Try cache if cache is enabled
+	// Note: token can be non-empty for paginated reads from cache
+	if s.readdirCache.enabled {
 		if cached := s.getReaddirCached(dirHandle); cached != nil {
 			atomic.AddUint64(&s.readdirCache.hits, 1)
-			// Convert cached data back to ReadDirPage format
-			entries := make([]metadata.DirEntry, len(cached.names))
-			for i := range cached.names {
-				entries[i] = metadata.DirEntry{
-					ID:   fileHandleToID(cached.children[i]),
-					Name: cached.names[i],
+
+			// Parse pagination token
+			startIdx := 0
+			if token != "" {
+				var err error
+				startIdx, err = strconv.Atoi(token)
+				if err != nil || startIdx < 0 || startIdx > len(cached.names) {
+					return nil, &metadata.StoreError{
+						Code:    metadata.ErrInvalidArgument,
+						Message: "invalid pagination token",
+					}
 				}
 			}
+
+			// Use default maxBytes if not specified (same as uncached path)
+			pageSize := maxBytes
+			if pageSize == 0 {
+				pageSize = 8192 // Default from NFS spec
+			}
+
+			// Apply pagination to cached entries
+			var entries []metadata.DirEntry
+			var totalBytes uint32
+			nextIdx := startIdx
+
+			for nextIdx < len(cached.names) {
+				entry := metadata.DirEntry{
+					ID:   fileHandleToID(cached.children[nextIdx]),
+					Name: cached.names[nextIdx],
+				}
+				// Estimate entry size: 8 bytes for ID + len(Name) + 16 bytes overhead
+				entrySize := uint32(8 + len(entry.Name) + 16)
+
+				// If adding this entry would exceed pageSize and we have at least one entry, stop
+				if totalBytes+entrySize > pageSize && len(entries) > 0 {
+					break
+				}
+
+				totalBytes += entrySize
+				entries = append(entries, entry)
+				nextIdx++
+			}
+
+			// Determine if there are more entries
+			hasMore := nextIdx < len(cached.names)
+			nextToken := ""
+			if hasMore {
+				nextToken = strconv.Itoa(nextIdx)
+			}
+
 			return &metadata.ReadDirPage{
 				Entries:   entries,
-				NextToken: "",
-				HasMore:   false,
+				NextToken: nextToken,
+				HasMore:   hasMore,
 			}, nil
 		}
 		atomic.AddUint64(&s.readdirCache.misses, 1)
 	}
-
-	s.mu.RLock()
-	defer s.mu.RUnlock()
 
 	var page *metadata.ReadDirPage
 	var allChildren []metadata.FileHandle
