@@ -98,7 +98,14 @@ func createS3ContentStore(ctx context.Context, options map[string]any) (content.
 
 	// Decode the options into the config struct
 	var storeCfg S3ContentStoreConfig
-	if err := mapstructure.Decode(options, &storeCfg); err != nil {
+	decoder, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
+		DecodeHook: mapstructure.StringToTimeDurationHookFunc(),
+		Result:     &storeCfg,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create decoder: %w", err)
+	}
+	if err := decoder.Decode(options); err != nil {
 		return nil, fmt.Errorf("failed to decode S3 content store config: %w", err)
 	}
 
