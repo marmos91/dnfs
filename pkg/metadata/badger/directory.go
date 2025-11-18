@@ -3,11 +3,9 @@ package badger
 import (
 	"fmt"
 	"strconv"
-	"sync/atomic"
 	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
-	"github.com/marmos91/dittofs/internal/logger"
 	"github.com/marmos91/dittofs/pkg/metadata"
 )
 
@@ -53,120 +51,13 @@ func (s *BadgerMetadataStore) ReadDirectory(
 		}
 	}
 
-	// Acquire read lock BEFORE checking cache to ensure cache consistency.
-	// The generation counter mechanism provides additional protection against
-	// serving stale cached data during concurrent modifications.
+	// Acquire read lock to ensure consistency during read
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	// Capture generation before checking cache
-	var startGeneration uint64
-	s.readdirCache.mu.RLock()
-	startGeneration = s.readdirCache.generation
-	s.readdirCache.mu.RUnlock()
-
-	// Try cache if cache is enabled
-	// Note: token can be non-empty for paginated reads from cache
-	if s.readdirCache.enabled {
-		cached := s.getReaddirCached(dirHandle)
-		if cached != nil {
-			// Re-check generation to detect concurrent modifications
-			s.readdirCache.mu.RLock()
-			currentGeneration := s.readdirCache.generation
-			s.readdirCache.mu.RUnlock()
-
-			// Validate cached entry is from current generation AND generation hasn't changed
-			if cached.generation == currentGeneration && currentGeneration == startGeneration {
-				// Cached data is valid and generation unchanged - safe to use
-				atomic.AddUint64(&s.readdirCache.hits, 1)
-
-				// Parse pagination token
-				startIdx := 0
-				if token != "" {
-					var err error
-					startIdx, err = strconv.Atoi(token)
-					if err != nil || startIdx < 0 || startIdx > len(cached.names) {
-						return nil, &metadata.StoreError{
-							Code:    metadata.ErrInvalidArgument,
-							Message: "invalid pagination token",
-						}
-					}
-				}
-
-				// Use default maxBytes if not specified (same as uncached path)
-				pageSize := maxBytes
-				if pageSize == 0 {
-					pageSize = 8192 // Default from NFS spec
-				}
-
-				// Apply pagination to cached entries
-				var entries []metadata.DirEntry
-				var totalBytes uint32
-				nextIdx := startIdx
-
-				for nextIdx < len(cached.names) {
-					entry := metadata.DirEntry{
-						ID:     fileHandleToID(cached.children[nextIdx]),
-						Name:   cached.names[nextIdx],
-						Handle: cached.children[nextIdx], // Avoid Lookup() in READDIRPLUS
-						Attr:   nil,                       // TODO: Could cache attrs too
-					}
-					// Estimate entry size: 8 bytes for ID + len(Name) + 16 bytes overhead
-					entrySize := uint32(8 + len(entry.Name) + 16)
-
-					// If adding this entry would exceed pageSize and we have at least one entry, stop
-					if totalBytes+entrySize > pageSize && len(entries) > 0 {
-						break
-					}
-
-					totalBytes += entrySize
-					entries = append(entries, entry)
-					nextIdx++
-				}
-
-				// Determine if there are more entries
-				hasMore := nextIdx < len(cached.names)
-				nextToken := ""
-				if hasMore {
-					nextToken = strconv.Itoa(nextIdx)
-				}
-
-				return &metadata.ReadDirPage{
-					Entries:   entries,
-					NextToken: nextToken,
-					HasMore:   hasMore,
-				}, nil
-			} else {
-				// Generation changed - fall through to DB read
-				// Note: We don't call invalidateReaddir() here to avoid potential deadlock
-				// (holding s.mu.RLock while invalidateReaddir acquires readdirCache.mu.Lock).
-				// The generation check already prevents stale reads, and the cache entry
-				// will be naturally evicted by LRU or expire by TTL.
-				atomic.AddUint64(&s.readdirCache.misses, 1)
-			}
-		} else {
-			atomic.AddUint64(&s.readdirCache.misses, 1)
-		}
-	}
-
-	// Loop until we get a consistent snapshot (generation unchanged during read)
-	// This ensures we NEVER return handles to deleted files
 	var page *metadata.ReadDirPage
-	var allChildren []metadata.FileHandle
-	var allNames []string
-	maxAttempts := 5 // Prevent infinite loops in pathological cases
 
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		// Capture generation right before DB read
-		s.readdirCache.mu.RLock()
-		startGeneration = s.readdirCache.generation
-		s.readdirCache.mu.RUnlock()
-
-		// Reset for retry
-		allChildren = nil
-		allNames = nil
-
-		err = s.db.View(func(txn *badger.Txn) error {
+	err = s.db.View(func(txn *badger.Txn) error {
 		// Get directory data
 		item, err := txn.Get(keyFile(dirHandle))
 		if err == badger.ErrKeyNotFound {
@@ -258,22 +149,10 @@ func (s *BadgerMetadataStore) ReadDirectory(
 				return err
 			}
 
-			// Skip entries before offset (but still track for caching)
+			// Skip entries before offset
 			if currentOffset < offset {
-				// Track all children for caching (if reading from start)
-				// Must track even skipped entries to build complete cache
-				if token == "" {
-					allChildren = append(allChildren, childHandle)
-					allNames = append(allNames, childName)
-				}
 				currentOffset++
 				continue
-			}
-
-			// Track all children for caching (if reading from start)
-			if token == "" {
-				allChildren = append(allChildren, childHandle)
-				allNames = append(allNames, childName)
 			}
 
 			// Create directory entry
@@ -312,45 +191,11 @@ func (s *BadgerMetadataStore) ReadDirectory(
 		return nil
 	})
 
-		if err != nil {
-			return nil, err
-		}
-
-		// Check if generation changed during our read
-		s.readdirCache.mu.RLock()
-		currentGeneration := s.readdirCache.generation
-		s.readdirCache.mu.RUnlock()
-
-		// If generation unchanged, we have consistent data - break out of retry loop
-		if currentGeneration == startGeneration {
-			// Cache and return consistent data
-			if token == "" {
-				s.putReaddirCached(dirHandle, allChildren, allNames)
-			}
-			return page, nil
-		}
-
-		// Generation changed - data may be stale, retry
-		if attempt < maxAttempts {
-			logger.Debug("ReadDirectory: concurrent modification detected (gen %d → %d), retrying (attempt %d/%d)",
-				startGeneration, currentGeneration, attempt, maxAttempts)
-			continue
-		}
-
-		// Max retries exceeded - this shouldn't happen in practice
-		logger.Warn("ReadDirectory: max retries exceeded due to concurrent modifications: dir=%s attempts=%d",
-			dirHandle, maxAttempts)
-		return nil, &metadata.StoreError{
-			Code:    metadata.ErrNotFound,
-			Message: "directory unstable due to concurrent modifications",
-		}
+	if err != nil {
+		return nil, err
 	}
 
-	// Should never reach here
-	return nil, &metadata.StoreError{
-		Code:    metadata.ErrNotFound,
-		Message: "unexpected error in ReadDirectory",
-	}
+	return page, nil
 }
 
 // ReadSymlink reads the target path of a symbolic link.
@@ -646,9 +491,6 @@ func (s *BadgerMetadataStore) CreateSymlink(
 		return nil, err
 	}
 
-	// Invalidate directory caches for parent directory
-	s.invalidateDirectory(parentHandle)
-
 	return newHandle, nil
 }
 
@@ -885,9 +727,6 @@ func (s *BadgerMetadataStore) CreateSpecialFile(
 	if err != nil {
 		return nil, err
 	}
-
-	// Invalidate directory caches for parent directory
-	s.invalidateDirectory(parentHandle)
 
 	return newHandle, nil
 }

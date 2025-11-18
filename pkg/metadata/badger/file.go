@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"slices"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
@@ -40,20 +39,9 @@ func (s *BadgerMetadataStore) Lookup(
 		return nil, nil, err
 	}
 
-	// Acquire read lock BEFORE checking cache to ensure cache consistency
-	// This prevents returning stale cached data during concurrent writes
+	// Acquire read lock to ensure consistency during read
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-
-	// Try cache (only for regular names, not "." or "..", and only if cache is enabled)
-	if name != "." && name != ".." && s.lookupCache.enabled {
-		if cached := s.getLookupCached(dirHandle, name); cached != nil {
-			atomic.AddUint64(&s.lookupCache.hits, 1)
-			attrCopy := *cached.attr
-			return cached.handle, &attrCopy, nil
-		}
-		atomic.AddUint64(&s.lookupCache.misses, 1)
-	}
 
 	var targetHandle metadata.FileHandle
 	var targetAttr *metadata.FileAttr
@@ -205,11 +193,6 @@ func (s *BadgerMetadataStore) Lookup(
 		return nil, nil, err
 	}
 
-	// Cache regular lookups (not "." or "..")
-	if name != "." && name != ".." {
-		s.putLookupCached(dirHandle, name, targetHandle, targetAttr)
-	}
-
 	// Return a copy of attributes to prevent external modification
 	attrCopy := *targetAttr
 	return targetHandle, &attrCopy, nil
@@ -246,20 +229,9 @@ func (s *BadgerMetadataStore) GetFile(
 		}
 	}
 
-	// Acquire read lock BEFORE checking cache to ensure cache consistency
-	// This prevents returning stale cached data during concurrent writes
+	// Acquire read lock to ensure consistency during read
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-
-	// Try cache if enabled
-	if s.getfileCache.enabled {
-		if cached := s.getGetfileCached(handle); cached != nil {
-			atomic.AddUint64(&s.getfileCache.hits, 1)
-			attrCopy := *cached.attr
-			return &attrCopy, nil
-		}
-		atomic.AddUint64(&s.getfileCache.misses, 1)
-	}
 
 	var attr *metadata.FileAttr
 
@@ -288,9 +260,6 @@ func (s *BadgerMetadataStore) GetFile(
 	if err != nil {
 		return nil, err
 	}
-
-	// Cache the result
-	s.putGetfileCached(handle, attr)
 
 	// Return a copy to prevent external modification
 	attrCopy := *attr
@@ -326,14 +295,6 @@ func (s *BadgerMetadataStore) GetShareNameForHandle(
 		}
 	}
 
-	// Try cache first
-	if cached := s.getShareNameCached(handle); cached != nil {
-		atomic.AddUint64(&s.shareNameCache.hits, 1)
-		return cached.shareName, nil
-	}
-
-	atomic.AddUint64(&s.shareNameCache.misses, 1)
-
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -364,9 +325,6 @@ func (s *BadgerMetadataStore) GetShareNameForHandle(
 	if err != nil {
 		return "", err
 	}
-
-	// Cache the result
-	s.putShareNameCached(handle, shareName)
 
 	return shareName, nil
 }
@@ -582,9 +540,6 @@ func (s *BadgerMetadataStore) SetFileAttributes(
 			if err := txn.Set(keyFile(handle), fileBytes); err != nil {
 				return fmt.Errorf("failed to update file data: %w", err)
 			}
-
-			// Invalidate getfile cache
-			s.invalidateGetfile(handle)
 		}
 
 		return nil
@@ -830,12 +785,6 @@ func (s *BadgerMetadataStore) Create(
 		return nil, err
 	}
 
-	// Invalidate stats cache since we created a new file
-	s.invalidateStatsCache()
-
-	// Invalidate directory caches for parent directory
-	s.invalidateDirectory(parentHandle)
-
 	return newHandle, nil
 }
 
@@ -1021,11 +970,6 @@ func (s *BadgerMetadataStore) CreateHardLink(
 		return nil
 	})
 
-	if err == nil {
-		// Invalidate directory caches for parent directory
-		s.invalidateDirectory(dirHandle)
-	}
-
 	return err
 }
 
@@ -1075,9 +1019,6 @@ func (s *BadgerMetadataStore) Move(
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	var movedHandle metadata.FileHandle
-	var replacedHandle metadata.FileHandle
-
 	err := s.db.Update(func(txn *badger.Txn) error {
 		// Get source handle
 		sourceItem, err := txn.Get(keyChild(fromDir, fromName))
@@ -1095,7 +1036,6 @@ func (s *BadgerMetadataStore) Move(
 		var sourceHandle metadata.FileHandle
 		err = sourceItem.Value(func(val []byte) error {
 			sourceHandle = metadata.FileHandle(val)
-			movedHandle = sourceHandle // Save for cache invalidation
 			return nil
 		})
 		if err != nil {
@@ -1161,7 +1101,6 @@ func (s *BadgerMetadataStore) Move(
 			var destHandle metadata.FileHandle
 			err = destChildItem.Value(func(val []byte) error {
 				destHandle = metadata.FileHandle(val)
-				replacedHandle = destHandle // Save for cache invalidation
 				return nil
 			})
 			if err != nil {
@@ -1329,25 +1268,6 @@ func (s *BadgerMetadataStore) Move(
 
 		return nil
 	})
-
-	if err == nil {
-		// Invalidate directory caches for both source and destination
-		s.invalidateDirectory(fromDir)
-		if !slices.Equal(fromDir, toDir) {
-			s.invalidateDirectory(toDir)
-		}
-		// Invalidate getfile cache for moved file and replaced file (if any)
-		s.invalidateGetfile(movedHandle)
-		if len(replacedHandle) > 0 {
-			s.invalidateGetfile(replacedHandle)
-		}
-		// Note: We do NOT invalidate sharename cache here because a file's share
-		// is determined by its location in the directory tree and remains constant
-		// during Move operations. A file can only be moved within the same share
-		// (cross-share moves are not supported), so the sharename association never
-		// changes. RemoveFile invalidates sharename cache for completeness, but in
-		// both cases the share association is effectively immutable per file handle.
-	}
 
 	return err
 }

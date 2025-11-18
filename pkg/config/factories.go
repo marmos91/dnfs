@@ -272,15 +272,11 @@ func createBadgerMetadataStore(ctx context.Context, options map[string]any, capa
 
 	// Decode store-specific options
 	type BadgerMetadataStoreOptions struct {
-		DBPath                 string        `mapstructure:"db_path"`
-		MaxStorageBytes        uint64        `mapstructure:"max_storage_bytes"`
-		MaxFiles               uint64        `mapstructure:"max_files"`
-		CacheEnabled           bool          `mapstructure:"cache_enabled"`
-		CacheTTL               time.Duration `mapstructure:"cache_ttl"`
-		CacheMaxEntries        int           `mapstructure:"cache_max_entries"`
-		CacheInvalidateOnWrite bool          `mapstructure:"cache_invalidate_on_write"`
-		BlockCacheSizeMB       int64         `mapstructure:"block_cache_mb"`
-		IndexCacheSizeMB       int64         `mapstructure:"index_cache_mb"`
+		DBPath           string `mapstructure:"db_path"`
+		MaxStorageBytes  uint64 `mapstructure:"max_storage_bytes"`
+		MaxFiles         uint64 `mapstructure:"max_files"`
+		BlockCacheSizeMB int64  `mapstructure:"block_cache_mb"`
+		IndexCacheSizeMB int64  `mapstructure:"index_cache_mb"`
 	}
 
 	var storeOpts BadgerMetadataStoreOptions
@@ -302,16 +298,12 @@ func createBadgerMetadataStore(ctx context.Context, options map[string]any, capa
 
 	// Create store config
 	storeConfig := badger.BadgerMetadataStoreConfig{
-		DBPath:                 storeOpts.DBPath,
-		Capabilities:           *capabilities,
-		MaxStorageBytes:        storeOpts.MaxStorageBytes,
-		MaxFiles:               storeOpts.MaxFiles,
-		CacheEnabled:           storeOpts.CacheEnabled,
-		CacheTTL:               storeOpts.CacheTTL,
-		CacheMaxEntries:        storeOpts.CacheMaxEntries,
-		CacheInvalidateOnWrite: storeOpts.CacheInvalidateOnWrite,
-		BlockCacheSizeMB:       storeOpts.BlockCacheSizeMB,
-		IndexCacheSizeMB:       storeOpts.IndexCacheSizeMB,
+		DBPath:           storeOpts.DBPath,
+		Capabilities:     *capabilities,
+		MaxStorageBytes:  storeOpts.MaxStorageBytes,
+		MaxFiles:         storeOpts.MaxFiles,
+		BlockCacheSizeMB: storeOpts.BlockCacheSizeMB,
+		IndexCacheSizeMB: storeOpts.IndexCacheSizeMB,
 	}
 
 	store, err := badger.NewBadgerMetadataStore(ctx, storeConfig)

@@ -69,9 +69,6 @@ func (s *BadgerMetadataStore) RemoveFile(
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Invalidate cache before transaction to prevent concurrent reads from caching stale data
-	s.invalidateDirectory(parentHandle)
-
 	var returnAttr *metadata.FileAttr
 	var removedHandle metadata.FileHandle
 
@@ -248,14 +245,6 @@ func (s *BadgerMetadataStore) RemoveFile(
 		return nil, err
 	}
 
-	// Invalidate all caches after successful removal.
-	// We invalidate directory cache again (after pre-emptive invalidation)
-	// because another thread might have repopulated it during our transaction.
-	s.invalidateStatsCache()
-	s.invalidateDirectory(parentHandle)
-	s.invalidateGetfile(removedHandle)
-	s.invalidateShareName(removedHandle)
-
 	logger.Debug("REMOVE succeeded: name=%s parent_handle=%s file_handle=%s", name, parentHandle, removedHandle)
 
 	return returnAttr, nil
@@ -317,9 +306,6 @@ func (s *BadgerMetadataStore) RemoveDirectory(
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Invalidate cache before transaction to prevent concurrent reads from caching stale data
-	s.invalidateDirectory(parentHandle)
-
 	var removedHandle metadata.FileHandle
 
 	// NFSv3 Weak Consistency Mitigation:
@@ -364,8 +350,6 @@ func (s *BadgerMetadataStore) RemoveDirectory(
 			}
 
 			s.mu.Lock()
-			// Re-invalidate cache before retry
-			s.invalidateDirectory(parentHandle)
 		} else {
 			// Don't retry - fail immediately
 			err = attemptErr
@@ -376,14 +360,6 @@ func (s *BadgerMetadataStore) RemoveDirectory(
 	if err != nil {
 		return err
 	}
-
-	// Invalidate all caches after successful removal.
-	// We invalidate directory cache again (after pre-emptive invalidation)
-	// because another thread might have repopulated it during our transaction.
-	s.invalidateStatsCache()
-	s.invalidateDirectory(parentHandle)
-	s.invalidateGetfile(removedHandle)
-	s.invalidateShareName(removedHandle)
 
 	logger.Debug("RMDIR succeeded: name=%s parent_handle=%s dir_handle=%s", name, parentHandle, removedHandle)
 
