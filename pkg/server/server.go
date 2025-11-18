@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"io"
 	"sync"
 	"time"
 
@@ -339,7 +340,17 @@ func (s *DittoServer) serve(ctx context.Context) error {
 	logger.Debug("Waiting for all adapters to complete shutdown")
 	wg.Wait()
 
-	// Stop garbage collector if running
+	// Close content store first to flush pending deletions before stopping GC
+	// This order prevents race conditions where GC tries to delete while store is closing
+	if closer, ok := s.content.(io.Closer); ok {
+		logger.Debug("Closing content store to flush pending operations")
+		if err := closer.Close(); err != nil {
+			logger.Error("Content store shutdown error: %v", err)
+		}
+	}
+
+	// Stop garbage collector after content store is closed
+	// GC may still be running a collection cycle that references the content store
 	if s.gc != nil {
 		gcCtx, gcCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer gcCancel()

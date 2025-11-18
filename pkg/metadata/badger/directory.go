@@ -52,7 +52,9 @@ func (s *BadgerMetadataStore) ReadDirectory(
 		}
 	}
 
-	// Acquire read lock BEFORE checking cache to ensure cache consistency
+	// Acquire read lock BEFORE checking cache to ensure cache consistency.
+	// The generation counter mechanism provides additional protection against
+	// serving stale cached data during concurrent modifications.
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -76,54 +78,54 @@ func (s *BadgerMetadataStore) ReadDirectory(
 				// Generation unchanged - safe to use cached data
 				atomic.AddUint64(&s.readdirCache.hits, 1)
 
-			// Parse pagination token
-			startIdx := 0
-			if token != "" {
-				var err error
-				startIdx, err = strconv.Atoi(token)
-				if err != nil || startIdx < 0 || startIdx > len(cached.names) {
-					return nil, &metadata.StoreError{
-						Code:    metadata.ErrInvalidArgument,
-						Message: "invalid pagination token",
+				// Parse pagination token
+				startIdx := 0
+				if token != "" {
+					var err error
+					startIdx, err = strconv.Atoi(token)
+					if err != nil || startIdx < 0 || startIdx > len(cached.names) {
+						return nil, &metadata.StoreError{
+							Code:    metadata.ErrInvalidArgument,
+							Message: "invalid pagination token",
+						}
 					}
 				}
-			}
 
-			// Use default maxBytes if not specified (same as uncached path)
-			pageSize := maxBytes
-			if pageSize == 0 {
-				pageSize = 8192 // Default from NFS spec
-			}
-
-			// Apply pagination to cached entries
-			var entries []metadata.DirEntry
-			var totalBytes uint32
-			nextIdx := startIdx
-
-			for nextIdx < len(cached.names) {
-				entry := metadata.DirEntry{
-					ID:   fileHandleToID(cached.children[nextIdx]),
-					Name: cached.names[nextIdx],
-				}
-				// Estimate entry size: 8 bytes for ID + len(Name) + 16 bytes overhead
-				entrySize := uint32(8 + len(entry.Name) + 16)
-
-				// If adding this entry would exceed pageSize and we have at least one entry, stop
-				if totalBytes+entrySize > pageSize && len(entries) > 0 {
-					break
+				// Use default maxBytes if not specified (same as uncached path)
+				pageSize := maxBytes
+				if pageSize == 0 {
+					pageSize = 8192 // Default from NFS spec
 				}
 
-				totalBytes += entrySize
-				entries = append(entries, entry)
-				nextIdx++
-			}
+				// Apply pagination to cached entries
+				var entries []metadata.DirEntry
+				var totalBytes uint32
+				nextIdx := startIdx
 
-			// Determine if there are more entries
-			hasMore := nextIdx < len(cached.names)
-			nextToken := ""
-			if hasMore {
-				nextToken = strconv.Itoa(nextIdx)
-			}
+				for nextIdx < len(cached.names) {
+					entry := metadata.DirEntry{
+						ID:   fileHandleToID(cached.children[nextIdx]),
+						Name: cached.names[nextIdx],
+					}
+					// Estimate entry size: 8 bytes for ID + len(Name) + 16 bytes overhead
+					entrySize := uint32(8 + len(entry.Name) + 16)
+
+					// If adding this entry would exceed pageSize and we have at least one entry, stop
+					if totalBytes+entrySize > pageSize && len(entries) > 0 {
+						break
+					}
+
+					totalBytes += entrySize
+					entries = append(entries, entry)
+					nextIdx++
+				}
+
+				// Determine if there are more entries
+				hasMore := nextIdx < len(cached.names)
+				nextToken := ""
+				if hasMore {
+					nextToken = strconv.Itoa(nextIdx)
+				}
 
 				return &metadata.ReadDirPage{
 					Entries:   entries,
@@ -131,16 +133,23 @@ func (s *BadgerMetadataStore) ReadDirectory(
 					HasMore:   hasMore,
 				}, nil
 			} else {
-				// Generation changed - invalidate and fall through to DB read
-				s.invalidateReaddir(dirHandle)
+				// Generation changed - fall through to DB read
+				// Note: We don't call invalidateReaddir() here to avoid potential deadlock
+				// (holding s.mu.RLock while invalidateReaddir acquires readdirCache.mu.Lock).
+				// The generation check already prevents stale reads, and the cache entry
+				// will be naturally evicted by LRU or expire by TTL.
 				atomic.AddUint64(&s.readdirCache.misses, 1)
-				// Update startGeneration for final check after DB read
-				startGeneration = currentGeneration
 			}
 		} else {
 			atomic.AddUint64(&s.readdirCache.misses, 1)
 		}
 	}
+
+	// Capture fresh generation right before DB read for staleness detection
+	// This ensures we detect any modifications that occur during the DB transaction
+	s.readdirCache.mu.RLock()
+	startGeneration = s.readdirCache.generation
+	s.readdirCache.mu.RUnlock()
 
 	var page *metadata.ReadDirPage
 	var allChildren []metadata.FileHandle

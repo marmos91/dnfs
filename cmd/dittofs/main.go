@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/marmos91/dittofs/internal/logger"
 	"github.com/marmos91/dittofs/pkg/adapter/nfs"
@@ -226,6 +227,7 @@ func runStart() {
 		collector, err := gc.NewCollector(metadataStore, contentStore, gc.Config{
 			Enabled:   cfg.GC.Enabled,
 			Interval:  cfg.GC.Interval,
+			Timeout:   cfg.GC.Timeout,
 			BatchSize: cfg.GC.BatchSize,
 			DryRun:    cfg.GC.DryRun,
 		})
@@ -234,8 +236,21 @@ func runStart() {
 			logger.Warn("Server will continue without garbage collection")
 		} else {
 			dittoSrv.SetGC(collector)
-			logger.Info("Garbage collector configured: interval=%s batch_size=%d dry_run=%v",
-				cfg.GC.Interval, cfg.GC.BatchSize, cfg.GC.DryRun)
+			// Log effective values after defaults are applied by NewCollector
+			effectiveInterval := cfg.GC.Interval
+			if effectiveInterval == 0 {
+				effectiveInterval = 24 * time.Hour
+			}
+			effectiveTimeout := cfg.GC.Timeout
+			if effectiveTimeout == 0 {
+				effectiveTimeout = 10 * time.Minute
+			}
+			effectiveBatchSize := cfg.GC.BatchSize
+			if effectiveBatchSize == 0 {
+				effectiveBatchSize = 1000
+			}
+			logger.Info("Garbage collector configured: interval=%s timeout=%s batch_size=%d dry_run=%v",
+				effectiveInterval, effectiveTimeout, effectiveBatchSize, cfg.GC.DryRun)
 		}
 	} else {
 		logger.Debug("Garbage collection disabled")

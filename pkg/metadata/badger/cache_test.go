@@ -1073,7 +1073,7 @@ func TestConcurrentRemoveAndReadDir(t *testing.T) {
 		}
 	}
 
-	// Verify directory has files (test may have some creation failures due to concurrency)
+	// Verify directory has files
 	// Note: Read all pages to get complete count
 	var allEntries []metadata.DirEntry
 	token := ""

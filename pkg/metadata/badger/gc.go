@@ -23,8 +23,7 @@ import (
 // For large filesystems (millions of files), this may take several minutes.
 // The method scans the entire database but is optimized to:
 //   - Use prefix iteration (efficient with LSM-trees)
-//   - Skip value decoding when possible
-//   - Check context every 1000 files
+//   - Check context every 1000 files for cancellation
 //
 // Parameters:
 //   - ctx: Context for cancellation and timeouts

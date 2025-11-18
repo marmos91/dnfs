@@ -14,6 +14,7 @@ package gc
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/marmos91/dittofs/internal/logger"
@@ -33,6 +34,8 @@ type Collector struct {
 	config        Config
 	stopCh        chan struct{}
 	doneCh        chan struct{}
+	startOnce     sync.Once
+	stopOnce      sync.Once
 }
 
 // Config contains configuration for the garbage collector.
@@ -42,6 +45,10 @@ type Config struct {
 
 	// Interval is how often to run garbage collection (default: 24h)
 	Interval time.Duration
+
+	// Timeout is the maximum duration for a single GC run (default: 10m)
+	// For large deployments with millions of files, increase this value.
+	Timeout time.Duration
 
 	// BatchSize is how many orphaned items to delete per batch (default: 1000)
 	// S3 supports up to 1000 objects per DeleteObjects call
@@ -79,6 +86,9 @@ func NewCollector(
 	if config.Interval == 0 {
 		config.Interval = 24 * time.Hour
 	}
+	if config.Timeout == 0 {
+		config.Timeout = 10 * time.Minute
+	}
 	if config.BatchSize == 0 {
 		config.BatchSize = 1000
 	}
@@ -104,10 +114,12 @@ func (c *Collector) Start() {
 		return
 	}
 
-	logger.Info("Starting garbage collector: interval=%s batch_size=%d dry_run=%v",
-		c.config.Interval, c.config.BatchSize, c.config.DryRun)
+	c.startOnce.Do(func() {
+		logger.Info("Starting garbage collector: interval=%s batch_size=%d dry_run=%v",
+			c.config.Interval, c.config.BatchSize, c.config.DryRun)
 
-	go c.worker()
+		go c.worker()
+	})
 }
 
 // Stop stops the garbage collector and waits for it to finish.
@@ -125,20 +137,25 @@ func (c *Collector) Stop(ctx context.Context) error {
 		return nil
 	}
 
-	logger.Info("Stopping garbage collector...")
+	var stopErr error
+	c.stopOnce.Do(func() {
+		logger.Info("Stopping garbage collector...")
 
-	// Signal stop
-	close(c.stopCh)
+		// Signal stop
+		close(c.stopCh)
 
-	// Wait for worker to finish (with context timeout)
-	select {
-	case <-c.doneCh:
-		logger.Info("Garbage collector stopped successfully")
-		return nil
-	case <-ctx.Done():
-		logger.Warn("Garbage collector shutdown timeout")
-		return ctx.Err()
-	}
+		// Wait for worker to finish (with context timeout)
+		select {
+		case <-c.doneCh:
+			logger.Info("Garbage collector stopped successfully")
+			stopErr = nil
+		case <-ctx.Done():
+			logger.Warn("Garbage collector shutdown timeout")
+			stopErr = ctx.Err()
+		}
+	})
+
+	return stopErr
 }
 
 // RunNow triggers an immediate garbage collection run.
@@ -173,8 +190,8 @@ func (c *Collector) worker() {
 	for {
 		select {
 		case <-ticker.C:
-			// Periodic collection
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			// Periodic collection with configured timeout
+			ctx, cancel := context.WithTimeout(context.Background(), c.config.Timeout)
 			stats, err := c.collect(ctx)
 			cancel()
 
@@ -211,11 +228,8 @@ func (c *Collector) collect(ctx context.Context) (*Stats, error) {
 		StartTime: startTime,
 	}
 
-	// Check if content store supports garbage collection
-	gcStore, ok := c.contentStore.(content.GarbageCollectableStore)
-	if !ok {
-		return stats, fmt.Errorf("content store does not support garbage collection")
-	}
+	// Type assertion is guaranteed to succeed due to validation in NewCollector
+	gcStore := c.contentStore.(content.GarbageCollectableStore)
 
 	logger.Info("GC: Phase 1 - Getting referenced content from metadata store...")
 
@@ -246,7 +260,7 @@ func (c *Collector) collect(ctx context.Context) (*Stats, error) {
 	logger.Info("GC: Found %d existing content items", stats.ExistingCount)
 
 	// Phase 3: Compute orphaned content
-	orphaned := make([]metadata.ContentID, 0)
+	orphaned := make([]metadata.ContentID, 0, len(existing))
 	for _, id := range existing {
 		if _, isReferenced := referencedSet[id]; !isReferenced {
 			orphaned = append(orphaned, id)
@@ -262,24 +276,69 @@ func (c *Collector) collect(ctx context.Context) (*Stats, error) {
 
 	logger.Info("GC: Found %d orphaned content items", stats.OrphanedCount)
 
+	// Phase 3.5: Re-verify references before deletion
+	// Race condition prevention: Content created between Phase 1 and Phase 2 could be
+	// incorrectly identified as orphaned. We do ONE final verification here to catch
+	// any content that was created after Phase 1.
+	//
+	// Trade-off: We accept that content created DURING Phase 4 (deletion) may have a
+	// small race window, but it will be caught in the next GC cycle. This is much more
+	// efficient than re-verifying for every batch (which would be O(n * num_batches)).
+	logger.Info("GC: Phase 3.5 - Re-verifying references before deletion...")
+	referencedNow, err := c.metadataStore.GetAllContentIDs(ctx)
+	if err != nil {
+		return stats, fmt.Errorf("failed to re-verify references: %w", err)
+	}
+
+	// Build set of currently referenced content
+	referencedNowSet := make(map[metadata.ContentID]struct{}, len(referencedNow))
+	for _, id := range referencedNow {
+		referencedNowSet[id] = struct{}{}
+	}
+
+	// Filter orphaned list to only include items that are STILL orphaned
+	safeToDelete := make([]metadata.ContentID, 0, len(orphaned))
+	var skippedCount uint64
+	for _, id := range orphaned {
+		if _, isReferenced := referencedNowSet[id]; !isReferenced {
+			safeToDelete = append(safeToDelete, id)
+		} else {
+			// Content is now referenced - skip deletion
+			skippedCount++
+		}
+	}
+
+	if skippedCount > 0 {
+		logger.Info("GC: %d items became referenced during scan, skipping deletion", skippedCount)
+	}
+
+	if len(safeToDelete) == 0 {
+		logger.Info("GC: All items are now referenced, nothing to delete")
+		stats.EndTime = time.Now()
+		return stats, nil
+	}
+
+	logger.Info("GC: Verified %d items are safe to delete", len(safeToDelete))
+
 	if c.config.DryRun {
-		logger.Info("GC: DRY RUN - Would delete %d items:", stats.OrphanedCount)
-		for i, id := range orphaned {
+		logger.Info("GC: DRY RUN - Would delete %d items:", len(safeToDelete))
+		for i, id := range safeToDelete {
 			if i < 10 {
 				logger.Info("  - %s", id)
 			}
 		}
-		if len(orphaned) > 10 {
-			logger.Info("  ... and %d more", len(orphaned)-10)
+		if len(safeToDelete) > 10 {
+			logger.Info("  ... and %d more", len(safeToDelete)-10)
 		}
 		stats.EndTime = time.Now()
 		return stats, nil
 	}
 
-	// Phase 4: Batch delete orphaned content
-	logger.Info("GC: Phase 3 - Deleting orphaned content in batches of %d...", c.config.BatchSize)
+	// Phase 4: Batch delete verified orphaned content
+	logger.Info("GC: Phase 4 - Deleting %d verified orphaned items in batches of %d...",
+		len(safeToDelete), c.config.BatchSize)
 
-	for i := 0; i < len(orphaned); i += c.config.BatchSize {
+	for i := 0; i < len(safeToDelete); i += c.config.BatchSize {
 		// Check for cancellation
 		if err := ctx.Err(); err != nil {
 			stats.EndTime = time.Now()
@@ -287,11 +346,11 @@ func (c *Collector) collect(ctx context.Context) (*Stats, error) {
 		}
 
 		end := i + c.config.BatchSize
-		if end > len(orphaned) {
-			end = len(orphaned)
+		if end > len(safeToDelete) {
+			end = len(safeToDelete)
 		}
 
-		batch := orphaned[i:end]
+		batch := safeToDelete[i:end]
 
 		failures, err := gcStore.DeleteBatch(ctx, batch)
 		if err != nil {

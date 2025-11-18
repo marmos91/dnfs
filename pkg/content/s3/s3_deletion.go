@@ -110,21 +110,31 @@ func (s *S3ContentStore) flushDeletionQueue(ctx context.Context) {
 	}
 }
 
-// FlushDeletes forces an immediate flush of all pending deletions.
+// TriggerFlush signals the deletion worker to flush pending deletions.
 //
-// This is useful for:
-//   - Testing (ensure deletions complete before assertions)
-//   - Graceful shutdown (flush before closing)
-//   - Manual triggers (e.g., admin API)
+// IMPORTANT: This is an asynchronous, non-blocking operation that only signals
+// the worker thread. It does NOT wait for the flush to complete and does NOT
+// guarantee the flush has occurred when it returns. The method name uses "Trigger"
+// rather than "Flush" to emphasize the non-blocking behavior.
 //
-// The method blocks until the flush completes or context is cancelled.
+// This method is suitable for:
+//   - Manual flush triggers (e.g., admin API endpoint)
+//   - Opportunistic flushing when convenient
+//
+// This method is NOT suitable for:
+//   - Testing (use Close() which provides synchronous guarantee)
+//   - Shutdown sequences (use Close() which waits for completion)
+//   - Any scenario requiring confirmation that deletions completed
+//
+// For guaranteed, synchronous flushing, use Close() instead, which waits for
+// the worker to finish and ensures all queued deletions are processed.
 //
 // Parameters:
 //   - ctx: Context for cancellation and timeout
 //
 // Returns:
 //   - error: Returns error if context is cancelled
-func (s *S3ContentStore) FlushDeletes(ctx context.Context) error {
+func (s *S3ContentStore) TriggerFlush(ctx context.Context) error {
 	if !s.deletionQueue.enabled {
 		return nil // Nothing to flush
 	}
@@ -134,18 +144,15 @@ func (s *S3ContentStore) FlushDeletes(ctx context.Context) error {
 		return err
 	}
 
-	// Trigger flush
+	// Signal the worker to flush (non-blocking)
 	select {
 	case s.deletionQueue.flushCh <- struct{}{}:
+		// Signal sent successfully
 	case <-ctx.Done():
 		return ctx.Err()
 	default:
 		// Channel already has signal, skip
 	}
-
-	// Wait briefly for worker to process
-	// Note: This is best-effort, not guaranteed synchronous
-	time.Sleep(100 * time.Millisecond)
 
 	return nil
 }
@@ -157,24 +164,28 @@ func (s *S3ContentStore) FlushDeletes(ctx context.Context) error {
 //  2. Waits for the worker to finish flushing
 //  3. Returns when shutdown is complete
 //
+// Safe to call multiple times (subsequent calls are no-ops).
 // Call this during server shutdown to ensure all deletions complete.
 func (s *S3ContentStore) Close() error {
 	if !s.deletionQueue.enabled {
 		return nil
 	}
 
-	logger.Info("S3 content store closing, stopping deletion worker...")
+	s.deletionQueue.closeOnce.Do(func() {
+		logger.Info("S3 content store closing, stopping deletion worker...")
 
-	// Signal stop
-	close(s.deletionQueue.stopCh)
+		// Signal stop
+		close(s.deletionQueue.stopCh)
 
-	// Wait for worker to finish (with timeout)
-	select {
-	case <-s.deletionQueue.doneCh:
-		logger.Info("S3 deletion worker stopped successfully")
-	case <-time.After(60 * time.Second):
-		logger.Warn("S3 deletion worker shutdown timeout after 60s")
-	}
+		// Wait for worker to finish (with configurable timeout)
+		timeout := s.deletionQueue.shutdownTimeout
+		select {
+		case <-s.deletionQueue.doneCh:
+			logger.Info("S3 deletion worker stopped successfully")
+		case <-time.After(timeout):
+			logger.Warn("S3 deletion worker shutdown timeout after %s", timeout)
+		}
+	})
 
 	return nil
 }

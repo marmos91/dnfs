@@ -244,12 +244,17 @@ type AdaptersConfig struct {
 // The collector is generic and works with any MetadataStore and ContentStore
 // implementation that supports the required interfaces.
 type GCConfig struct {
-	// Enabled controls whether garbage collection is active (default: true)
+	// Enabled controls whether garbage collection is active (default: false)
 	Enabled bool `mapstructure:"enabled"`
 
 	// Interval is how often to run garbage collection (default: 24h)
 	// Format: duration string (e.g., "24h", "12h", "30m")
 	Interval time.Duration `mapstructure:"interval"`
+
+	// Timeout is the maximum duration for a single GC run (default: 10m)
+	// For large deployments with millions of files, increase this value.
+	// Format: duration string (e.g., "10m", "30m", "1h")
+	Timeout time.Duration `mapstructure:"timeout"`
 
 	// BatchSize is how many orphaned items to delete per batch (default: 1000)
 	// S3 supports up to 1000 objects per DeleteObjects call

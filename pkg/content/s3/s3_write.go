@@ -373,11 +373,17 @@ func (s *S3ContentStore) Truncate(ctx context.Context, id metadata.ContentID, ne
 
 // Delete removes content from S3.
 //
-// Buffered Deletion:
-// When buffered deletion is enabled (default), this method queues the deletion
-// and returns immediately. A background worker batches deletions and processes
-// them every 2 seconds or when 100+ items are queued, using S3's DeleteObjects
-// API for efficiency (up to 1000 items per API call).
+// Buffered Deletion (Asynchronous Mode):
+// When buffered deletion is enabled, this method returns nil immediately after
+// queuing the deletion. The actual S3 deletion happens asynchronously via a
+// background worker that batches deletions every 2 seconds or when 100+ items
+// are queued (using S3's DeleteObjects API for efficiency).
+//
+// IMPORTANT: In buffered mode, returning nil does NOT guarantee the deletion
+// has completed or succeeded. Callers must be aware:
+//   - The content may still exist in S3 after this method returns
+//   - Server crashes before flush will lose queued deletions
+//   - Use Close() or TriggerFlush() before shutdown to ensure deletions complete
 //
 // When buffered deletion is disabled, deletions happen immediately (synchronous).
 //

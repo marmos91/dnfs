@@ -77,14 +77,16 @@ type S3ContentStore struct {
 
 	// Buffered deletion queue for batching delete operations
 	deletionQueue struct {
-		enabled       bool                 // Whether buffered deletion is enabled (default: true)
-		queue         []metadata.ContentID // Pending deletions
-		mu            sync.Mutex           // Protects queue
-		flushInterval time.Duration        // How often to batch process (default: 2s)
-		batchSize     int                  // Trigger flush when this many items queued (default: 100)
-		stopCh        chan struct{}        // Signal to stop background worker
-		flushCh       chan struct{}        // Signal to trigger immediate flush
-		doneCh        chan struct{}        // Signal when worker stopped
+		enabled         bool                 // Whether buffered deletion is enabled (default: true)
+		queue           []metadata.ContentID // Pending deletions
+		mu              sync.Mutex           // Protects queue
+		flushInterval   time.Duration        // How often to batch process (default: 2s)
+		batchSize       int                  // Trigger flush when this many items queued (default: 100)
+		shutdownTimeout time.Duration        // Max time to wait for worker to finish on shutdown (default: 60s)
+		stopCh          chan struct{}        // Signal to stop background worker
+		flushCh         chan struct{}        // Signal to trigger immediate flush
+		doneCh          chan struct{}        // Signal when worker stopped
+		closeOnce       sync.Once            // Ensures Close() only executes once
 	}
 }
 
@@ -119,7 +121,7 @@ type S3ContentStoreConfig struct {
 	// Metrics is an optional metrics collector
 	Metrics S3Metrics
 
-	// BufferedDeletionEnabled enables buffered deletion for batch processing (default: true)
+	// BufferedDeletionEnabled enables buffered deletion for batch processing (default: false)
 	// When enabled, Delete() calls are queued and processed in batches
 	BufferedDeletionEnabled bool
 
@@ -130,6 +132,11 @@ type S3ContentStoreConfig struct {
 	// DeletionBatchSize triggers flush when this many items are queued (default: 100)
 	// Set to 0 to use the default batch size of 100
 	DeletionBatchSize int
+
+	// DeletionShutdownTimeout is the maximum time to wait for deletion worker to finish on shutdown (default: 60s)
+	// For large deletion queues or slow S3 connections, increase this value
+	// Set to 0 to use the default 60-second timeout
+	DeletionShutdownTimeout time.Duration
 }
 
 // NewS3ContentStore creates a new S3-based content store.
@@ -229,6 +236,11 @@ func NewS3ContentStore(ctx context.Context, cfg S3ContentStoreConfig) (*S3Conten
 		store.deletionQueue.batchSize = cfg.DeletionBatchSize
 	} else {
 		store.deletionQueue.batchSize = 100 // Default: 100 items
+	}
+	if cfg.DeletionShutdownTimeout > 0 {
+		store.deletionQueue.shutdownTimeout = cfg.DeletionShutdownTimeout
+	} else {
+		store.deletionQueue.shutdownTimeout = 60 * time.Second // Default: 60 seconds
 	}
 	store.deletionQueue.queue = make([]metadata.ContentID, 0, store.deletionQueue.batchSize)
 	store.deletionQueue.stopCh = make(chan struct{})
