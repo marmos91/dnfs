@@ -83,19 +83,29 @@ func createFilesystemContentStore(ctx context.Context, options map[string]any) (
 func createS3ContentStore(ctx context.Context, options map[string]any) (content.WritableContentStore, error) {
 	// Define the configuration struct for S3 content store
 	type S3ContentStoreConfig struct {
-		Region          string `mapstructure:"region"`
-		Bucket          string `mapstructure:"bucket"`
-		KeyPrefix       string `mapstructure:"key_prefix"`
-		Endpoint        string `mapstructure:"endpoint"`
-		AccessKeyID     string `mapstructure:"access_key_id"`
-		SecretAccessKey string `mapstructure:"secret_access_key"`
-		PartSize        int64  `mapstructure:"part_size"`
-		MaxRetries      int    `mapstructure:"max_retries"`
+		Region                  string        `mapstructure:"region"`
+		Bucket                  string        `mapstructure:"bucket"`
+		KeyPrefix               string        `mapstructure:"key_prefix"`
+		Endpoint                string        `mapstructure:"endpoint"`
+		AccessKeyID             string        `mapstructure:"access_key_id"`
+		SecretAccessKey         string        `mapstructure:"secret_access_key"`
+		PartSize                int64         `mapstructure:"part_size"`
+		MaxRetries              int           `mapstructure:"max_retries"`
+		BufferedDeletionEnabled bool          `mapstructure:"buffered_deletion_enabled"`
+		DeletionFlushInterval   time.Duration `mapstructure:"deletion_flush_interval"`
+		DeletionBatchSize       int           `mapstructure:"deletion_batch_size"`
 	}
 
 	// Decode the options into the config struct
 	var storeCfg S3ContentStoreConfig
-	if err := mapstructure.Decode(options, &storeCfg); err != nil {
+	decoder, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
+		DecodeHook: mapstructure.StringToTimeDurationHookFunc(),
+		Result:     &storeCfg,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create decoder: %w", err)
+	}
+	if err := decoder.Decode(options); err != nil {
 		return nil, fmt.Errorf("failed to decode S3 content store config: %w", err)
 	}
 
@@ -178,10 +188,13 @@ func createS3ContentStore(ctx context.Context, options map[string]any) (content.
 	// ========================================================================
 
 	store, err := contentS3.NewS3ContentStore(ctx, contentS3.S3ContentStoreConfig{
-		Client:    client,
-		Bucket:    storeCfg.Bucket,
-		KeyPrefix: storeCfg.KeyPrefix,
-		PartSize:  storeCfg.PartSize,
+		Client:                  client,
+		Bucket:                  storeCfg.Bucket,
+		KeyPrefix:               storeCfg.KeyPrefix,
+		PartSize:                storeCfg.PartSize,
+		BufferedDeletionEnabled: storeCfg.BufferedDeletionEnabled,
+		DeletionFlushInterval:   storeCfg.DeletionFlushInterval,
+		DeletionBatchSize:       storeCfg.DeletionBatchSize,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create S3 content store: %w", err)

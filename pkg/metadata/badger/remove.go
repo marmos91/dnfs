@@ -1,10 +1,12 @@
 package badger
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
+	"github.com/marmos91/dittofs/internal/logger"
 	"github.com/marmos91/dittofs/pkg/metadata"
 )
 
@@ -52,13 +54,28 @@ func (s *BadgerMetadataStore) RemoveFile(
 		}
 	}
 
+	// Check write permission BEFORE acquiring lock to avoid unlock/relock race
+	granted, err := s.CheckPermissions(ctx, parentHandle, metadata.PermissionWrite)
+	if err != nil {
+		return nil, err
+	}
+	if granted&metadata.PermissionWrite == 0 {
+		return nil, &metadata.StoreError{
+			Code:    metadata.ErrAccessDenied,
+			Message: "no write permission on parent directory",
+		}
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Invalidate cache before transaction to prevent concurrent reads from caching stale data
+	s.invalidateDirectory(parentHandle)
 
 	var returnAttr *metadata.FileAttr
 	var removedHandle metadata.FileHandle
 
-	err := s.db.Update(func(txn *badger.Txn) error {
+	err = s.db.Update(func(txn *badger.Txn) error {
 		// Verify parent exists and is a directory
 		item, err := txn.Get(keyFile(parentHandle))
 		if err == badger.ErrKeyNotFound {
@@ -88,20 +105,6 @@ func (s *BadgerMetadataStore) RemoveFile(
 			return &metadata.StoreError{
 				Code:    metadata.ErrNotDirectory,
 				Message: "parent is not a directory",
-			}
-		}
-
-		// Check write permission on parent
-		s.mu.Unlock()
-		granted, err := s.CheckPermissions(ctx, parentHandle, metadata.PermissionWrite)
-		s.mu.Lock()
-		if err != nil {
-			return err
-		}
-		if granted&metadata.PermissionWrite == 0 {
-			return &metadata.StoreError{
-				Code:    metadata.ErrAccessDenied,
-				Message: "no write permission on parent directory",
 			}
 		}
 
@@ -245,11 +248,15 @@ func (s *BadgerMetadataStore) RemoveFile(
 		return nil, err
 	}
 
-	// Invalidate caches
+	// Invalidate all caches after successful removal.
+	// We invalidate directory cache again (after pre-emptive invalidation)
+	// because another thread might have repopulated it during our transaction.
 	s.invalidateStatsCache()
 	s.invalidateDirectory(parentHandle)
 	s.invalidateGetfile(removedHandle)
 	s.invalidateShareName(removedHandle)
+
+	logger.Debug("REMOVE succeeded: name=%s parent_handle=%s file_handle=%s", name, parentHandle, removedHandle)
 
 	return returnAttr, nil
 }
@@ -295,10 +302,104 @@ func (s *BadgerMetadataStore) RemoveDirectory(
 		}
 	}
 
+	// Check write permission BEFORE acquiring lock to avoid unlock/relock race
+	granted, err := s.CheckPermissions(ctx, parentHandle, metadata.PermissionWrite)
+	if err != nil {
+		return err
+	}
+	if granted&metadata.PermissionWrite == 0 {
+		return &metadata.StoreError{
+			Code:    metadata.ErrAccessDenied,
+			Message: "no write permission on parent directory",
+		}
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Invalidate cache before transaction to prevent concurrent reads from caching stale data
+	s.invalidateDirectory(parentHandle)
+
 	var removedHandle metadata.FileHandle
+
+	// NFSv3 Weak Consistency Mitigation:
+	// Clients may pipeline RMDIR requests before all child REMOVE operations complete.
+	// If we detect a "nearly empty" directory (≤5 children), retry once after a brief
+	// delay to allow in-flight operations to complete. This trades a small latency
+	// increase for much better UX with tools like rm -rf and Finder.
+	const maxRetryChildren = 5
+	const retryDelay = 50 * time.Millisecond
+	maxAttempts := 2
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		childCount, shouldRetry, attemptErr := s.attemptRemoveDirectory(ctx, parentHandle, name, &removedHandle)
+
+		if attemptErr == nil {
+			// Success!
+			err = nil
+			break
+		}
+
+		// If not a "directory not empty" error, fail immediately
+		var storeErr *metadata.StoreError
+		if !errors.As(attemptErr, &storeErr) || storeErr.Code != metadata.ErrNotEmpty {
+			err = attemptErr
+			break
+		}
+
+		// Decide whether to retry
+		if attempt < maxAttempts && shouldRetry && childCount > 0 && childCount <= maxRetryChildren {
+			logger.Debug("RMDIR retry: directory has %d children, waiting %v before retry (attempt %d/%d)",
+				childCount, retryDelay, attempt, maxAttempts)
+
+			// Release lock during wait to allow other operations to complete
+			s.mu.Unlock()
+
+			select {
+			case <-time.After(retryDelay):
+				// Retry
+			case <-ctx.Context.Done():
+				s.mu.Lock()
+				return ctx.Context.Err()
+			}
+
+			s.mu.Lock()
+			// Re-invalidate cache before retry
+			s.invalidateDirectory(parentHandle)
+		} else {
+			// Don't retry - fail immediately
+			err = attemptErr
+			break
+		}
+	}
+
+	if err != nil {
+		return err
+	}
+
+	// Invalidate all caches after successful removal.
+	// We invalidate directory cache again (after pre-emptive invalidation)
+	// because another thread might have repopulated it during our transaction.
+	s.invalidateStatsCache()
+	s.invalidateDirectory(parentHandle)
+	s.invalidateGetfile(removedHandle)
+	s.invalidateShareName(removedHandle)
+
+	logger.Debug("RMDIR succeeded: name=%s parent_handle=%s dir_handle=%s", name, parentHandle, removedHandle)
+
+	return nil
+}
+
+// attemptRemoveDirectory performs a single attempt at removing a directory.
+// Returns (childCount, shouldRetry, error)
+func (s *BadgerMetadataStore) attemptRemoveDirectory(
+	ctx *metadata.AuthContext,
+	parentHandle metadata.FileHandle,
+	name string,
+	removedHandle *metadata.FileHandle,
+) (int, bool, error) {
+	var childCountCapture int
+	var dirHandle metadata.FileHandle
 
 	err := s.db.Update(func(txn *badger.Txn) error {
 		// Verify parent exists and is a directory
@@ -333,20 +434,6 @@ func (s *BadgerMetadataStore) RemoveDirectory(
 			}
 		}
 
-		// Check write permission on parent
-		s.mu.Unlock()
-		granted, err := s.CheckPermissions(ctx, parentHandle, metadata.PermissionWrite)
-		s.mu.Lock()
-		if err != nil {
-			return err
-		}
-		if granted&metadata.PermissionWrite == 0 {
-			return &metadata.StoreError{
-				Code:    metadata.ErrAccessDenied,
-				Message: "no write permission on parent directory",
-			}
-		}
-
 		// Find the directory
 		childItem, err := txn.Get(keyChild(parentHandle, name))
 		if err == badger.ErrKeyNotFound {
@@ -360,10 +447,9 @@ func (s *BadgerMetadataStore) RemoveDirectory(
 			return fmt.Errorf("failed to find child: %w", err)
 		}
 
-		var dirHandle metadata.FileHandle
 		err = childItem.Value(func(val []byte) error {
 			dirHandle = metadata.FileHandle(val)
-			removedHandle = dirHandle // Save for cache invalidation
+			*removedHandle = dirHandle // Save for cache invalidation
 			return nil
 		})
 		if err != nil {
@@ -414,7 +500,26 @@ func (s *BadgerMetadataStore) RemoveDirectory(
 
 		it.Rewind()
 		if it.Valid() {
-			// Directory has children, not empty
+			// Directory has children - count them
+			childCount := 0
+			childNames := []string{}
+			for it.Rewind(); it.Valid(); it.Next() {
+				childCount++
+				if len(childNames) < 10 {
+					key := it.Item().Key()
+					prefix := keyChildPrefix(dirHandle)
+					if len(key) > len(prefix) {
+						childNames = append(childNames, string(key[len(prefix):]))
+					}
+				}
+			}
+
+			// Capture for return value
+			childCountCapture = childCount
+
+			logger.Warn("RMDIR attempt failed - directory not empty: name=%s handle=%s children_count=%d children_sample=%v",
+				name, dirHandle, childCount, childNames)
+
 			return &metadata.StoreError{
 				Code:    metadata.ErrNotEmpty,
 				Message: "directory not empty",
@@ -480,15 +585,14 @@ func (s *BadgerMetadataStore) RemoveDirectory(
 		return nil
 	})
 
+	// Determine if we should retry (only for "directory not empty" errors)
+	shouldRetry := false
 	if err != nil {
-		return err
+		var storeErr *metadata.StoreError
+		if errors.As(err, &storeErr) && storeErr.Code == metadata.ErrNotEmpty {
+			shouldRetry = true
+		}
 	}
 
-	// Invalidate caches
-	s.invalidateStatsCache()
-	s.invalidateDirectory(parentHandle)
-	s.invalidateGetfile(removedHandle)
-	s.invalidateShareName(removedHandle)
-
-	return nil
+	return childCountCapture, shouldRetry, err
 }

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
+	"github.com/marmos91/dittofs/internal/logger"
 	"github.com/marmos91/dittofs/pkg/metadata"
 )
 
@@ -37,80 +38,135 @@ func (s *BadgerMetadataStore) ReadDirectory(
 		return nil, err
 	}
 
-	// Acquire read lock BEFORE checking cache to ensure cache consistency
-	// This prevents returning stale cached data during concurrent writes
+	// Check read and execute permissions BEFORE acquiring lock to avoid unlock/relock race
+	var granted metadata.Permission
+	var err error
+	granted, err = s.CheckPermissions(ctx, dirHandle,
+		metadata.PermissionRead|metadata.PermissionTraverse)
+	if err != nil {
+		return nil, err
+	}
+	if granted&metadata.PermissionRead == 0 || granted&metadata.PermissionTraverse == 0 {
+		return nil, &metadata.StoreError{
+			Code:    metadata.ErrAccessDenied,
+			Message: "no read or execute permission on directory",
+		}
+	}
+
+	// Acquire read lock BEFORE checking cache to ensure cache consistency.
+	// The generation counter mechanism provides additional protection against
+	// serving stale cached data during concurrent modifications.
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
+	// Capture generation before checking cache
+	var startGeneration uint64
+	s.readdirCache.mu.RLock()
+	startGeneration = s.readdirCache.generation
+	s.readdirCache.mu.RUnlock()
 
 	// Try cache if cache is enabled
 	// Note: token can be non-empty for paginated reads from cache
 	if s.readdirCache.enabled {
-		if cached := s.getReaddirCached(dirHandle); cached != nil {
-			atomic.AddUint64(&s.readdirCache.hits, 1)
+		cached := s.getReaddirCached(dirHandle)
+		if cached != nil {
+			// Re-check generation to detect concurrent modifications
+			s.readdirCache.mu.RLock()
+			currentGeneration := s.readdirCache.generation
+			s.readdirCache.mu.RUnlock()
 
-			// Parse pagination token
-			startIdx := 0
-			if token != "" {
-				var err error
-				startIdx, err = strconv.Atoi(token)
-				if err != nil || startIdx < 0 || startIdx > len(cached.names) {
-					return nil, &metadata.StoreError{
-						Code:    metadata.ErrInvalidArgument,
-						Message: "invalid pagination token",
+			// Validate cached entry is from current generation AND generation hasn't changed
+			if cached.generation == currentGeneration && currentGeneration == startGeneration {
+				// Cached data is valid and generation unchanged - safe to use
+				atomic.AddUint64(&s.readdirCache.hits, 1)
+
+				// Parse pagination token
+				startIdx := 0
+				if token != "" {
+					var err error
+					startIdx, err = strconv.Atoi(token)
+					if err != nil || startIdx < 0 || startIdx > len(cached.names) {
+						return nil, &metadata.StoreError{
+							Code:    metadata.ErrInvalidArgument,
+							Message: "invalid pagination token",
+						}
 					}
 				}
-			}
 
-			// Use default maxBytes if not specified (same as uncached path)
-			pageSize := maxBytes
-			if pageSize == 0 {
-				pageSize = 8192 // Default from NFS spec
-			}
-
-			// Apply pagination to cached entries
-			var entries []metadata.DirEntry
-			var totalBytes uint32
-			nextIdx := startIdx
-
-			for nextIdx < len(cached.names) {
-				entry := metadata.DirEntry{
-					ID:   fileHandleToID(cached.children[nextIdx]),
-					Name: cached.names[nextIdx],
-				}
-				// Estimate entry size: 8 bytes for ID + len(Name) + 16 bytes overhead
-				entrySize := uint32(8 + len(entry.Name) + 16)
-
-				// If adding this entry would exceed pageSize and we have at least one entry, stop
-				if totalBytes+entrySize > pageSize && len(entries) > 0 {
-					break
+				// Use default maxBytes if not specified (same as uncached path)
+				pageSize := maxBytes
+				if pageSize == 0 {
+					pageSize = 8192 // Default from NFS spec
 				}
 
-				totalBytes += entrySize
-				entries = append(entries, entry)
-				nextIdx++
-			}
+				// Apply pagination to cached entries
+				var entries []metadata.DirEntry
+				var totalBytes uint32
+				nextIdx := startIdx
 
-			// Determine if there are more entries
-			hasMore := nextIdx < len(cached.names)
-			nextToken := ""
-			if hasMore {
-				nextToken = strconv.Itoa(nextIdx)
-			}
+				for nextIdx < len(cached.names) {
+					entry := metadata.DirEntry{
+						ID:     fileHandleToID(cached.children[nextIdx]),
+						Name:   cached.names[nextIdx],
+						Handle: cached.children[nextIdx], // Avoid Lookup() in READDIRPLUS
+						Attr:   nil,                       // TODO: Could cache attrs too
+					}
+					// Estimate entry size: 8 bytes for ID + len(Name) + 16 bytes overhead
+					entrySize := uint32(8 + len(entry.Name) + 16)
 
-			return &metadata.ReadDirPage{
-				Entries:   entries,
-				NextToken: nextToken,
-				HasMore:   hasMore,
-			}, nil
+					// If adding this entry would exceed pageSize and we have at least one entry, stop
+					if totalBytes+entrySize > pageSize && len(entries) > 0 {
+						break
+					}
+
+					totalBytes += entrySize
+					entries = append(entries, entry)
+					nextIdx++
+				}
+
+				// Determine if there are more entries
+				hasMore := nextIdx < len(cached.names)
+				nextToken := ""
+				if hasMore {
+					nextToken = strconv.Itoa(nextIdx)
+				}
+
+				return &metadata.ReadDirPage{
+					Entries:   entries,
+					NextToken: nextToken,
+					HasMore:   hasMore,
+				}, nil
+			} else {
+				// Generation changed - fall through to DB read
+				// Note: We don't call invalidateReaddir() here to avoid potential deadlock
+				// (holding s.mu.RLock while invalidateReaddir acquires readdirCache.mu.Lock).
+				// The generation check already prevents stale reads, and the cache entry
+				// will be naturally evicted by LRU or expire by TTL.
+				atomic.AddUint64(&s.readdirCache.misses, 1)
+			}
+		} else {
+			atomic.AddUint64(&s.readdirCache.misses, 1)
 		}
-		atomic.AddUint64(&s.readdirCache.misses, 1)
 	}
 
+	// Loop until we get a consistent snapshot (generation unchanged during read)
+	// This ensures we NEVER return handles to deleted files
 	var page *metadata.ReadDirPage
 	var allChildren []metadata.FileHandle
 	var allNames []string
+	maxAttempts := 5 // Prevent infinite loops in pathological cases
 
-	err := s.db.View(func(txn *badger.Txn) error {
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		// Capture generation right before DB read
+		s.readdirCache.mu.RLock()
+		startGeneration = s.readdirCache.generation
+		s.readdirCache.mu.RUnlock()
+
+		// Reset for retry
+		allChildren = nil
+		allNames = nil
+
+		err = s.db.View(func(txn *badger.Txn) error {
 		// Get directory data
 		item, err := txn.Get(keyFile(dirHandle))
 		if err == badger.ErrKeyNotFound {
@@ -141,21 +197,6 @@ func (s *BadgerMetadataStore) ReadDirectory(
 			return &metadata.StoreError{
 				Code:    metadata.ErrNotDirectory,
 				Message: "not a directory",
-			}
-		}
-
-		// Check read and execute permissions
-		s.mu.RUnlock()
-		granted, err := s.CheckPermissions(ctx, dirHandle,
-			metadata.PermissionRead|metadata.PermissionTraverse)
-		s.mu.RLock()
-		if err != nil {
-			return err
-		}
-		if granted&metadata.PermissionRead == 0 || granted&metadata.PermissionTraverse == 0 {
-			return &metadata.StoreError{
-				Code:    metadata.ErrAccessDenied,
-				Message: "no read or execute permission on directory",
 			}
 		}
 
@@ -238,8 +279,10 @@ func (s *BadgerMetadataStore) ReadDirectory(
 			// Create directory entry
 			// DirEntry uses file ID (uint64) - compute hash of handle for ID
 			entry := metadata.DirEntry{
-				ID:   fileHandleToID(childHandle),
-				Name: childName,
+				ID:     fileHandleToID(childHandle),
+				Name:   childName,
+				Handle: childHandle, // Avoid Lookup() in READDIRPLUS
+				Attr:   nil,         // TODO: Could populate from cache for further optimization
 			}
 
 			// Estimate size (rough estimate: name + some overhead)
@@ -269,17 +312,45 @@ func (s *BadgerMetadataStore) ReadDirectory(
 		return nil
 	})
 
-	if err != nil {
-		return nil, err
+		if err != nil {
+			return nil, err
+		}
+
+		// Check if generation changed during our read
+		s.readdirCache.mu.RLock()
+		currentGeneration := s.readdirCache.generation
+		s.readdirCache.mu.RUnlock()
+
+		// If generation unchanged, we have consistent data - break out of retry loop
+		if currentGeneration == startGeneration {
+			// Cache and return consistent data
+			if token == "" {
+				s.putReaddirCached(dirHandle, allChildren, allNames)
+			}
+			return page, nil
+		}
+
+		// Generation changed - data may be stale, retry
+		if attempt < maxAttempts {
+			logger.Debug("ReadDirectory: concurrent modification detected (gen %d → %d), retrying (attempt %d/%d)",
+				startGeneration, currentGeneration, attempt, maxAttempts)
+			continue
+		}
+
+		// Max retries exceeded - this shouldn't happen in practice
+		logger.Warn("ReadDirectory: max retries exceeded due to concurrent modifications: dir=%s attempts=%d",
+			dirHandle, maxAttempts)
+		return nil, &metadata.StoreError{
+			Code:    metadata.ErrNotFound,
+			Message: "directory unstable due to concurrent modifications",
+		}
 	}
 
-	// Cache directory listing if we read from start (even if paginated or empty)
-	// The cache stores the complete listing we've seen so far
-	if token == "" {
-		s.putReaddirCached(dirHandle, allChildren, allNames)
+	// Should never reach here
+	return nil, &metadata.StoreError{
+		Code:    metadata.ErrNotFound,
+		Message: "unexpected error in ReadDirectory",
 	}
-
-	return page, nil
 }
 
 // ReadSymlink reads the target path of a symbolic link.
@@ -306,13 +377,25 @@ func (s *BadgerMetadataStore) ReadSymlink(
 		return "", nil, err
 	}
 
+	// Check read permission BEFORE acquiring lock to avoid unlock/relock race
+	granted, err := s.CheckPermissions(ctx, handle, metadata.PermissionRead)
+	if err != nil {
+		return "", nil, err
+	}
+	if granted&metadata.PermissionRead == 0 {
+		return "", nil, &metadata.StoreError{
+			Code:    metadata.ErrAccessDenied,
+			Message: "no read permission on symlink",
+		}
+	}
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	var target string
 	var attr *metadata.FileAttr
 
-	err := s.db.View(func(txn *badger.Txn) error {
+	err = s.db.View(func(txn *badger.Txn) error {
 		// Get file data
 		item, err := txn.Get(keyFile(handle))
 		if err == badger.ErrKeyNotFound {
@@ -343,20 +426,6 @@ func (s *BadgerMetadataStore) ReadSymlink(
 			return &metadata.StoreError{
 				Code:    metadata.ErrInvalidArgument,
 				Message: "not a symbolic link",
-			}
-		}
-
-		// Check read permission on the symlink
-		s.mu.RUnlock()
-		granted, err := s.CheckPermissions(ctx, handle, metadata.PermissionRead)
-		s.mu.RLock()
-		if err != nil {
-			return err
-		}
-		if granted&metadata.PermissionRead == 0 {
-			return &metadata.StoreError{
-				Code:    metadata.ErrAccessDenied,
-				Message: "no read permission on symlink",
 			}
 		}
 
@@ -420,12 +489,24 @@ func (s *BadgerMetadataStore) CreateSymlink(
 		}
 	}
 
+	// Check write permission BEFORE acquiring lock to avoid unlock/relock race
+	granted, err := s.CheckPermissions(ctx, parentHandle, metadata.PermissionWrite)
+	if err != nil {
+		return nil, err
+	}
+	if granted&metadata.PermissionWrite == 0 {
+		return nil, &metadata.StoreError{
+			Code:    metadata.ErrAccessDenied,
+			Message: "no write permission on parent directory",
+		}
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	var newHandle metadata.FileHandle
 
-	err := s.db.Update(func(txn *badger.Txn) error {
+	err = s.db.Update(func(txn *badger.Txn) error {
 		// Verify parent exists and is a directory
 		item, err := txn.Get(keyFile(parentHandle))
 		if err == badger.ErrKeyNotFound {
@@ -455,20 +536,6 @@ func (s *BadgerMetadataStore) CreateSymlink(
 			return &metadata.StoreError{
 				Code:    metadata.ErrNotDirectory,
 				Message: "parent is not a directory",
-			}
-		}
-
-		// Check write permission on parent
-		s.mu.Unlock()
-		granted, err := s.CheckPermissions(ctx, parentHandle, metadata.PermissionWrite)
-		s.mu.Lock()
-		if err != nil {
-			return err
-		}
-		if granted&metadata.PermissionWrite == 0 {
-			return &metadata.StoreError{
-				Code:    metadata.ErrAccessDenied,
-				Message: "no write permission on parent directory",
 			}
 		}
 
@@ -647,12 +714,24 @@ func (s *BadgerMetadataStore) CreateSpecialFile(
 		}
 	}
 
+	// Check write permission BEFORE acquiring lock to avoid unlock/relock race
+	granted, err := s.CheckPermissions(ctx, parentHandle, metadata.PermissionWrite)
+	if err != nil {
+		return nil, err
+	}
+	if granted&metadata.PermissionWrite == 0 {
+		return nil, &metadata.StoreError{
+			Code:    metadata.ErrAccessDenied,
+			Message: "no write permission on parent directory",
+		}
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	var newHandle metadata.FileHandle
 
-	err := s.db.Update(func(txn *badger.Txn) error {
+	err = s.db.Update(func(txn *badger.Txn) error {
 		// Verify parent exists and is a directory
 		item, err := txn.Get(keyFile(parentHandle))
 		if err == badger.ErrKeyNotFound {
@@ -682,20 +761,6 @@ func (s *BadgerMetadataStore) CreateSpecialFile(
 			return &metadata.StoreError{
 				Code:    metadata.ErrNotDirectory,
 				Message: "parent is not a directory",
-			}
-		}
-
-		// Check write permission on parent
-		s.mu.Unlock()
-		granted, err := s.CheckPermissions(ctx, parentHandle, metadata.PermissionWrite)
-		s.mu.Lock()
-		if err != nil {
-			return err
-		}
-		if granted&metadata.PermissionWrite == 0 {
-			return &metadata.StoreError{
-				Code:    metadata.ErrAccessDenied,
-				Message: "no write permission on parent directory",
 			}
 		}
 

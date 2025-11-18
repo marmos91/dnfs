@@ -96,6 +96,7 @@ type BadgerMetadataStore struct {
 		mu           sync.RWMutex
 		hits         uint64
 		misses       uint64
+		generation   uint64 // Incremented on any invalidation to detect stale reads
 	}
 
 	// lookupCache caches lookup results (LRU + TTL).
@@ -141,10 +142,11 @@ type BadgerMetadataStore struct {
 
 // readdirCacheEntry stores cached directory listing.
 type readdirCacheEntry struct {
-	children  []metadata.FileHandle
-	names     []string
-	timestamp time.Time
-	lruNode   *list.Element
+	children   []metadata.FileHandle
+	names      []string
+	timestamp  time.Time
+	generation uint64 // Generation when this entry was created
+	lruNode    *list.Element
 }
 
 // lookupCacheEntry stores cached lookup result.
@@ -311,7 +313,8 @@ func NewBadgerMetadataStore(ctx context.Context, config BadgerMetadataStoreConfi
 		invalidOnMod := config.CacheInvalidateOnWrite
 
 		// ReadDir cache (smaller - one entry per directory)
-		store.readdirCache.enabled = true
+		// DISABLED: Causes stale data during concurrent rm -rf operations
+		store.readdirCache.enabled = false
 		store.readdirCache.ttl = ttl
 		store.readdirCache.maxEntries = config.CacheMaxEntries
 		if store.readdirCache.maxEntries == 0 {
@@ -529,10 +532,13 @@ func (s *BadgerMetadataStore) getReaddirCached(handle metadata.FileHandle) *read
 	entry, exists = s.readdirCache.cache[key]
 	if exists && time.Since(entry.timestamp) <= s.readdirCache.ttl {
 		s.readdirCache.lruList.MoveToFront(entry.lruNode)
+		s.readdirCache.mu.Unlock()
+		return entry
 	}
 	s.readdirCache.mu.Unlock()
 
-	return entry
+	// Entry was invalidated/evicted between our checks - return nil to force fresh read
+	return nil
 }
 
 // putReaddirCached stores directory listing in cache.
@@ -546,11 +552,15 @@ func (s *BadgerMetadataStore) putReaddirCached(handle metadata.FileHandle, child
 
 	key := readdirCacheKey(handle)
 
+	// Capture current generation - this cache entry is valid for this generation
+	currentGen := s.readdirCache.generation
+
 	// Update existing entry
 	if existing, exists := s.readdirCache.cache[key]; exists {
 		existing.children = children
 		existing.names = names
 		existing.timestamp = time.Now()
+		existing.generation = currentGen
 		s.readdirCache.lruList.MoveToFront(existing.lruNode)
 		return
 	}
@@ -562,9 +572,10 @@ func (s *BadgerMetadataStore) putReaddirCached(handle metadata.FileHandle, child
 
 	// Create new entry
 	entry := &readdirCacheEntry{
-		children:  children,
-		names:     names,
-		timestamp: time.Now(),
+		children:   children,
+		names:      names,
+		timestamp:  time.Now(),
+		generation: currentGen,
 	}
 	entry.lruNode = s.readdirCache.lruList.PushFront(key)
 	s.readdirCache.cache[key] = entry
@@ -615,10 +626,13 @@ func (s *BadgerMetadataStore) getLookupCached(parentHandle metadata.FileHandle, 
 	entry, exists = s.lookupCache.cache[key]
 	if exists && time.Since(entry.timestamp) <= s.lookupCache.ttl {
 		s.lookupCache.lruList.MoveToFront(entry.lruNode)
+		s.lookupCache.mu.Unlock()
+		return entry
 	}
 	s.lookupCache.mu.Unlock()
 
-	return entry
+	// Entry was invalidated/evicted between our checks - return nil to force fresh lookup
+	return nil
 }
 
 // putLookupCached stores lookup result in cache.
@@ -681,6 +695,9 @@ func (s *BadgerMetadataStore) invalidateReaddir(handle metadata.FileHandle) {
 	s.readdirCache.mu.Lock()
 	defer s.readdirCache.mu.Unlock()
 
+	// Increment generation to invalidate in-flight reads
+	s.readdirCache.generation++
+
 	key := readdirCacheKey(handle)
 	entry, exists := s.readdirCache.cache[key]
 	if !exists {
@@ -739,10 +756,13 @@ func (s *BadgerMetadataStore) getGetfileCached(handle metadata.FileHandle) *getf
 	entry, exists = s.getfileCache.cache[key]
 	if exists && time.Since(entry.timestamp) <= s.getfileCache.ttl {
 		s.getfileCache.lruList.MoveToFront(entry.lruNode)
+		s.getfileCache.mu.Unlock()
+		return entry
 	}
 	s.getfileCache.mu.Unlock()
 
-	return entry
+	// Entry was invalidated/evicted between our checks - return nil to force fresh read
+	return nil
 }
 
 // putGetfileCached stores file attributes in cache.

@@ -373,6 +373,20 @@ func (s *S3ContentStore) Truncate(ctx context.Context, id metadata.ContentID, ne
 
 // Delete removes content from S3.
 //
+// Buffered Deletion (Asynchronous Mode):
+// When buffered deletion is enabled, this method returns nil immediately after
+// queuing the deletion. The actual S3 deletion happens asynchronously via a
+// background worker that batches deletions every 2 seconds or when 100+ items
+// are queued (using S3's DeleteObjects API for efficiency).
+//
+// IMPORTANT: In buffered mode, returning nil does NOT guarantee the deletion
+// has completed or succeeded. Callers must be aware:
+//   - The content may still exist in S3 after this method returns
+//   - Server crashes before flush will lose queued deletions
+//   - Use Close() or TriggerFlush() before shutdown to ensure deletions complete
+//
+// When buffered deletion is disabled, deletions happen immediately (synchronous).
+//
 // This operation is idempotent - deleting non-existent content returns nil.
 //
 // Context Cancellation:
@@ -389,6 +403,26 @@ func (s *S3ContentStore) Delete(ctx context.Context, id metadata.ContentID) erro
 		return err
 	}
 
+	// If buffered deletion is enabled, queue it
+	if s.deletionQueue.enabled {
+		s.deletionQueue.mu.Lock()
+		s.deletionQueue.queue = append(s.deletionQueue.queue, id)
+		queueLen := len(s.deletionQueue.queue)
+		s.deletionQueue.mu.Unlock()
+
+		// Trigger immediate flush if batch size threshold reached
+		if queueLen >= s.deletionQueue.batchSize {
+			select {
+			case s.deletionQueue.flushCh <- struct{}{}:
+			default:
+				// Channel already has signal, skip
+			}
+		}
+
+		return nil
+	}
+
+	// Buffering disabled - execute immediately (synchronous)
 	key := s.getObjectKey(id)
 
 	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{

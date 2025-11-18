@@ -240,25 +240,15 @@ type pathBuilder interface {
 
 // fileHandleToID converts a FileHandle ([]byte) to a uint64 file ID.
 //
-// This is used for directory entries where NFS requires a uint64 file ID.
-// We compute a simple hash of the handle bytes.
+// This is a thin wrapper around metadata.HandleToFileID() which provides the
+// canonical implementation for converting file handles to inode numbers.
 //
-// Note: This is not cryptographically secure, but provides a reasonable
-// mapping for file IDs used in directory listings.
+// This is used for directory entries where NFS requires a uint64 file ID.
+//
+// IMPORTANT: All MetadataStore implementations should use metadata.HandleToFileID()
+// directly to ensure consistent inode generation across the system.
+//
+// See: metadata.HandleToFileID() for implementation details
 func fileHandleToID(handle metadata.FileHandle) uint64 {
-	if len(handle) == 0 {
-		return 0
-	}
-
-	// Simple FNV-1a hash
-	const offset64 = 14695981039346656037
-	const prime64 = 1099511628211
-
-	hash := uint64(offset64)
-	for _, b := range handle {
-		hash ^= uint64(b)
-		hash *= prime64
-	}
-
-	return hash
+	return metadata.HandleToFileID(handle)
 }

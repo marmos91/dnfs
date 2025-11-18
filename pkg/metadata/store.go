@@ -54,20 +54,11 @@ import (
 // See pkg/metadata/badger/handle.go for a reference implementation of the hybrid
 // approach with automatic fallback for long paths.
 //
-// File ID Generation:
+// File ID (Inode) Generation:
 //
-// Protocol handlers may need to convert FileHandle ([]byte) to uint64 file IDs
-// for directory listings. Use FNV-1a hashing for consistent results:
-//
-//	func fileHandleToID(handle FileHandle) uint64 {
-//	    const offset64, prime64 = 14695981039346656037, 1099511628211
-//	    hash := uint64(offset64)
-//	    for _, b := range handle {
-//	        hash ^= uint64(b)
-//	        hash *= prime64
-//	    }
-//	    return hash
-//	}
+// Implementations MUST use HandleToFileID() to convert handles to inodes.
+// Custom hashing will cause circular directory structures and inode collisions.
+// See HandleToFileID() and ReadDirectory() documentation for details.
 //
 // Design Principles:
 //   - Protocol-agnostic: No NFS/SMB/FTP-specific types or values
@@ -804,6 +795,7 @@ type MetadataStore interface {
 	//   - Validate token format and return ErrInvalidArgument if invalid
 	//   - Handle token="" as "start from beginning"
 	//   - Ensure tokens are URL-safe if needed by protocol
+	//   - Use HandleToFileID(handle) to populate DirEntry.ID (required for inode consistency)
 	//
 	// Example - Read all entries:
 	//
@@ -1057,4 +1049,55 @@ type MetadataStore interface {
 	//   - error: Returns error if repository is unhealthy, nil if healthy,
 	//     or context cancellation errors
 	Healthcheck(ctx context.Context) error
+
+	// ========================================================================
+	// Garbage Collection Support
+	// ========================================================================
+
+	// GetAllContentIDs returns all ContentIDs referenced by metadata.
+	//
+	// This method is used by garbage collection to identify which content is
+	// still in use. Content not in this list may be orphaned and eligible for
+	// deletion.
+	//
+	// The method scans all files in all shares and collects their ContentIDs.
+	// Only regular files with non-empty ContentIDs are included.
+	//
+	// Performance Considerations:
+	//   - For large filesystems, this may take several seconds to minutes
+	//   - Implementations should periodically check context for cancellation
+	//   - Consider caching results if called frequently
+	//   - Return results in batches if memory is a concern
+	//
+	// Thread Safety:
+	// Safe for concurrent use. The returned set is a snapshot at the time
+	// of the call and may become stale as files are created/deleted.
+	//
+	// Parameters:
+	//   - ctx: Context for cancellation and timeouts
+	//
+	// Returns:
+	//   - []ContentID: List of all ContentIDs referenced by metadata
+	//   - error: Returns error if scan fails or context is cancelled
+	//
+	// Example (garbage collection):
+	//
+	//	// Get all referenced content
+	//	referenced, err := metadataStore.GetAllContentIDs(ctx)
+	//	if err != nil {
+	//	    return err
+	//	}
+	//
+	//	// Get all existing content
+	//	existing, err := contentStore.ListAllContent(ctx)
+	//	if err != nil {
+	//	    return err
+	//	}
+	//
+	//	// Find orphaned content
+	//	orphaned := difference(existing, referenced)
+	//
+	//	// Delete orphaned content
+	//	contentStore.DeleteBatch(ctx, orphaned)
+	GetAllContentIDs(ctx context.Context) ([]ContentID, error)
 }

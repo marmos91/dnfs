@@ -454,6 +454,7 @@ func (h *DefaultNFSHandler) ReadDirPlus(
 	}
 
 	// Use DirCount as maxBytes hint for ReadDirectory
+	// ReadDirectory handles retries internally to ensure consistent snapshots
 	page, err := metadataStore.ReadDirectory(authCtx, dirHandle, "", req.DirCount)
 	if err != nil {
 		logger.Error("READDIRPLUS failed: error retrieving entries: dir=%x client=%s error=%v",
@@ -498,12 +499,29 @@ func (h *DefaultNFSHandler) ReadDirPlus(
 			}
 		}
 
-		// Use Lookup to get the entry's handle and attributes
-		entryHandle, entryAttr, err := metadataStore.Lookup(authCtx, dirHandle, entry.Name)
+		// Use Handle from ReadDirectory result to avoid expensive Lookup() calls
+		// The Handle field is populated by ReadDirectory (see pkg/metadata/directory.go)
+		entryHandle := entry.Handle
+		if len(entryHandle) == 0 {
+			// Fallback: Handle not populated, use Lookup (shouldn't happen with proper implementation)
+			logger.Warn("READDIRPLUS: entry.Handle not populated for '%s', falling back to Lookup", entry.Name)
+			var err error
+			entryHandle, _, err = metadataStore.Lookup(authCtx, dirHandle, entry.Name)
+			if err != nil {
+				logger.Warn("READDIRPLUS: failed to lookup '%s': dir=%x error=%v",
+					entry.Name, req.DirHandle, err)
+				// Skip this entry on error rather than failing entire operation
+				continue
+			}
+		}
+
+		// Get attributes for the entry
+		// TODO: Use entry.Attr if populated to avoid this GetFile() call
+		entryAttr, err := metadataStore.GetFile(ctx.Context, entryHandle)
 		if err != nil {
-			logger.Warn("READDIRPLUS: failed to lookup '%s': dir=%x error=%v",
-				entry.Name, req.DirHandle, err)
-			// Skip this entry on error rather than failing entire operation
+			logger.Warn("READDIRPLUS: failed to get attributes for '%s': dir=%x handle=%x error=%v",
+				entry.Name, req.DirHandle, entryHandle, err)
+			// Skip this entry on error - file may have been deleted during iteration
 			continue
 		}
 
