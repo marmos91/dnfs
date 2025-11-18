@@ -88,18 +88,26 @@ func (s *BadgerMetadataStore) PrepareWrite(
 			}
 		}
 
-		// Check write permission using the public CheckPermissions method
-		// We need to release the RLock temporarily to call CheckPermissions
-		// which acquires its own RLock
-		granted, err := s.CheckPermissions(ctx, handle, metadata.PermissionWrite)
+		// Check write permission
+		// Owner can always write to their own files (even if mode is 0444)
+		// This matches POSIX semantics where permissions are checked at open() time,
+		// not on every write() operation.
+		//
+		// Without this exception, operations like "cp -p" that preserve mode 0444
+		// files would fail because SETATTR changes mode to 0444 before WRITE operations.
+		isOwner := ctx.Identity.UID != nil && *ctx.Identity.UID == attr.UID
 
-		if err != nil {
-			return err
-		}
-		if granted&metadata.PermissionWrite == 0 {
-			return &metadata.StoreError{
-				Code:    metadata.ErrAccessDenied,
-				Message: "no write permission",
+		if !isOwner {
+			// Non-owner: check permissions using normal Unix permission bits
+			granted, err := s.CheckPermissions(ctx, handle, metadata.PermissionWrite)
+			if err != nil {
+				return err
+			}
+			if granted&metadata.PermissionWrite == 0 {
+				return &metadata.StoreError{
+					Code:    metadata.ErrAccessDenied,
+					Message: "no write permission",
+				}
 			}
 		}
 
