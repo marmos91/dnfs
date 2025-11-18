@@ -159,4 +159,14 @@ type DirEntry struct {
 	// Name is the filename
 	// Does not include the parent path
 	Name string
+
+	// Handle is the file handle for this entry
+	// This avoids expensive Lookup() calls in READDIRPLUS
+	// Implementations MUST populate this field for performance
+	Handle FileHandle
+
+	// Attr contains the file attributes (optional, for READDIRPLUS optimization)
+	// If nil, READDIRPLUS will call GetFile() to retrieve attributes
+	// If populated, READDIRPLUS can avoid per-entry GetFile() calls
+	Attr *FileAttr
 }

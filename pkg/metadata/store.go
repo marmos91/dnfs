@@ -54,20 +54,11 @@ import (
 // See pkg/metadata/badger/handle.go for a reference implementation of the hybrid
 // approach with automatic fallback for long paths.
 //
-// File ID Generation:
+// File ID (Inode) Generation:
 //
-// Protocol handlers may need to convert FileHandle ([]byte) to uint64 file IDs
-// for directory listings. Use FNV-1a hashing for consistent results:
-//
-//	func fileHandleToID(handle FileHandle) uint64 {
-//	    const offset64, prime64 = 14695981039346656037, 1099511628211
-//	    hash := uint64(offset64)
-//	    for _, b := range handle {
-//	        hash ^= uint64(b)
-//	        hash *= prime64
-//	    }
-//	    return hash
-//	}
+// Implementations MUST use HandleToFileID() to convert handles to inodes.
+// Custom hashing will cause circular directory structures and inode collisions.
+// See HandleToFileID() and ReadDirectory() documentation for details.
 //
 // Design Principles:
 //   - Protocol-agnostic: No NFS/SMB/FTP-specific types or values
@@ -804,6 +795,7 @@ type MetadataStore interface {
 	//   - Validate token format and return ErrInvalidArgument if invalid
 	//   - Handle token="" as "start from beginning"
 	//   - Ensure tokens are URL-safe if needed by protocol
+	//   - Use HandleToFileID(handle) to populate DirEntry.ID (required for inode consistency)
 	//
 	// Example - Read all entries:
 	//
