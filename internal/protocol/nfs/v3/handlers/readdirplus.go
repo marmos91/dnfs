@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"strconv"
 
 	"github.com/marmos91/dittofs/internal/logger"
 	"github.com/marmos91/dittofs/internal/protocol/nfs/types"
@@ -453,9 +454,16 @@ func (h *DefaultNFSHandler) ReadDirPlus(
 	default:
 	}
 
+	// Convert cookie to string token for ReadDirectory pagination
+	// Cookie represents the position to resume from (0 = start from beginning)
+	token := ""
+	if req.Cookie > 0 {
+		token = strconv.FormatUint(req.Cookie, 10)
+	}
+
 	// Use DirCount as maxBytes hint for ReadDirectory
 	// ReadDirectory handles retries internally to ensure consistent snapshots
-	page, err := metadataStore.ReadDirectory(authCtx, dirHandle, "", req.DirCount)
+	page, err := metadataStore.ReadDirectory(authCtx, dirHandle, token, req.DirCount)
 	if err != nil {
 		logger.Error("READDIRPLUS failed: error retrieving entries: dir=%x client=%s error=%v",
 			req.DirHandle, clientIP, err)
@@ -482,6 +490,9 @@ func (h *DefaultNFSHandler) ReadDirPlus(
 
 	// Build entries list - look up each entry to get handle and full attributes
 	entries := make([]*DirPlusEntry, 0, len(page.Entries))
+
+	// Starting offset for cookie calculation (cookies must be absolute positions)
+	startOffset := req.Cookie
 
 	for i, entry := range page.Entries {
 		// Check context periodically (every 50 entries) for large directories
@@ -529,18 +540,21 @@ func (h *DefaultNFSHandler) ReadDirPlus(
 		entryID := xdr.ExtractFileID(entryHandle)
 		nfsEntryAttr := xdr.MetadataToNFS(entryAttr, entryID)
 
-		// Create directory entry
+		// Create directory entry with absolute cookie position
+		// Cookie = startOffset + i + 1 (absolute position in directory)
+		absoluteCookie := startOffset + uint64(i+1)
+
 		plusEntry := &DirPlusEntry{
 			Fileid:     entry.ID,
 			Name:       entry.Name,
-			Cookie:     uint64(i + 1),
+			Cookie:     absoluteCookie,
 			Attr:       nfsEntryAttr,
 			FileHandle: []byte(entryHandle),
 		}
 
 		entries = append(entries, plusEntry)
 
-		logger.Debug("READDIRPLUS: added '%s' cookie=%d fileid=%d", entry.Name, i+1, entry.ID)
+		logger.Debug("READDIRPLUS: added '%s' cookie=%d fileid=%d", entry.Name, absoluteCookie, entry.ID)
 	}
 
 	// ========================================================================

@@ -140,9 +140,13 @@ func (s *BadgerMetadataStore) ReadDirectory(
 			childName := string(key[len(prefix):])
 
 			// Get child handle
+			// IMPORTANT: Must copy val because it's only valid inside the callback
 			var childHandle metadata.FileHandle
 			err = item.Value(func(val []byte) error {
-				childHandle = metadata.FileHandle(val)
+				// Make a copy of val since it's only valid during this callback
+				handleCopy := make([]byte, len(val))
+				copy(handleCopy, val)
+				childHandle = metadata.FileHandle(handleCopy)
 				return nil
 			})
 			if err != nil {
