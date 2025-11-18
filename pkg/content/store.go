@@ -416,6 +416,77 @@ type SeekableContentStore interface {
 }
 
 // ============================================================================
+// ReadAtContentStore Interface
+// ============================================================================
+
+// ReadAtContentStore is an optional interface for efficient random-access reads.
+//
+// This interface enables efficient partial reads using the ReaderAt pattern,
+// which is critical for performance when serving protocols like NFS that
+// request small chunks of data from large files.
+//
+// Performance Benefits:
+//   - S3: Uses byte-range requests instead of downloading entire objects
+//   - Filesystem: Can use pread() syscall for efficient positioned reads
+//   - Network: Reduces bandwidth usage by only transferring requested bytes
+//
+// Use Cases:
+//   - NFS READ operations (typically 4-64KB chunks)
+//   - Random access patterns
+//   - Large files where full download is wasteful
+//
+// Implementations:
+//   - S3: MUST implement for acceptable performance (✓)
+//   - Filesystem: Should implement for efficiency (can implement)
+//   - Memory: Optional (less critical for in-memory storage)
+//
+// Example (NFS READ handler):
+//
+//	if readAtStore, ok := contentRepo.(content.ReadAtContentStore); ok {
+//	    // Use efficient range read
+//	    buf := make([]byte, count)
+//	    n, err := readAtStore.ReadAt(ctx, contentID, buf, offset)
+//	} else {
+//	    // Fall back to sequential read (less efficient)
+//	    reader, err := contentRepo.ReadContent(ctx, contentID)
+//	    // ... seek and read ...
+//	}
+type ReadAtContentStore interface {
+	ContentStore
+
+	// ReadAt reads len(p) bytes into p starting at offset in the content.
+	//
+	// ReadAt follows io.ReaderAt semantics:
+	//   - Returns n bytes read and error
+	//   - If n < len(p), error explains why (io.EOF, io.ErrUnexpectedEOF, etc.)
+	//   - Can be called concurrently with different offsets
+	//   - Does not affect or use any implicit file position
+	//
+	// For S3 backends, this uses HTTP Range requests:
+	//   GET /bucket/key
+	//   Range: bytes=offset-end
+	//
+	// This is dramatically more efficient than ReadContent() for partial reads:
+	//   - ReadContent: Downloads entire 100MB file for 4KB request
+	//   - ReadAt: Downloads only the requested 4KB (25,000x less data!)
+	//
+	// Parameters:
+	//   - ctx: Context for cancellation and timeouts
+	//   - id: Content identifier to read from
+	//   - p: Buffer to read into (len(p) bytes will be read)
+	//   - offset: Byte offset to start reading from (0-based)
+	//
+	// Returns:
+	//   - n: Number of bytes read (may be less than len(p) on error or EOF)
+	//   - error: io.EOF if offset is at/past end, or other read errors
+	//
+	// Thread Safety:
+	//   - Safe for concurrent calls with different offsets
+	//   - Each call is independent
+	ReadAt(ctx context.Context, id metadata.ContentID, p []byte, offset int64) (n int, err error)
+}
+
+// ============================================================================
 // StreamingContentStore Interface
 // ============================================================================
 

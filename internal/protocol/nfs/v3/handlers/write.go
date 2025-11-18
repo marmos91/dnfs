@@ -601,6 +601,37 @@ func (h *DefaultNFSHandler) Write(
 	}
 
 	// ========================================================================
+	// Step 8.5: Flush buffered writes to content store
+	// ========================================================================
+	// This ensures data is actually written to S3/storage immediately after
+	// the WRITE completes, regardless of whether COMMIT is called later.
+	//
+	// Without this, all writes are lost on server restart!
+	type flusher interface {
+		FlushWrites(ctx context.Context, id metadata.ContentID) error
+	}
+
+	if flushableStore, ok := writeRepo.(flusher); ok && writeIntent.ContentID != "" {
+		logger.Debug("Flushing write buffers after WRITE completion: content_id=%s", writeIntent.ContentID)
+
+		if err := flushableStore.FlushWrites(ctx.Context, writeIntent.ContentID); err != nil {
+			logger.Error("WRITE failed: flush error after CommitWrite: handle=%x offset=%d count=%d content_id=%s client=%s error=%v",
+				req.Handle, req.Offset, len(req.Data), writeIntent.ContentID, clientIP, err)
+
+			fileid := xdr.ExtractFileID(fileHandle)
+			nfsAttr := xdr.MetadataToNFS(updatedAttr, fileid)
+
+			return &WriteResponse{
+				Status:     types.NFS3ErrIO,
+				AttrBefore: nfsWccAttr,
+				AttrAfter:  nfsAttr,
+			}, nil
+		}
+
+		logger.Debug("Write buffers flushed successfully to storage: content_id=%s", writeIntent.ContentID)
+	}
+
+	// ========================================================================
 	// Step 9: Build success response
 	// ========================================================================
 

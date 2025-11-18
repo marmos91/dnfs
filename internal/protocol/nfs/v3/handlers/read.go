@@ -384,97 +384,90 @@ func (h *DefaultNFSHandler) Read(
 	}
 
 	// ========================================================================
-	// Step 4: Open content for reading
+	// Step 4: Read content data
 	// ========================================================================
-	// Access control should be enforced by the content store
-	// based on the file's ContentID and client credentials
+	// Try to use efficient ReadAt if available (especially for S3).
+	// Fall back to sequential read for stores that don't support it.
 
-	reader, err := contentRepo.ReadContent(ctx.Context, attr.ContentID)
-	if err != nil {
-		logger.Error("READ failed: cannot open content: handle=%x content_id=%s client=%s error=%v",
-			req.Handle, attr.ContentID, clientIP, err)
+	var data []byte
+	var n int
+	var readErr error
+	var eof bool
 
-		fileid := xdr.ExtractFileID(fileHandle)
-		nfsAttr := xdr.MetadataToNFS(attr, fileid)
+	// Check if content store supports efficient random-access reads
+	if readAtStore, ok := contentRepo.(content.ReadAtContentStore); ok {
+		// ====================================================================
+		// FAST PATH: Use ReadAt for efficient range reads (S3, etc.)
+		// ====================================================================
+		// This is dramatically more efficient for backends like S3:
+		// - ReadAt: Uses HTTP range request for only requested bytes
+		// - ReadContent: Downloads entire file then seeks/reads
+		//
+		// For a 100MB file with 4KB request:
+		// - ReadAt: Downloads 4KB (efficient!)
+		// - ReadContent: Downloads 100MB then uses 4KB (wasteful!)
 
-		return &ReadResponse{
-			Status: types.NFS3ErrIO,
-			Attr:   nfsAttr,
-		}, nil
-	}
-	defer func() { _ = reader.Close() }()
+		logger.Debug("READ: using efficient ReadAt path: handle=%x offset=%d count=%d",
+			req.Handle, req.Offset, req.Count)
 
-	// ========================================================================
-	// Step 5: Seek to requested offset
-	// ========================================================================
+		data = make([]byte, req.Count)
+		n, readErr = readAtStore.ReadAt(ctx.Context, attr.ContentID, data, int64(req.Offset))
 
-	if req.Offset > 0 {
-		if seeker, ok := reader.(io.Seeker); ok {
-			// Reader supports seeking - use efficient seek
-			_, err = seeker.Seek(int64(req.Offset), io.SeekStart)
-			if err != nil {
-				logger.Error("READ failed: seek error: handle=%x offset=%d client=%s error=%v",
-					req.Handle, req.Offset, clientIP, err)
+		// Handle ReadAt results
+		if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
+			// EOF is not an error for READ operations
+			eof = true
+			data = data[:n] // Truncate to actual bytes read
+			readErr = nil
+		} else if readErr == context.Canceled || readErr == context.DeadlineExceeded {
+			logger.Debug("READ: request cancelled during ReadAt: handle=%x offset=%d read=%d client=%s",
+				req.Handle, req.Offset, n, clientIP)
+			return nil, readErr
+		} else if readErr != nil {
+			logger.Error("READ failed: ReadAt error: handle=%x offset=%d client=%s error=%v",
+				req.Handle, req.Offset, clientIP, readErr)
 
-				fileid := xdr.ExtractFileID(fileHandle)
-				nfsAttr := xdr.MetadataToNFS(attr, fileid)
+			fileid := xdr.ExtractFileID(fileHandle)
+			nfsAttr := xdr.MetadataToNFS(attr, fileid)
 
-				return &ReadResponse{
-					Status: types.NFS3ErrIO,
-					Attr:   nfsAttr,
-				}, nil
-			}
-		} else {
-			// Reader doesn't support seeking - read and discard bytes
-			// For large offsets, check cancellation periodically
-			logger.Debug("READ: reader not seekable, discarding %d bytes", req.Offset)
+			return &ReadResponse{
+				Status: types.NFS3ErrIO,
+				Attr:   nfsAttr,
+			}, nil
+		}
+	} else {
+		// ====================================================================
+		// FALLBACK PATH: Use sequential ReadContent + Seek + Read
+		// ====================================================================
+		// This path is used for content stores that don't support ReadAt.
+		// It's less efficient but works for all content stores.
 
-			// Use chunked discard with cancellation checks for large offsets
-			const discardChunkSize = 64 * 1024 // 64KB chunks
-			remaining := int64(req.Offset)
-			totalDiscarded := int64(0)
+		logger.Debug("READ: using sequential read path (no ReadAt support): handle=%x offset=%d count=%d",
+			req.Handle, req.Offset, req.Count)
 
-			for remaining > 0 {
-				// Check for cancellation during discard
-				select {
-				case <-ctx.Context.Done():
-					logger.Debug("READ: request cancelled during seek discard: handle=%x offset=%d discarded=%d client=%s",
-						req.Handle, req.Offset, totalDiscarded, clientIP)
-					return nil, ctx.Context.Err()
-				default:
-					// Continue
-				}
+		reader, err := contentRepo.ReadContent(ctx.Context, attr.ContentID)
+		if err != nil {
+			logger.Error("READ failed: cannot open content: handle=%x content_id=%s client=%s error=%v",
+				req.Handle, attr.ContentID, clientIP, err)
 
-				// Discard in chunks
-				chunkSize := discardChunkSize
-				if remaining < int64(chunkSize) {
-					chunkSize = int(remaining)
-				}
+			fileid := xdr.ExtractFileID(fileHandle)
+			nfsAttr := xdr.MetadataToNFS(attr, fileid)
 
-				n, err := io.CopyN(io.Discard, reader, int64(chunkSize))
-				totalDiscarded += n
-				remaining -= n
+			return &ReadResponse{
+				Status: types.NFS3ErrIO,
+				Attr:   nfsAttr,
+			}, nil
+		}
+		defer func() { _ = reader.Close() }()
 
-				if err == io.EOF {
-					// EOF reached while discarding - return empty with EOF
-					logger.Debug("READ: EOF reached while seeking: handle=%x offset=%d client=%s",
-						req.Handle, req.Offset, clientIP)
-
-					fileid := xdr.ExtractFileID(fileHandle)
-					nfsAttr := xdr.MetadataToNFS(attr, fileid)
-
-					return &ReadResponse{
-						Status: types.NFS3OK,
-						Attr:   nfsAttr,
-						Count:  0,
-						Eof:    true,
-						Data:   []byte{},
-					}, nil
-				}
-
+		// Seek to requested offset
+		if req.Offset > 0 {
+			if seeker, ok := reader.(io.Seeker); ok {
+				// Reader supports seeking - use efficient seek
+				_, err = seeker.Seek(int64(req.Offset), io.SeekStart)
 				if err != nil {
-					logger.Error("READ failed: cannot skip to offset: handle=%x offset=%d discarded=%d client=%s error=%v",
-						req.Handle, req.Offset, totalDiscarded, clientIP, err)
+					logger.Error("READ failed: seek error: handle=%x offset=%d client=%s error=%v",
+						req.Handle, req.Offset, clientIP, err)
 
 					fileid := xdr.ExtractFileID(fileHandle)
 					nfsAttr := xdr.MetadataToNFS(attr, fileid)
@@ -484,56 +477,101 @@ func (h *DefaultNFSHandler) Read(
 						Attr:   nfsAttr,
 					}, nil
 				}
+			} else {
+				// Reader doesn't support seeking - read and discard bytes
+				logger.Debug("READ: reader not seekable, discarding %d bytes", req.Offset)
+
+				// Use chunked discard with cancellation checks for large offsets
+				const discardChunkSize = 64 * 1024 // 64KB chunks
+				remaining := int64(req.Offset)
+				totalDiscarded := int64(0)
+
+				for remaining > 0 {
+					// Check for cancellation during discard
+					select {
+					case <-ctx.Context.Done():
+						logger.Debug("READ: request cancelled during seek discard: handle=%x offset=%d discarded=%d client=%s",
+							req.Handle, req.Offset, totalDiscarded, clientIP)
+						return nil, ctx.Context.Err()
+					default:
+						// Continue
+					}
+
+					// Discard in chunks
+					chunkSize := discardChunkSize
+					if remaining < int64(chunkSize) {
+						chunkSize = int(remaining)
+					}
+
+					discardN, discardErr := io.CopyN(io.Discard, reader, int64(chunkSize))
+					totalDiscarded += discardN
+					remaining -= discardN
+
+					if discardErr == io.EOF {
+						// EOF reached while discarding - return empty with EOF
+						logger.Debug("READ: EOF reached while seeking: handle=%x offset=%d client=%s",
+							req.Handle, req.Offset, clientIP)
+
+						fileid := xdr.ExtractFileID(fileHandle)
+						nfsAttr := xdr.MetadataToNFS(attr, fileid)
+
+						return &ReadResponse{
+							Status: types.NFS3OK,
+							Attr:   nfsAttr,
+							Count:  0,
+							Eof:    true,
+							Data:   []byte{},
+						}, nil
+					}
+
+					if discardErr != nil {
+						logger.Error("READ failed: cannot skip to offset: handle=%x offset=%d discarded=%d client=%s error=%v",
+							req.Handle, req.Offset, totalDiscarded, clientIP, discardErr)
+
+						fileid := xdr.ExtractFileID(fileHandle)
+						nfsAttr := xdr.MetadataToNFS(attr, fileid)
+
+						return &ReadResponse{
+							Status: types.NFS3ErrIO,
+							Attr:   nfsAttr,
+						}, nil
+					}
+				}
 			}
 		}
-	}
 
-	// ========================================================================
-	// Step 6: Read requested data
-	// ========================================================================
+		// Read requested data
+		data = make([]byte, req.Count)
 
-	data := make([]byte, req.Count)
+		// For large reads (>1MB), use chunked reading with cancellation checks
+		const largeReadThreshold = 1024 * 1024 // 1MB
+		if req.Count > largeReadThreshold {
+			n, readErr = readWithCancellation(ctx.Context, reader, data)
+		} else {
+			n, readErr = io.ReadFull(reader, data)
+		}
 
-	// For large reads (>1MB), use chunked reading with cancellation checks
-	// For smaller reads, use a single read operation
-	const largeReadThreshold = 1024 * 1024 // 1MB
+		// Handle read results
+		if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
+			eof = true
+			data = data[:n]
+			readErr = nil
+		} else if readErr == context.Canceled || readErr == context.DeadlineExceeded {
+			logger.Debug("READ: request cancelled during data read: handle=%x offset=%d read=%d client=%s",
+				req.Handle, req.Offset, n, clientIP)
+			return nil, readErr
+		} else if readErr != nil {
+			logger.Error("READ failed: I/O error: handle=%x offset=%d client=%s error=%v",
+				req.Handle, req.Offset, clientIP, readErr)
 
-	var n int
-	var readErr error
+			fileid := xdr.ExtractFileID(fileHandle)
+			nfsAttr := xdr.MetadataToNFS(attr, fileid)
 
-	if req.Count > largeReadThreshold {
-		// Large read - use chunked reading with periodic cancellation checks
-		n, readErr = readWithCancellation(ctx.Context, reader, data)
-	} else {
-		// Small read - single operation
-		n, readErr = io.ReadFull(reader, data)
-	}
-
-	// Determine EOF condition
-	eof := false
-	if readErr == io.EOF || readErr == io.ErrUnexpectedEOF {
-		// We've reached EOF - this is not an error for READ
-		eof = true
-		data = data[:n] // Truncate buffer to actual bytes read
-		// Clear error - EOF is expected for READ operations
-		readErr = nil //nolint:ineffassign // Assignment is checked in subsequent else-if branches
-	} else if readErr == context.Canceled || readErr == context.DeadlineExceeded {
-		// Context was cancelled during read
-		logger.Debug("READ: request cancelled during data read: handle=%x offset=%d read=%d client=%s",
-			req.Handle, req.Offset, n, clientIP)
-		return nil, readErr
-	} else if readErr != nil {
-		// Actual I/O error occurred
-		logger.Error("READ failed: I/O error: handle=%x offset=%d client=%s error=%v",
-			req.Handle, req.Offset, clientIP, readErr)
-
-		fileid := xdr.ExtractFileID(fileHandle)
-		nfsAttr := xdr.MetadataToNFS(attr, fileid)
-
-		return &ReadResponse{
-			Status: types.NFS3ErrIO,
-			Attr:   nfsAttr,
-		}, nil
+			return &ReadResponse{
+				Status: types.NFS3ErrIO,
+				Attr:   nfsAttr,
+			}, nil
+		}
 	}
 
 	// Even if ReadFull succeeded, check if we're at or past EOF
