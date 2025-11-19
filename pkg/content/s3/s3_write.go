@@ -9,9 +9,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/marmos91/dittofs/internal/logger"
 	"github.com/marmos91/dittofs/pkg/content"
 	"github.com/marmos91/dittofs/pkg/metadata"
 )
@@ -204,7 +206,19 @@ func (s *S3ContentStore) Truncate(ctx context.Context, id metadata.ContentID, ne
 // Returns:
 //   - error: Returns error if flush fails or context is cancelled
 func (s *S3ContentStore) FlushWrites(ctx context.Context, id metadata.ContentID) error {
+	flushStart := time.Now()
+	var flushErr error
+
+	defer func() {
+		// Record overall flush operation at the end
+		if s.metrics != nil {
+			cacheSize := s.writeCache.Size(id)
+			s.metrics.RecordFlushOperation("auto", int64(cacheSize), time.Since(flushStart), flushErr)
+		}
+	}()
+
 	if err := ctx.Err(); err != nil {
+		flushErr = err
 		return err
 	}
 
@@ -227,6 +241,8 @@ func (s *S3ContentStore) FlushWrites(ctx context.Context, id metadata.ContentID)
 	key := s.getObjectKey(id)
 	dataSize := uint64(cacheSize)
 
+	logger.Info("S3 FlushWrites: starting flush content_id=%s size=%d bytes", id, cacheSize)
+
 	// Choose upload strategy based on data size
 	if dataSize < s.multipartThreshold {
 		// ====================================================================
@@ -238,19 +254,37 @@ func (s *S3ContentStore) FlushWrites(ctx context.Context, id metadata.ContentID)
 		//
 		// For small files, it's acceptable to load entire content into memory.
 
+		logger.Info("S3 FlushWrites: using PutObject (small file) content_id=%s size=%d", id, dataSize)
+
+		// Phase 1: Read from cache
+		cacheReadStart := time.Now()
 		data, err := s.writeCache.ReadAll(id)
 		if err != nil {
-			return fmt.Errorf("failed to read from write cache: %w", err)
+			flushErr = fmt.Errorf("failed to read from write cache: %w", err)
+			return flushErr
+		}
+		cacheReadDuration := time.Since(cacheReadStart)
+		if s.metrics != nil {
+			s.metrics.ObserveFlushPhase("cache_read", cacheReadDuration, int64(len(data)))
 		}
 
+		// Phase 2: Upload to S3
+		s3UploadStart := time.Now()
 		_, err = s.client.PutObject(ctx, &s3.PutObjectInput{
 			Bucket: aws.String(s.bucket),
 			Key:    aws.String(key),
 			Body:   bytes.NewReader(data),
 		})
 		if err != nil {
-			return fmt.Errorf("failed to flush content to S3 (PutObject): %w", err)
+			flushErr = fmt.Errorf("failed to flush content to S3 (PutObject): %w", err)
+			return flushErr
 		}
+		s3UploadDuration := time.Since(s3UploadStart)
+		if s.metrics != nil {
+			s.metrics.ObserveFlushPhase("s3_upload", s3UploadDuration, int64(len(data)))
+		}
+
+		logger.Info("S3 FlushWrites: PutObject complete content_id=%s size=%d", id, dataSize)
 	} else {
 		// ====================================================================
 		// LARGE FILE PATH: Multipart upload (>= multipartThreshold)
@@ -269,15 +303,22 @@ func (s *S3ContentStore) FlushWrites(ctx context.Context, id metadata.ContentID)
 		// 4. Complete multipart upload
 		// 5. Abort on any error
 
+		logger.Info("S3 FlushWrites: using multipart upload (large file) content_id=%s size=%d", id, dataSize)
+
+		// Track S3 upload time for multipart
+		s3UploadStart := time.Now()
+
 		uploadID, err := s.BeginMultipartUpload(ctx, id)
 		if err != nil {
-			return fmt.Errorf("failed to begin multipart upload: %w", err)
+			flushErr = fmt.Errorf("failed to begin multipart upload: %w", err)
+			return flushErr
 		}
 
+		logger.Info("S3 FlushWrites: multipart upload started content_id=%s upload_id=%s", id, uploadID)
+
 		// Track upload state for cleanup on error
-		var uploadErr error
 		defer func() {
-			if uploadErr != nil {
+			if flushErr != nil {
 				// Abort multipart upload on error to avoid orphaned parts
 				_ = s.AbortMultipartUpload(ctx, id, uploadID)
 			}
@@ -294,8 +335,8 @@ func (s *S3ContentStore) FlushWrites(ctx context.Context, id metadata.ContentID)
 		for offset < cacheSize {
 			// Check for cancellation before each part
 			if err := ctx.Err(); err != nil {
-				uploadErr = err
-				return fmt.Errorf("flush cancelled during multipart upload: %w", err)
+				flushErr = err
+				return flushErr
 			}
 
 			// Determine how many bytes to read for this part
@@ -309,35 +350,54 @@ func (s *S3ContentStore) FlushWrites(ctx context.Context, id metadata.ContentID)
 			partData := partBuffer[:bytesToRead]
 			n, readErr := s.writeCache.ReadAt(id, partData, offset)
 			if readErr != nil && readErr != io.EOF {
-				uploadErr = readErr
-				return fmt.Errorf("failed to read chunk from cache at offset %d: %w", offset, readErr)
+				flushErr = readErr
+				return flushErr
 			}
 
 			// Upload part (only the bytes actually read)
 			if err := s.UploadPart(ctx, id, uploadID, partNumber, partData[:n]); err != nil {
-				uploadErr = err
-				return fmt.Errorf("failed to upload part %d: %w", partNumber, err)
+				flushErr = err
+				return flushErr
 			}
+
+			logger.Info("S3 FlushWrites: uploaded part %d/%d content_id=%s bytes=%d", partNumber, (cacheSize+s.partSize-1)/s.partSize, id, n)
 
 			partNumbers = append(partNumbers, partNumber)
 			offset += int64(n)
 			partNumber++
 		}
 
+		logger.Info("S3 FlushWrites: completing multipart upload content_id=%s parts=%d", id, len(partNumbers))
+
 		// Complete multipart upload
 		if err := s.CompleteMultipartUpload(ctx, id, uploadID, partNumbers); err != nil {
-			uploadErr = err
-			return fmt.Errorf("failed to complete multipart upload: %w", err)
+			flushErr = err
+			return flushErr
 		}
+
+		// Record S3 upload phase duration for multipart
+		s3UploadDuration := time.Since(s3UploadStart)
+		if s.metrics != nil {
+			s.metrics.ObserveFlushPhase("s3_upload", s3UploadDuration, int64(dataSize))
+		}
+
+		logger.Info("S3 FlushWrites: multipart upload complete content_id=%s size=%d", id, dataSize)
 	}
 
-	// Clear cache after successful upload
+	// Phase 3: Clear cache after successful upload
+	cacheClearStart := time.Now()
 	if resetErr := s.writeCache.Reset(id); resetErr != nil {
 		// Log warning but don't fail the flush operation
 		// The data is already in S3, so the operation succeeded
-		return fmt.Errorf("flush succeeded but cache reset failed: %w", resetErr)
+		flushErr = fmt.Errorf("flush succeeded but cache reset failed: %w", resetErr)
+		return flushErr
+	}
+	cacheClearDuration := time.Since(cacheClearStart)
+	if s.metrics != nil {
+		s.metrics.ObserveFlushPhase("cache_clear", cacheClearDuration, 0)
 	}
 
+	logger.Info("S3 FlushWrites: flush complete, cache cleared content_id=%s", id)
 	return nil
 }
 

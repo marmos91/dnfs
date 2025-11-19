@@ -18,6 +18,7 @@ import (
 	"github.com/marmos91/dittofs/pkg/metadata"
 	"github.com/marmos91/dittofs/pkg/metadata/badger"
 	"github.com/marmos91/dittofs/pkg/metadata/memory"
+	"github.com/marmos91/dittofs/pkg/metrics"
 	"github.com/mitchellh/mapstructure"
 )
 
@@ -184,8 +185,11 @@ func createS3ContentStore(ctx context.Context, options map[string]any) (content.
 	})
 
 	// ========================================================================
-	// Step 3: Create S3 Content Store
+	// Step 3: Create S3 Content Store with Metrics
 	// ========================================================================
+
+	// Create S3 metrics (will be nil if metrics not enabled)
+	s3Metrics := metrics.NewS3Metrics()
 
 	store, err := contentS3.NewS3ContentStore(ctx, contentS3.S3ContentStoreConfig{
 		Client:                  client,
@@ -195,6 +199,7 @@ func createS3ContentStore(ctx context.Context, options map[string]any) (content.
 		BufferedDeletionEnabled: storeCfg.BufferedDeletionEnabled,
 		DeletionFlushInterval:   storeCfg.DeletionFlushInterval,
 		DeletionBatchSize:       storeCfg.DeletionBatchSize,
+		Metrics:                 s3Metrics,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to create S3 content store: %w", err)

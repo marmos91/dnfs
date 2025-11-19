@@ -26,6 +26,14 @@ type S3Metrics interface {
 
 	// RecordBytes records bytes transferred for read/write operations
 	RecordBytes(operation string, bytes int64)
+
+	// ObserveFlushPhase records duration of individual flush phases
+	// phase can be: "cache_read", "s3_upload", "cache_clear"
+	ObserveFlushPhase(phase string, duration time.Duration, bytes int64)
+
+	// RecordFlushOperation records a complete flush operation
+	// reason can be: "stable_write", "commit", "timeout", "threshold"
+	RecordFlushOperation(reason string, bytes int64, duration time.Duration, err error)
 }
 
 // noopMetrics is a default no-op metrics implementation
@@ -33,6 +41,9 @@ type noopMetrics struct{}
 
 func (noopMetrics) ObserveOperation(operation string, duration time.Duration, err error) {}
 func (noopMetrics) RecordBytes(operation string, bytes int64)                            {}
+func (noopMetrics) ObserveFlushPhase(phase string, duration time.Duration, bytes int64)  {}
+func (noopMetrics) RecordFlushOperation(reason string, bytes int64, duration time.Duration, err error) {
+}
 
 // metricsReadCloser wraps an io.ReadCloser to track bytes read
 type metricsReadCloser struct {

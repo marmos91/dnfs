@@ -413,12 +413,33 @@ func (h *DefaultNFSHandler) Remove(
 	}
 
 	// ========================================================================
-	// Step 4.5: Delete content if file has content and store supports deletion
+	// Step 4.5: Flush cached writes before deletion (critical!)
 	// ========================================================================
-	// After successfully removing the metadata, attempt to delete the actual
-	// file content. This is done after metadata removal to ensure consistency:
-	// if metadata is removed but content deletion fails, the content becomes
-	// orphaned but the file is still properly deleted from the client's view.
+	// Before deleting content, flush any cached writes to ensure data is persisted.
+	// This prevents data loss if the file was written but not yet committed.
+
+	if removedFileAttr.ContentID != "" {
+		if flushableStore, ok := contentStore.(content.FlushableContentStore); ok {
+			// Flush any cached writes before deletion
+			if flushErr := flushableStore.FlushWrites(ctx.Context, removedFileAttr.ContentID); flushErr != nil {
+				logger.Warn("REMOVE: failed to flush cached writes for file='%s' content_id=%s: %v",
+					req.Filename, removedFileAttr.ContentID, flushErr)
+				// Continue with deletion even if flush fails - data may already be flushed
+			} else {
+				logger.Debug("REMOVE: flushed cached writes for file='%s' content_id=%s",
+					req.Filename, removedFileAttr.ContentID)
+			}
+		}
+	}
+
+	// ========================================================================
+	// Step 4.6: Delete content if file has content and store supports deletion
+	// ========================================================================
+	// After successfully removing the metadata and flushing writes, attempt to
+	// delete the actual file content. This is done after metadata removal to
+	// ensure consistency: if metadata is removed but content deletion fails,
+	// the content becomes orphaned but the file is still properly deleted from
+	// the client's view.
 
 	if removedFileAttr.ContentID != "" {
 		if writableStore, ok := contentStore.(content.WritableContentStore); ok {

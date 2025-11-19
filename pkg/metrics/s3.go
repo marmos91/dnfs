@@ -25,6 +25,9 @@ type s3Metrics struct {
 	statsCacheHits    prometheus.Counter
 	statsCacheMisses  prometheus.Counter
 	errorsTotal       *prometheus.CounterVec
+	flushPhaseDuration *prometheus.HistogramVec
+	flushOperations   *prometheus.CounterVec
+	flushBytes        *prometheus.HistogramVec
 }
 
 // NewS3Metrics creates a new Prometheus-backed S3Metrics instance.
@@ -101,6 +104,51 @@ func NewS3Metrics() s3.S3Metrics {
 			},
 			[]string{"operation"},
 		),
+		flushPhaseDuration: promauto.With(reg).NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name: "dittofs_s3_flush_phase_duration_seconds",
+				Help: "Duration of individual flush phases (cache_read, s3_upload, cache_clear)",
+				Buckets: []float64{
+					0.001, // 1ms
+					0.01,  // 10ms
+					0.1,   // 100ms
+					0.5,   // 500ms
+					1.0,   // 1s
+					2.5,   // 2.5s
+					5.0,   // 5s
+					10.0,  // 10s
+					30.0,  // 30s
+					60.0,  // 1min
+				},
+			},
+			[]string{"phase"},
+		),
+		flushOperations: promauto.With(reg).NewCounterVec(
+			prometheus.CounterOpts{
+				Name: "dittofs_s3_flush_operations_total",
+				Help: "Total number of flush operations by reason and status",
+			},
+			[]string{"reason", "status"},
+		),
+		flushBytes: promauto.With(reg).NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name: "dittofs_s3_flush_bytes",
+				Help: "Size of flushed content in bytes by reason",
+				Buckets: []float64{
+					4096,           // 4KB
+					65536,          // 64KB
+					524288,         // 512KB
+					1048576,        // 1MB
+					5242880,        // 5MB
+					10485760,       // 10MB
+					52428800,       // 50MB
+					104857600,      // 100MB
+					524288000,      // 500MB
+					1073741824,     // 1GB
+				},
+			},
+			[]string{"reason"},
+		),
 	}
 }
 
@@ -146,4 +194,38 @@ func (m *s3Metrics) RecordStatsCacheHit() {
 // but useful for tracking cache effectiveness.
 func (m *s3Metrics) RecordStatsCacheMiss() {
 	m.statsCacheMisses.Inc()
+}
+
+// ObserveFlushPhase implements s3.S3Metrics.ObserveFlushPhase
+//
+// Records the duration of individual phases during a flush operation:
+//   - cache_read: Time spent reading from write cache
+//   - s3_upload: Time spent uploading to S3 (PutObject or multipart)
+//   - cache_clear: Time spent clearing cache after successful upload
+func (m *s3Metrics) ObserveFlushPhase(phase string, duration time.Duration, bytes int64) {
+	m.flushPhaseDuration.WithLabelValues(phase).Observe(duration.Seconds())
+	// Also record bytes for upload phase
+	if phase == "s3_upload" && bytes > 0 {
+		m.bytesTransferred.WithLabelValues("flush_upload").Add(float64(bytes))
+	}
+}
+
+// RecordFlushOperation implements s3.S3Metrics.RecordFlushOperation
+//
+// Records a complete flush operation with:
+//   - reason: Why the flush was triggered (stable_write, commit, timeout, threshold)
+//   - bytes: Total bytes flushed
+//   - duration: Total flush duration
+//   - err: Error if flush failed
+func (m *s3Metrics) RecordFlushOperation(reason string, bytes int64, duration time.Duration, err error) {
+	status := "success"
+	if err != nil {
+		status = "error"
+	}
+
+	m.flushOperations.WithLabelValues(reason, status).Inc()
+	m.flushBytes.WithLabelValues(reason).Observe(float64(bytes))
+
+	// Record overall flush duration as an operation
+	m.operationDuration.WithLabelValues("flush").Observe(duration.Seconds())
 }

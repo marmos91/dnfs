@@ -165,16 +165,25 @@ type MemoryWriteCache struct {
 	buffers map[string]*buffer
 	mu      sync.RWMutex
 	closed  bool
+	metrics CacheMetrics
 }
 
 // NewMemoryWriteCache creates a new in-memory write cache.
 //
+// Parameters:
+//   - metrics: Optional metrics collector (can be nil)
+//
 // Returns:
 //   - WriteCache: New cache instance
-func NewMemoryWriteCache() WriteCache {
+func NewMemoryWriteCache(metrics CacheMetrics) WriteCache {
+	if metrics == nil {
+		metrics = noopCacheMetrics{}
+	}
+
 	return &MemoryWriteCache{
 		buffers: make(map[string]*buffer),
 		closed:  false,
+		metrics: metrics,
 	}
 }
 
@@ -226,6 +235,11 @@ func (c *MemoryWriteCache) getBuffer(id metadata.ContentID) (*buffer, bool) {
 
 // WriteAt writes data at the specified offset for a content ID.
 func (c *MemoryWriteCache) WriteAt(id metadata.ContentID, data []byte, offset int64) error {
+	start := time.Now()
+	defer func() {
+		c.metrics.ObserveWrite(int64(len(data)), time.Since(start))
+	}()
+
 	if offset < 0 {
 		return fmt.Errorf("negative offset: %d", offset)
 	}
@@ -281,11 +295,19 @@ func (c *MemoryWriteCache) WriteAt(id metadata.ContentID, data []byte, offset in
 	copy(buf.data[offset:], data)
 	buf.lastWrite = time.Now()
 
+	// Record cache size after write
+	c.metrics.RecordCacheSize(string(id), int64(len(buf.data)))
+
 	return nil
 }
 
 // ReadAt reads data from the cache at the specified offset.
 func (c *MemoryWriteCache) ReadAt(id metadata.ContentID, buf []byte, offset int64) (int, error) {
+	start := time.Now()
+	defer func() {
+		c.metrics.ObserveRead(int64(len(buf)), time.Since(start))
+	}()
+
 	if offset < 0 {
 		return 0, fmt.Errorf("negative offset: %d", offset)
 	}
@@ -343,7 +365,11 @@ func (c *MemoryWriteCache) Size(id metadata.ContentID) int64 {
 // Reset clears the buffer for a specific content ID.
 func (c *MemoryWriteCache) Reset(id metadata.ContentID) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer func() {
+		// Record buffer count after reset
+		c.metrics.RecordBufferCount(len(c.buffers))
+		c.mu.Unlock()
+	}()
 
 	if c.closed {
 		return fmt.Errorf("cache is closed")
@@ -362,6 +388,9 @@ func (c *MemoryWriteCache) Reset(id metadata.ContentID) error {
 
 	// Remove from map
 	delete(c.buffers, idStr)
+
+	// Record cache reset
+	c.metrics.RecordCacheReset(idStr)
 
 	return nil
 }

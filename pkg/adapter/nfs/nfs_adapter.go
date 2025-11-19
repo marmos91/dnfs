@@ -192,17 +192,6 @@ type NFSConfig struct {
 	// Recommended: 5m for production monitoring.
 	MetricsLogInterval time.Duration `mapstructure:"metrics_log_interval" validate:"min=0"`
 
-	// AutoFlushTimeout is the idle timeout before cached writes are flushed
-	// Critical for macOS which doesn't send COMMIT operations
-	// 0 uses default of 30 seconds
-	// Recommended: 30s for macOS compatibility
-	AutoFlushTimeout time.Duration `mapstructure:"auto_flush_timeout" validate:"min=0"`
-
-	// AutoFlushInterval is how often to check for stale cached writes
-	// 0 uses default of 10 seconds
-	// Recommended: 10s (balance between responsiveness and CPU usage)
-	AutoFlushInterval time.Duration `mapstructure:"auto_flush_interval" validate:"min=0"`
-
 	// RateLimiting contains adapter-specific rate limiting configuration.
 	// If not specified, inherits from server.rate_limiting.
 	// If specified, overrides server-level configuration for this adapter.
@@ -379,43 +368,23 @@ func (s *NFSAdapter) SetStores(metadataStore metadata.MetadataStore, contentRepo
 			defaultHandler.ContentStore = writableStore
 			logger.Debug("NFS handler configured with writable content store")
 
-			// Create write cache for buffering writes before flushing to content store
+			// Create write cache with metrics
 			// This eliminates read-modify-write cycles for S3 and improves performance
-			baseCache := cache.NewMemoryWriteCache()
+			//
+			// Flush strategy:
+			//   - Writes buffer in memory (fast)
+			//   - Server returns UNSTABLE to client
+			//   - Client calls COMMIT when it wants durability
+			//   - COMMIT procedure triggers flush to S3
+			//   - Cache also flushes on shutdown and file removal
+			cacheMetrics := metrics.NewCacheMetrics()
+			writeCache := cache.NewMemoryWriteCache(cacheMetrics)
 
-			// Create flush callback that calls ContentStore.FlushWrites()
-			// This keeps the cache and content store interfaces completely separated
-			flushCallback := func(ctx context.Context, id metadata.ContentID) error {
-				if flushableStore, ok := writableStore.(content.FlushableContentStore); ok {
-					return flushableStore.FlushWrites(ctx, id)
-				}
-				// Content store doesn't support flushing - no-op
-				return nil
-			}
+			// Store the cache for shutdown
+			s.writeCache = writeCache
 
-			// Wrap with auto-flush decorator (critical for macOS which doesn't send COMMIT)
-			timeout := s.config.AutoFlushTimeout
-			if timeout == 0 {
-				timeout = 5 * time.Second // Default: 5s (reduced for testing)
-			}
-			interval := s.config.AutoFlushInterval
-			if interval == 0 {
-				interval = 2 * time.Second // Default: 2s (reduced for testing)
-			}
-
-			autoCache := cache.NewAutoFlushWriteCache(baseCache, flushCallback, cache.AutoFlushConfig{
-				Timeout:       timeout,
-				CheckInterval: interval,
-			})
-
-			// Start the auto-flush worker
-			autoCache.Start()
-
-			// Store the auto-flush cache for shutdown
-			s.writeCache = autoCache
-
-			defaultHandler.WriteCache = autoCache
-			logger.Info("NFS handler configured with auto-flush write cache (timeout=%v, interval=%v)", timeout, interval)
+			defaultHandler.WriteCache = writeCache
+			logger.Info("NFS handler configured with write cache (COMMIT-based flushing)")
 
 			// Inject cache into content store if it supports SetWriteCache
 			// This is required for S3ContentStore to access cached data during FlushWrites()
@@ -423,7 +392,7 @@ func (s *NFSAdapter) SetStores(metadataStore metadata.MetadataStore, contentRepo
 				SetWriteCache(cache.WriteCache)
 			}
 			if setter, ok := writableStore.(writeCacheSetter); ok {
-				setter.SetWriteCache(autoCache)
+				setter.SetWriteCache(writeCache)
 				logger.Debug("Injected write cache into content store")
 			}
 		} else {
@@ -689,7 +658,7 @@ func (s *NFSAdapter) gracefulShutdown() error {
 		err = fmt.Errorf("NFS shutdown timeout: %d connections force-closed", remaining)
 	}
 
-	// Close write cache (performs final flush and stops auto-flush worker)
+	// Close write cache (releases resources)
 	if s.writeCache != nil {
 		logger.Debug("Closing write cache...")
 		if closeErr := s.writeCache.Close(); closeErr != nil {
@@ -810,7 +779,7 @@ func (s *NFSAdapter) Stop(ctx context.Context) error {
 		err = ctx.Err()
 	}
 
-	// Close write cache (performs final flush and stops auto-flush worker)
+	// Close write cache (releases resources)
 	if s.writeCache != nil {
 		logger.Debug("Closing write cache...")
 		if closeErr := s.writeCache.Close(); closeErr != nil {

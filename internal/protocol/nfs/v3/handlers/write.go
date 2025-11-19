@@ -642,15 +642,37 @@ func (h *DefaultNFSHandler) Write(
 	logger.Info("WRITE successful: handle=%x offset=%d requested=%d written=%d new_size=%d client=%s",
 		req.Handle, req.Offset, req.Count, len(req.Data), updatedAttr.Size, clientIP)
 
+	// Determine what stability level to return based on whether we're using a cache
+	//
+	// WITH cache (S3, etc.):
+	//   - Return UNSTABLE to tell client data is buffered
+	//   - Client will call COMMIT when it wants durability
+	//   - This prevents flush-on-every-write performance issue
+	//
+	// WITHOUT cache (filesystem store, direct write):
+	//   - Return requested stability level (data is already committed)
+	//   - Client won't call COMMIT since we said data is stable
+	//   - No unnecessary COMMIT calls
+	committed := uint32(UnstableWrite)
+
+	if h.WriteCache == nil {
+		// No cache: data written directly to storage, return requested stability
+		committed = req.Stable
+	} else if flushReason != "" {
+		// Cache enabled but we flushed: return requested stability
+		committed = req.Stable
+	}
+	// else: Cache enabled, no flush, return UNSTABLE
+
 	logger.Debug("WRITE details: stable_requested=%d committed=%d size=%d type=%d mode=%o",
-		req.Stable, FileSyncWrite, updatedAttr.Size, updatedAttr.Type, updatedAttr.Mode)
+		req.Stable, committed, updatedAttr.Size, updatedAttr.Type, updatedAttr.Mode)
 
 	return &WriteResponse{
 		Status:     types.NFS3OK,
 		AttrBefore: nfsWccAttr,
 		AttrAfter:  nfsAttr,
 		Count:      uint32(len(req.Data)),
-		Committed:  FileSyncWrite,  // We commit immediately for simplicity
+		Committed:  committed,     // UNSTABLE when using cache, tells client to call COMMIT
 		Verf:       serverBootTime, // Server boot time for restart detection
 	}, nil
 }
@@ -661,14 +683,21 @@ func (h *DefaultNFSHandler) Write(
 
 // determineFlushReason determines if a flush is needed and returns the reason.
 //
-// Flush is needed when:
-//   - Stable write requested (FileSyncWrite or DataSyncWrite)
-//   - Cache size exceeds content store's flush threshold
+// Flush strategy when using write cache:
+//   - NEVER flush on stable write requests (defeats the cache!)
+//   - Client will call COMMIT procedure when it wants a flush
+//   - Auto-flush worker handles timeout-based flushing (30s idle)
+//
+// Why we ignore the stable flag:
+//   - macOS NFS client sends stable=FileSyncWrite on EVERY write operation
+//   - This causes 32 S3 uploads for a 1MB file (one per 32KB chunk)
+//   - Completely defeats write caching and kills performance
+//   - RFC 1813 allows servers to return UNSTABLE and defer flush to COMMIT
 //
 // Parameters:
 //   - writeStore: Content store (must implement WritableContentStore)
 //   - contentID: Content identifier
-//   - stable: Write stability level
+//   - stable: Write stability level (IGNORED when using cache)
 //
 // Returns:
 //   - FlushReason: Reason for flush, or empty string if no flush needed
@@ -677,17 +706,15 @@ func (h *DefaultNFSHandler) determineFlushReason(
 	contentID metadata.ContentID,
 	stable uint32,
 ) FlushReason {
-	// Only flush on explicit stable write requests
-	// Threshold-based flushing is handled by auto-flush worker (waits for idle timeout)
-	// This prevents re-uploading the same file multiple times during sequential writes
-	if stable == FileSyncWrite || stable == DataSyncWrite {
-		return FlushReasonStableWrite
-	}
-
-	// No immediate flush needed
-	// The auto-flush worker will handle:
-	//   - Timeout-based flushing (after 30s idle)
-	//   - Threshold consideration (prioritizes large files)
+	// When using write cache, NEVER flush on write operations
+	// Flushing happens via:
+	//   1. COMMIT procedure (explicit client request)
+	//   2. Auto-flush worker (timeout-based, after 30s idle)
+	//   3. Cache threshold (handled by auto-flush worker)
+	//
+	// This prevents the catastrophic performance issue where macOS
+	// sends stable=FileSyncWrite on every write, causing dozens of
+	// S3 uploads per file instead of one.
 	return ""
 }
 
@@ -726,14 +753,14 @@ func (h *DefaultNFSHandler) flushContent(
 		return nil
 	}
 
-	logger.Debug("Flushing content: content_id=%s reason=%s", contentID, reason)
+	logger.Info("Flushing content: content_id=%s reason=%s", contentID, reason)
 
 	// Flush writes (this reads from cache if available, or flushes store's internal buffers)
 	if err := flushableStore.FlushWrites(ctx, contentID); err != nil {
 		return fmt.Errorf("flush failed: %w", err)
 	}
 
-	logger.Debug("Flush successful: content_id=%s reason=%s", contentID, reason)
+	logger.Info("Flush complete: content_id=%s reason=%s", contentID, reason)
 	return nil
 }
 
