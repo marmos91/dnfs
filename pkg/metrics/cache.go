@@ -3,7 +3,7 @@ package metrics
 import (
 	"time"
 
-	"github.com/marmos91/dittofs/pkg/content/cache"
+	"github.com/marmos91/dittofs/pkg/store/content/cache"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )

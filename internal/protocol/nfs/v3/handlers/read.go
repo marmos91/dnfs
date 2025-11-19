@@ -10,8 +10,8 @@ import (
 	"github.com/marmos91/dittofs/internal/logger"
 	"github.com/marmos91/dittofs/internal/protocol/nfs/types"
 	"github.com/marmos91/dittofs/internal/protocol/nfs/xdr"
-	"github.com/marmos91/dittofs/pkg/content"
-	"github.com/marmos91/dittofs/pkg/metadata"
+	"github.com/marmos91/dittofs/pkg/store/content"
+	"github.com/marmos91/dittofs/pkg/store/metadata"
 )
 
 // ============================================================================
@@ -222,7 +222,7 @@ type ReadContext struct {
 //
 // **Parameters:**
 //   - ctx: Context with client address, authentication, and cancellation support
-//   - contentRepo: Content repository for file data access
+//   - contentStore: Content repository for file data access
 //   - metadataStore: Metadata store for file attributes
 //   - req: The read request containing handle, offset, and count
 //
@@ -248,7 +248,7 @@ type ReadContext struct {
 //	    UID:        &uid,
 //	    GID:        &gid,
 //	}
-//	resp, err := handler.Read(ctx, contentRepo, metadataRepo, req)
+//	resp, err := handler.Read(ctx, contentStore, metadataStore, req)
 //	if err == context.Canceled {
 //	    // Client disconnected during read
 //	    return nil, err
@@ -262,10 +262,8 @@ type ReadContext struct {
 //	        // End of file reached
 //	    }
 //	}
-func (h *DefaultNFSHandler) Read(
+func (h *Handler) Read(
 	ctx *ReadContext,
-	contentRepo content.ContentStore,
-	metadataStore metadata.MetadataStore,
 	req *ReadRequest,
 ) (*ReadResponse, error) {
 	// ========================================================================
@@ -299,10 +297,46 @@ func (h *DefaultNFSHandler) Read(
 	}
 
 	// ========================================================================
-	// Step 2: Verify file exists and is a regular file
+	// Step 2: Decode share name from file handle
 	// ========================================================================
 
 	fileHandle := metadata.FileHandle(req.Handle)
+	shareName, path, err := metadata.DecodeShareHandle(fileHandle)
+	if err != nil {
+		logger.Warn("READ failed: invalid file handle: handle=%x client=%s error=%v",
+			req.Handle, clientIP, err)
+		return &ReadResponse{Status: types.NFS3ErrBadHandle}, nil
+	}
+
+	// Check if share exists
+	if !h.Registry.ShareExists(shareName) {
+		logger.Warn("READ failed: share not found: share=%s handle=%x client=%s",
+			shareName, req.Handle, clientIP)
+		return &ReadResponse{Status: types.NFS3ErrStale}, nil
+	}
+
+	// Get metadata store for this share
+	metadataStore, err := h.Registry.GetMetadataStoreForShare(shareName)
+	if err != nil {
+		logger.Error("READ failed: cannot get metadata store: share=%s handle=%x client=%s error=%v",
+			shareName, req.Handle, clientIP, err)
+		return &ReadResponse{Status: types.NFS3ErrIO}, nil
+	}
+
+	// Get content store for this share
+	contentStore, err := h.Registry.GetContentStoreForShare(shareName)
+	if err != nil {
+		logger.Error("READ failed: cannot get content store: share=%s handle=%x client=%s error=%v",
+			shareName, req.Handle, clientIP, err)
+		return &ReadResponse{Status: types.NFS3ErrIO}, nil
+	}
+
+	logger.Debug("READ: share=%s path=%s", shareName, path)
+
+	// ========================================================================
+	// Step 3: Verify file exists and is a regular file
+	// ========================================================================
+
 	attr, err := metadataStore.GetFile(ctx.Context, fileHandle)
 	if err != nil {
 		// Check if error is due to context cancellation
@@ -398,7 +432,9 @@ func (h *DefaultNFSHandler) Read(
 	var readFromCache bool
 
 	// Try cache first (if available)
-	if h.WriteCache != nil {
+	// TODO: Phase 5 - Access stores via registry
+	/*
+	if false { // Disabled until Phase 5
 		cacheSize := h.WriteCache.Size(attr.ContentID)
 		if cacheSize > 0 {
 			// Data exists in cache - read from cache
@@ -420,11 +456,13 @@ func (h *DefaultNFSHandler) Read(
 			}
 		}
 	}
+	*/
+	_ = readFromCache // Suppress unused
 
 	// If not read from cache, try content store
 	if !readFromCache {
 		// Check if content store supports efficient random-access reads
-		if readAtStore, ok := contentRepo.(content.ReadAtContentStore); ok {
+		if readAtStore, ok := contentStore.(content.ReadAtContentStore); ok {
 			// ================================================================
 			// FAST PATH: Use ReadAt for efficient range reads (S3, etc.)
 			// ================================================================
@@ -474,7 +512,7 @@ func (h *DefaultNFSHandler) Read(
 		logger.Debug("READ: using sequential read path (no ReadAt support): handle=%x offset=%d count=%d",
 			req.Handle, req.Offset, req.Count)
 
-		reader, err := contentRepo.ReadContent(ctx.Context, attr.ContentID)
+		reader, err := contentStore.ReadContent(ctx.Context, attr.ContentID)
 		if err != nil {
 			logger.Error("READ failed: cannot open content: handle=%x content_id=%s client=%s error=%v",
 				req.Handle, attr.ContentID, clientIP, err)

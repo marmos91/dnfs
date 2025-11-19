@@ -1,6 +1,6 @@
 package metadata
 
-import "github.com/marmos91/dittofs/pkg/metadata"
+import "github.com/marmos91/dittofs/pkg/store/metadata"
 
 const (
 	// DefaultAnonUID is the default anonymous UID (typically "nobody")
