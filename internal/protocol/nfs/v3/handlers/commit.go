@@ -398,7 +398,36 @@ func (h *DefaultNFSHandler) Commit(
 
 	// Flush cached writes to storage
 	// COMMIT ensures all buffered writes are persisted to stable storage
-	if h.ContentStore != nil {
+	//
+	// OPTIMIZATION: Only flush when COMMIT is for the entire file
+	// macOS NFS client calls COMMIT for 4MB ranges during large file writes,
+	// which would cause excessive flushes. We only flush when:
+	//   - offset=0 AND count=0 (RFC: commit entire file)
+	//   - count=0 (RFC: commit from offset to EOF)
+	//   - offset+count >= filesize (covers entire file)
+	//
+	// This prevents flushing a 100MB file 20+ times during writes.
+	shouldFlush := false
+	if req.Offset == 0 && req.Count == 0 {
+		// Commit entire file
+		shouldFlush = true
+		logger.Debug("COMMIT: entire file (offset=0, count=0)")
+	} else if req.Count == 0 {
+		// Commit from offset to EOF
+		shouldFlush = true
+		logger.Debug("COMMIT: from offset to EOF (count=0)")
+	} else if req.Offset+uint64(req.Count) >= fileAttr.Size {
+		// Commit range covers entire file
+		shouldFlush = true
+		logger.Debug("COMMIT: range covers file (offset=%d count=%d size=%d)",
+			req.Offset, req.Count, fileAttr.Size)
+	} else {
+		// Partial range COMMIT - defer flush until full file is committed
+		logger.Debug("COMMIT: partial range, skipping flush (offset=%d count=%d size=%d)",
+			req.Offset, req.Count, fileAttr.Size)
+	}
+
+	if shouldFlush && h.ContentStore != nil {
 		// Cast to WritableContentStore (required for flushing)
 		writeStore, ok := h.ContentStore.(content.WritableContentStore)
 		if !ok {
