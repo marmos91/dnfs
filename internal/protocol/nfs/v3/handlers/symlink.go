@@ -98,6 +98,11 @@ type SymlinkResponse struct {
 	DirAttrAfter *types.NFSFileAttr
 }
 
+// GetStatus returns the status code from the response.
+func (r *SymlinkResponse) GetStatus() uint32 {
+	return r.Status
+}
+
 // SymlinkContext contains the context information needed to process a SYMLINK request.
 // This includes client identification, authentication details, and cancellation handling
 // for access control.

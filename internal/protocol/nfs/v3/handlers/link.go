@@ -78,6 +78,11 @@ type LinkResponse struct {
 	DirWccAfter *types.NFSFileAttr
 }
 
+// GetStatus returns the status code from the response.
+func (r *LinkResponse) GetStatus() uint32 {
+	return r.Status
+}
+
 // LinkContext contains the context information needed to process a LINK request.
 // This includes client identification and authentication details for access control.
 type LinkContext struct {

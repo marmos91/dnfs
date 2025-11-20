@@ -111,6 +111,11 @@ type FsInfoResponse struct {
 	Properties uint32
 }
 
+// GetStatus returns the status code from the response.
+func (r *FsInfoResponse) GetStatus() uint32 {
+	return r.Status
+}
+
 // FsInfoContext contains the context information needed to process an FSINFO request.
 // This includes client identification and authentication details.
 type FsInfoContext struct {

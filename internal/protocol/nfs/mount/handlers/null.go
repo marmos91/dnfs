@@ -31,7 +31,13 @@ type NullRequest struct {
 //
 // The response is encoded in XDR format (empty) before being sent to the client.
 type NullResponse struct {
-	// No fields - NULL returns no data
+	Status uint32
+}
+
+// GetStatus returns the status code from the response.
+// NULL responses don't have a status field, always return 0 (success).
+func (r *NullResponse) GetStatus() uint32 {
+	return r.Status
 }
 
 // NullContext contains the context information for a NULL request.
@@ -167,7 +173,7 @@ func (h *Handler) MountNull(
 	logger.Debug("NULL: request completed successfully: client=%s", clientIP)
 
 	// Return empty response - NULL always succeeds
-	return &NullResponse{}, nil
+	return &NullResponse{Status: MountOK}, nil
 }
 
 // ============================================================================

@@ -98,6 +98,11 @@ type PathConfResponse struct {
 	CasePreserving bool
 }
 
+// GetStatus returns the status code from the response.
+func (r *PathConfResponse) GetStatus() uint32 {
+	return r.Status
+}
+
 // PathConfContext contains the context information needed to process a PATHCONF request.
 // This includes client identification and authentication details.
 type PathConfContext struct {

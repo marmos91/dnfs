@@ -66,6 +66,11 @@ type ReadLinkResponse struct {
 	Target string
 }
 
+// GetStatus returns the status code from the response.
+func (r *ReadLinkResponse) GetStatus() uint32 {
+	return r.Status
+}
+
 // ReadLinkContext contains the context information needed to process a READLINK request.
 // This includes client identification and authentication details for access control
 // and auditing purposes.

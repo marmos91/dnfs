@@ -76,6 +76,11 @@ type RmdirResponse struct {
 	DirWccAfter *types.NFSFileAttr
 }
 
+// GetStatus returns the status code from the response.
+func (r *RmdirResponse) GetStatus() uint32 {
+	return r.Status
+}
+
 // RmdirContext contains the context information needed to process a RMDIR request.
 // This includes client identification and authentication details for access control
 // and auditing purposes.

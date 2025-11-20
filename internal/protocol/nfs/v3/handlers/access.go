@@ -71,6 +71,11 @@ type AccessResponse struct {
 	Access uint32
 }
 
+// GetStatus returns the status code from the response.
+func (r *AccessResponse) GetStatus() uint32 {
+	return r.Status
+}
+
 // AccessContext contains the context information needed to process an ACCESS request.
 // This includes client identification, authentication details for permission checks,
 // and cancellation handling.

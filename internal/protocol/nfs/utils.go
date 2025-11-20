@@ -67,6 +67,7 @@ type rpcResponse interface {
 		*mount.UmountAllResponse |
 		*mount.ExportResponse
 	Encode() ([]byte, error)
+	GetStatus() uint32
 }
 
 func handleRequest[Req rpcRequest, Resp rpcResponse](
@@ -75,13 +76,17 @@ func handleRequest[Req rpcRequest, Resp rpcResponse](
 	handle func(Req) (Resp, error),
 	errorStatus uint32,
 	makeErrorResp func(uint32) Resp,
-) ([]byte, error) {
+) (*HandlerResult, error) {
 	// Decode request
 	req, err := decode(data)
 	if err != nil {
 		logger.Debug("Error decoding request: %v", err)
 		errorResp := makeErrorResp(errorStatus)
-		return errorResp.Encode()
+		encoded, encErr := errorResp.Encode()
+		if encErr != nil {
+			return &HandlerResult{Data: nil, NFSStatus: errorStatus}, encErr
+		}
+		return &HandlerResult{Data: encoded, NFSStatus: errorStatus}, err
 	}
 
 	// Call handler
@@ -89,16 +94,27 @@ func handleRequest[Req rpcRequest, Resp rpcResponse](
 	if err != nil {
 		logger.Debug("Handler error: %v", err)
 		errorResp := makeErrorResp(errorStatus)
-		return errorResp.Encode()
+		encoded, encErr := errorResp.Encode()
+		if encErr != nil {
+			return &HandlerResult{Data: nil, NFSStatus: errorStatus}, encErr
+		}
+		return &HandlerResult{Data: encoded, NFSStatus: errorStatus}, err
 	}
+
+	// Extract status before encoding
+	status := resp.GetStatus()
 
 	// Encode response
 	encoded, err := resp.Encode()
 	if err != nil {
 		logger.Debug("Error encoding response: %v", err)
 		errorResp := makeErrorResp(errorStatus)
-		return errorResp.Encode()
+		encodedErr, encErr := errorResp.Encode()
+		if encErr != nil {
+			return &HandlerResult{Data: nil, NFSStatus: errorStatus}, encErr
+		}
+		return &HandlerResult{Data: encodedErr, NFSStatus: errorStatus}, err
 	}
 
-	return encoded, nil
+	return &HandlerResult{Data: encoded, NFSStatus: status}, nil
 }

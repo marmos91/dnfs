@@ -1,6 +1,7 @@
 package nfs
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"github.com/marmos91/dittofs/internal/logger"
 	nfs "github.com/marmos91/dittofs/internal/protocol/nfs"
 	"github.com/marmos91/dittofs/internal/protocol/nfs/rpc"
+	"github.com/marmos91/dittofs/pkg/store/metadata"
 )
 
 type NFSConnection struct {
@@ -296,6 +298,91 @@ func (c *NFSConnection) handleRPCCall(ctx context.Context, call *rpc.RPCCallMess
 	return c.sendReply(call.XID, replyData)
 }
 
+// extractShareName attempts to extract the share name from NFS request data.
+//
+// Most NFS procedures include a file handle at the beginning of the request.
+// This function decodes the file handle and uses the registry to determine
+// which share it belongs to.
+//
+// Parameters:
+//   - ctx: Context for cancellation
+//   - data: Raw procedure data (includes file handle)
+//
+// Returns:
+//   - string: Share name, or empty string if no handle present (e.g., NULL procedure)
+//   - error: NFS3ErrBadHandle if handle is malformed or share not found
+func (c *NFSConnection) extractShareName(ctx context.Context, data []byte) (string, error) {
+	// Need at least 4 bytes for handle length
+	if len(data) < 4 {
+		return "", nil // No handle present (e.g., NULL procedure)
+	}
+
+	reader := bytes.NewReader(data)
+
+	// Read handle length (4 bytes, big-endian)
+	var handleLen uint32
+	if err := binary.Read(reader, binary.BigEndian, &handleLen); err != nil {
+		return "", nil // Failed to read, assume no handle
+	}
+
+	// No handle present (length is 0)
+	if handleLen == 0 {
+		return "", nil
+	}
+
+	// Validate handle length (NFS v3 handles must be <= 64 bytes per RFC 1813)
+	if handleLen > 64 {
+		return "", fmt.Errorf("handle length %d exceeds maximum 64 bytes", handleLen)
+	}
+
+	// Check if we have enough data for the handle
+	if len(data) < int(4+handleLen) {
+		return "", fmt.Errorf("incomplete file handle: need %d bytes, have %d", 4+handleLen, len(data))
+	}
+
+	// Read the handle bytes
+	handleBytes := make([]byte, handleLen)
+	if _, err := reader.Read(handleBytes); err != nil {
+		return "", fmt.Errorf("failed to read file handle: %w", err)
+	}
+
+	// Convert to FileHandle type
+	handle := metadata.FileHandle(handleBytes)
+
+	// Extract share name from handle using registry
+	shareName, err := c.server.registry.GetShareNameForHandle(ctx, handle)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve share from handle: %w", err)
+	}
+
+	return shareName, nil
+}
+
+// logNFSRequest logs an NFS request with procedure, share, and auth information.
+//
+// This consolidates all the conditional logging logic in one place for cleaner code.
+func (c *NFSConnection) logNFSRequest(procedure, share string, authCtx *nfs.NFSAuthContext) {
+	var parts []string
+
+	parts = append(parts, fmt.Sprintf("NFS %s", procedure))
+
+	if share != "" {
+		parts = append(parts, fmt.Sprintf("share=%s", share))
+	}
+
+	if authCtx.UID != nil {
+		parts = append(parts, fmt.Sprintf("uid=%d gid=%d ngids=%d",
+			*authCtx.UID, *authCtx.GID, len(authCtx.GIDs)))
+	} else {
+		parts = append(parts, fmt.Sprintf("auth_flavor=%d", authCtx.AuthFlavor))
+	}
+
+	logger.Debug("%s", parts[0])
+	for i := 1; i < len(parts); i++ {
+		logger.Debug("  %s", parts[i])
+	}
+}
+
 // handleNFSProcedure dispatches an NFS procedure call to the appropriate handler.
 //
 // It looks up the procedure in the dispatch table, extracts authentication
@@ -315,35 +402,35 @@ func (c *NFSConnection) handleNFSProcedure(ctx context.Context, call *rpc.RPCCal
 		return []byte{}, nil
 	}
 
-	// Extract authentication context
-	authCtx := nfs.ExtractAuthContext(ctx, call, clientAddr, procInfo.Name)
-
-	// Log procedure with auth info
-	if authCtx.UID != nil {
-		logger.Debug("NFS %s: uid=%d gid=%d ngids=%d",
-			procInfo.Name, *authCtx.UID, *authCtx.GID, len(authCtx.GIDs))
-	} else {
-		logger.Debug("NFS %s: auth_flavor=%d (no Unix credentials)",
-			procInfo.Name, authCtx.AuthFlavor)
+	// Extract share name from file handle (best effort for metrics)
+	share, extractErr := c.extractShareName(ctx, data)
+	if extractErr != nil {
+		logger.Debug("NFS %s: failed to extract share (handle may be invalid): %v", procInfo.Name, extractErr)
+		// Continue anyway - handler will validate and return proper NFS error
+		share = ""
 	}
 
+	// Extract authentication context (includes share for handlers)
+	authCtx := nfs.ExtractAuthContext(ctx, call, clientAddr, share, procInfo.Name)
+
+	// Log request with clean helper
+	c.logNFSRequest(procInfo.Name, share, authCtx)
+
 	// Check context before dispatching to handler
-	// This prevents starting work on cancelled requests
 	select {
 	case <-ctx.Done():
-		logger.Debug("NFS %s cancelled before handler: xid=0x%x client=%s error=%v",
-			procInfo.Name, call.XID, clientAddr, ctx.Err())
+		logger.Debug("NFS %s cancelled before handler: xid=0x%x", procInfo.Name, call.XID)
 		return nil, ctx.Err()
 	default:
 	}
 
 	// Record request start in metrics
-	c.server.metrics.RecordRequestStart(procInfo.Name)
-	defer c.server.metrics.RecordRequestEnd(procInfo.Name)
+	c.server.metrics.RecordRequestStart(procInfo.Name, share)
+	defer c.server.metrics.RecordRequestEnd(procInfo.Name, share)
 
 	// Dispatch to handler with context and record metrics
 	startTime := time.Now()
-	replyData, err := procInfo.Handler(
+	result, err := procInfo.Handler(
 		authCtx,
 		c.server.nfsHandler,
 		c.server.registry,
@@ -351,10 +438,19 @@ func (c *NFSConnection) handleNFSProcedure(ctx context.Context, call *rpc.RPCCal
 	)
 	duration := time.Since(startTime)
 
-	// Record request completion in metrics
-	c.server.metrics.RecordRequest(procInfo.Name, duration, err)
+	// Record request completion in metrics with NFS status code
+	var errorCode string
+	if result != nil {
+		errorCode = nfs.NFSStatusToString(result.NFSStatus)
+	} else if err != nil {
+		errorCode = "ERROR_NO_RESULT"
+	}
+	c.server.metrics.RecordRequest(procInfo.Name, share, duration, errorCode)
 
-	return replyData, err
+	if result == nil {
+		return nil, err
+	}
+	return result.Data, err
 }
 
 // handleMountProcedure dispatches a MOUNT procedure call to the appropriate handler.
@@ -373,35 +469,31 @@ func (c *NFSConnection) handleMountProcedure(ctx context.Context, call *rpc.RPCC
 		return []byte{}, nil
 	}
 
-	// Extract authentication context
-	authCtx := nfs.ExtractAuthContext(ctx, call, clientAddr, procInfo.Name)
+	// Mount requests don't have file handles, so no share
+	share := ""
 
-	// Log procedure with auth info
-	if authCtx.UID != nil {
-		logger.Debug("MOUNT %s: uid=%d gid=%d ngids=%d",
-			procInfo.Name, *authCtx.UID, *authCtx.GID, len(authCtx.GIDs))
-	} else {
-		logger.Debug("MOUNT %s: auth_flavor=%d",
-			procInfo.Name, authCtx.AuthFlavor)
-	}
+	// Extract authentication context (includes empty share for mount requests)
+	authCtx := nfs.ExtractAuthContext(ctx, call, clientAddr, share, procInfo.Name)
+
+	// Log request with clean helper (MOUNT_ prefix)
+	procedureName := "MOUNT_" + procInfo.Name
+	c.logNFSRequest(procedureName, share, authCtx)
 
 	// Check context before dispatching to handler
 	select {
 	case <-ctx.Done():
-		logger.Debug("MOUNT %s cancelled before handler: xid=0x%x client=%s error=%v",
-			procInfo.Name, call.XID, clientAddr, ctx.Err())
+		logger.Debug("MOUNT %s cancelled before handler: xid=0x%x", procInfo.Name, call.XID)
 		return nil, ctx.Err()
 	default:
 	}
 
-	// Record request start in metrics (use MOUNT_ prefix to distinguish from NFS)
-	procedureName := "MOUNT_" + procInfo.Name
-	c.server.metrics.RecordRequestStart(procedureName)
-	defer c.server.metrics.RecordRequestEnd(procedureName)
+	// Record request start in metrics
+	c.server.metrics.RecordRequestStart(procedureName, share)
+	defer c.server.metrics.RecordRequestEnd(procedureName, share)
 
 	// Dispatch to handler with context and record metrics
 	startTime := time.Now()
-	replyData, err := procInfo.Handler(
+	result, err := procInfo.Handler(
 		authCtx,
 		c.server.mountHandler,
 		c.server.registry,
@@ -409,10 +501,19 @@ func (c *NFSConnection) handleMountProcedure(ctx context.Context, call *rpc.RPCC
 	)
 	duration := time.Since(startTime)
 
-	// Record request completion in metrics
-	c.server.metrics.RecordRequest(procedureName, duration, err)
+	// Record request completion in metrics with Mount status code
+	var errorCode string
+	if result != nil {
+		errorCode = nfs.MountStatusToString(result.NFSStatus)
+	} else if err != nil {
+		errorCode = "ERROR_NO_RESULT"
+	}
+	c.server.metrics.RecordRequest(procedureName, share, duration, errorCode)
 
-	return replyData, err
+	if result == nil {
+		return nil, err
+	}
+	return result.Data, err
 }
 
 // sendReply sends an RPC reply to the client.

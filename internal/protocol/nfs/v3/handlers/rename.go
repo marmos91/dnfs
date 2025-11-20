@@ -90,6 +90,11 @@ type RenameResponse struct {
 	ToDirWccAfter *types.NFSFileAttr
 }
 
+// GetStatus returns the status code from the response.
+func (r *RenameResponse) GetStatus() uint32 {
+	return r.Status
+}
+
 // RenameContext contains the context information needed to process a RENAME request.
 // This includes client identification, authentication details, and cancellation handling
 // for access control.

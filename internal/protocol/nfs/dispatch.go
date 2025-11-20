@@ -12,6 +12,36 @@ import (
 )
 
 // ============================================================================
+// Handler Result Structure
+// ============================================================================
+
+// HandlerResult contains both the XDR-encoded response and metadata about the operation.
+//
+// This structure separates the response bytes (which are sent to the client) from
+// metadata about the operation (which is used for metrics, logging, etc.).
+//
+// By returning the NFS status code explicitly, we enable:
+//   - Accurate metrics tracking of success/error rates by NFS error type
+//   - Clean separation of protocol-level errors from system-level errors
+//   - Type-safe handler contracts
+type HandlerResult struct {
+	// Data contains the XDR-encoded response to send to the client.
+	// This includes the NFS status code embedded in the response structure.
+	Data []byte
+
+	// NFSStatus is the NFS protocol status code for this operation.
+	// Common values:
+	//   - types.NFS3OK (0): Success
+	//   - types.NFS3ErrNoEnt (2): File not found
+	//   - types.NFS3ErrAcces (13): Permission denied
+	//   - types.NFS3ErrStale (70): Stale file handle
+	//   - types.NFS3ErrBadHandle (10001): Invalid file handle
+	//
+	// This is duplicated from the response Data for observability purposes.
+	NFSStatus uint32
+}
+
+// ============================================================================
 // Authentication Context Creation
 // ============================================================================
 
@@ -52,6 +82,11 @@ type NFSAuthContext struct {
 	// Format: "IP:port" for TCP connections.
 	ClientAddr string
 
+	// Share is the name of the share being accessed (e.g., "/export").
+	// Empty string for requests that don't include file handles (e.g., NULL, MOUNT).
+	// Extracted at the connection layer to avoid re-parsing in each handler.
+	Share string
+
 	// AuthFlavor indicates the RPC authentication type (AUTH_UNIX, AUTH_NULL, etc.)
 	AuthFlavor uint32
 
@@ -83,6 +118,7 @@ type NFSAuthContext struct {
 //   - ctx: The Go context for cancellation and timeout control
 //   - call: The RPC call message containing authentication data
 //   - clientAddr: The remote address of the client connection
+//   - share: The share name extracted from file handle (empty if not available)
 //   - procedure: Name of the procedure (for logging purposes)
 //
 // Returns:
@@ -91,11 +127,13 @@ func ExtractAuthContext(
 	ctx context.Context,
 	call *rpc.RPCCallMessage,
 	clientAddr string,
+	share string,
 	procedure string,
 ) *NFSAuthContext {
 	authCtx := &NFSAuthContext{
 		Context:    ctx,
 		ClientAddr: clientAddr,
+		Share:      share,
 		AuthFlavor: call.GetAuthFlavor(),
 	}
 
@@ -137,7 +175,13 @@ func ExtractAuthContext(
 
 // nfsProcedureHandler defines the signature for NFS procedure handlers.
 // Each handler receives the necessary stores, request data, and
-// authentication context, and returns encoded response data or an error.
+// authentication context, and returns a structured result with NFS status.
+//
+// **Return Values:**
+//
+// Handlers return (*HandlerResult, error) where:
+//   - HandlerResult: Contains XDR-encoded response and NFS status code
+//   - error: System-level failures only (context cancelled, I/O errors)
 //
 // **Context Handling:**
 //
@@ -152,7 +196,7 @@ type nfsProcedureHandler func(
 	handler *nfs.Handler,
 	reg *registry.Registry,
 	data []byte,
-) ([]byte, error)
+) (*HandlerResult, error)
 
 // nfsProcedureInfo contains metadata about an NFS procedure for dispatch.
 type nfsProcedureInfo struct {
@@ -178,6 +222,12 @@ var NfsDispatchTable map[uint32]*nfsProcedureInfo
 
 // mountProcedureHandler defines the signature for Mount procedure handlers.
 //
+// **Return Values:**
+//
+// Handlers return (*HandlerResult, error) where:
+//   - HandlerResult: Contains XDR-encoded response and status code
+//   - error: System-level failures only
+//
 // **Context Handling:**
 //
 // Like NFS handlers, Mount handlers receive an NFSAuthContext with a Go context
@@ -187,7 +237,7 @@ type mountProcedureHandler func(
 	handler *mount.Handler,
 	reg *registry.Registry,
 	data []byte,
-) ([]byte, error)
+) (*HandlerResult, error)
 
 // mountProcedureInfo contains metadata about a Mount procedure for dispatch.
 type mountProcedureInfo struct {
@@ -204,6 +254,53 @@ var MountDispatchTable map[uint32]*mountProcedureInfo
 func init() {
 	initNFSDispatchTable()
 	initMountDispatchTable()
+}
+
+// ============================================================================
+// Status Extraction Helpers
+// ============================================================================
+
+// extractNFSStatus extracts the NFS status code from an XDR-encoded response.
+//
+// NFS v3 responses always start with a 4-byte status field (big-endian uint32).
+// This function reads that field without fully parsing the response.
+//
+// Parameters:
+//   - data: XDR-encoded response bytes
+//
+// Returns:
+//   - uint32: NFS status code, or types.NFS3ErrIO if data is malformed
+func extractNFSStatus(data []byte) uint32 {
+	// NFS responses always start with status (4 bytes, big-endian)
+	if len(data) < 4 {
+		logger.Warn("Response too short to extract status: %d bytes", len(data))
+		return types.NFS3ErrIO
+	}
+
+	// Read big-endian uint32
+	status := uint32(data[0])<<24 | uint32(data[1])<<16 | uint32(data[2])<<8 | uint32(data[3])
+	return status
+}
+
+// extractMountStatus extracts the Mount protocol status from an XDR-encoded response.
+//
+// Mount protocol responses (for MNT procedure) start with a 4-byte status field.
+// For other mount procedures (DUMP, EXPORT, etc.), we return 0 (success).
+//
+// Parameters:
+//   - data: XDR-encoded response bytes
+//
+// Returns:
+//   - uint32: Mount status code, or 0 if cannot extract
+func extractMountStatus(data []byte) uint32 {
+	// Mount responses vary by procedure, but MNT starts with status
+	if len(data) < 4 {
+		return 0 // Non-MNT procedures or empty responses
+	}
+
+	// Read big-endian uint32
+	status := uint32(data[0])<<24 | uint32(data[1])<<16 | uint32(data[2])<<8 | uint32(data[3])
+	return status
 }
 
 // ============================================================================
@@ -346,7 +443,7 @@ func handleNFSNull(
 	handler *nfs.Handler,
 	reg *registry.Registry,
 	data []byte,
-) ([]byte, error) {
+) (*HandlerResult, error) {
 	ctx := &nfs.NullContext{
 		Context:    authCtx.Context,
 		ClientAddr: authCtx.ClientAddr,
@@ -364,7 +461,7 @@ func handleNFSNull(
 		},
 		types.NFS3ErrAcces,
 		func(status uint32) *nfs.NullResponse {
-			return &nfs.NullResponse{}
+			return &nfs.NullResponse{Status: status}
 		},
 	)
 }
@@ -374,7 +471,7 @@ func handleNFSGetAttr(
 	handler *nfs.Handler,
 	reg *registry.Registry,
 	data []byte,
-) ([]byte, error) {
+) (*HandlerResult, error) {
 	ctx := &nfs.GetAttrContext{
 		Context:    authCtx.Context,
 		ClientAddr: authCtx.ClientAddr,
@@ -399,7 +496,7 @@ func handleNFSSetAttr(
 	handler *nfs.Handler,
 	reg *registry.Registry,
 	data []byte,
-) ([]byte, error) {
+) (*HandlerResult, error) {
 	ctx := &nfs.SetAttrContext{
 		Context:    authCtx.Context,
 		ClientAddr: authCtx.ClientAddr,
@@ -427,7 +524,7 @@ func handleNFSLookup(
 	handler *nfs.Handler,
 	reg *registry.Registry,
 	data []byte,
-) ([]byte, error) {
+) (*HandlerResult, error) {
 	ctx := &nfs.LookupContext{
 		Context:    authCtx.Context,
 		ClientAddr: authCtx.ClientAddr,
@@ -455,7 +552,7 @@ func handleNFSAccess(
 	handler *nfs.Handler,
 	reg *registry.Registry,
 	data []byte,
-) ([]byte, error) {
+) (*HandlerResult, error) {
 	ctx := &nfs.AccessContext{
 		Context:    authCtx.Context,
 		ClientAddr: authCtx.ClientAddr,
@@ -483,7 +580,7 @@ func handleNFSReadLink(
 	handler *nfs.Handler,
 	reg *registry.Registry,
 	data []byte,
-) ([]byte, error) {
+) (*HandlerResult, error) {
 	ctx := &nfs.ReadLinkContext{
 		Context:    authCtx.Context,
 		ClientAddr: authCtx.ClientAddr,
@@ -511,7 +608,7 @@ func handleNFSRead(
 	handler *nfs.Handler,
 	reg *registry.Registry,
 	data []byte,
-) ([]byte, error) {
+) (*HandlerResult, error) {
 	ctx := &nfs.ReadContext{
 		Context:    authCtx.Context,
 		ClientAddr: authCtx.ClientAddr,
@@ -539,7 +636,7 @@ func handleNFSWrite(
 	handler *nfs.Handler,
 	reg *registry.Registry,
 	data []byte,
-) ([]byte, error) {
+) (*HandlerResult, error) {
 	ctx := &nfs.WriteContext{
 		Context:    authCtx.Context,
 		ClientAddr: authCtx.ClientAddr,
@@ -567,7 +664,7 @@ func handleNFSCreate(
 	handler *nfs.Handler,
 	reg *registry.Registry,
 	data []byte,
-) ([]byte, error) {
+) (*HandlerResult, error) {
 	ctx := &nfs.CreateContext{
 		Context:    authCtx.Context,
 		ClientAddr: authCtx.ClientAddr,
@@ -594,7 +691,7 @@ func handleNFSMkdir(
 	handler *nfs.Handler,
 	reg *registry.Registry,
 	data []byte,
-) ([]byte, error) {
+) (*HandlerResult, error) {
 	ctx := &nfs.MkdirContext{
 		Context:    authCtx.Context,
 		ClientAddr: authCtx.ClientAddr,
@@ -622,7 +719,7 @@ func handleNFSSymlink(
 	handler *nfs.Handler,
 	reg *registry.Registry,
 	data []byte,
-) ([]byte, error) {
+) (*HandlerResult, error) {
 	ctx := &nfs.SymlinkContext{
 		Context:    authCtx.Context,
 		ClientAddr: authCtx.ClientAddr,
@@ -650,7 +747,7 @@ func handleNFSMknod(
 	handler *nfs.Handler,
 	reg *registry.Registry,
 	data []byte,
-) ([]byte, error) {
+) (*HandlerResult, error) {
 	ctx := &nfs.MknodContext{
 		Context:    authCtx.Context,
 		ClientAddr: authCtx.ClientAddr,
@@ -678,7 +775,7 @@ func handleNFSRemove(
 	handler *nfs.Handler,
 	reg *registry.Registry,
 	data []byte,
-) ([]byte, error) {
+) (*HandlerResult, error) {
 	ctx := &nfs.RemoveContext{
 		Context:    authCtx.Context,
 		ClientAddr: authCtx.ClientAddr,
@@ -706,7 +803,7 @@ func handleNFSRmdir(
 	handler *nfs.Handler,
 	reg *registry.Registry,
 	data []byte,
-) ([]byte, error) {
+) (*HandlerResult, error) {
 	ctx := &nfs.RmdirContext{
 		Context:    authCtx.Context,
 		ClientAddr: authCtx.ClientAddr,
@@ -734,7 +831,7 @@ func handleNFSRename(
 	handler *nfs.Handler,
 	reg *registry.Registry,
 	data []byte,
-) ([]byte, error) {
+) (*HandlerResult, error) {
 	ctx := &nfs.RenameContext{
 		Context:    authCtx.Context,
 		ClientAddr: authCtx.ClientAddr,
@@ -762,7 +859,7 @@ func handleNFSLink(
 	handler *nfs.Handler,
 	reg *registry.Registry,
 	data []byte,
-) ([]byte, error) {
+) (*HandlerResult, error) {
 	ctx := &nfs.LinkContext{
 		Context:    authCtx.Context,
 		ClientAddr: authCtx.ClientAddr,
@@ -790,7 +887,7 @@ func handleNFSReadDir(
 	handler *nfs.Handler,
 	reg *registry.Registry,
 	data []byte,
-) ([]byte, error) {
+) (*HandlerResult, error) {
 	ctx := &nfs.ReadDirContext{
 		Context:    authCtx.Context,
 		ClientAddr: authCtx.ClientAddr,
@@ -818,7 +915,7 @@ func handleNFSReadDirPlus(
 	handler *nfs.Handler,
 	reg *registry.Registry,
 	data []byte,
-) ([]byte, error) {
+) (*HandlerResult, error) {
 	ctx := &nfs.ReadDirPlusContext{
 		Context:    authCtx.Context,
 		ClientAddr: authCtx.ClientAddr,
@@ -846,7 +943,7 @@ func handleNFSFsStat(
 	handler *nfs.Handler,
 	reg *registry.Registry,
 	data []byte,
-) ([]byte, error) {
+) (*HandlerResult, error) {
 	ctx := &nfs.FsStatContext{
 		Context:    authCtx.Context,
 		ClientAddr: authCtx.ClientAddr,
@@ -871,7 +968,7 @@ func handleNFSFsInfo(
 	handler *nfs.Handler,
 	reg *registry.Registry,
 	data []byte,
-) ([]byte, error) {
+) (*HandlerResult, error) {
 	ctx := &nfs.FsInfoContext{
 		Context:    authCtx.Context,
 		ClientAddr: authCtx.ClientAddr,
@@ -896,7 +993,7 @@ func handleNFSPathConf(
 	handler *nfs.Handler,
 	reg *registry.Registry,
 	data []byte,
-) ([]byte, error) {
+) (*HandlerResult, error) {
 	ctx := &nfs.PathConfContext{
 		Context:    authCtx.Context,
 		ClientAddr: authCtx.ClientAddr,
@@ -921,7 +1018,7 @@ func handleNFSCommit(
 	handler *nfs.Handler,
 	reg *registry.Registry,
 	data []byte,
-) ([]byte, error) {
+) (*HandlerResult, error) {
 	ctx := &nfs.CommitContext{
 		Context:    authCtx.Context,
 		ClientAddr: authCtx.ClientAddr,
@@ -995,7 +1092,7 @@ func handleMountNull(
 	handler *mount.Handler,
 	reg *registry.Registry,
 	data []byte,
-) ([]byte, error) {
+) (*HandlerResult, error) {
 	nullCtx := &mount.NullContext{
 		Context:    authCtx.Context,
 		ClientAddr: authCtx.ClientAddr,
@@ -1013,10 +1110,9 @@ func handleMountNull(
 		},
 		mount.MountErrIO,
 		func(status uint32) *mount.NullResponse {
-			return &mount.NullResponse{}
+			return &mount.NullResponse{Status: status}
 		},
 	)
-
 }
 
 func handleMountMnt(
@@ -1024,7 +1120,7 @@ func handleMountMnt(
 	handler *mount.Handler,
 	reg *registry.Registry,
 	data []byte,
-) ([]byte, error) {
+) (*HandlerResult, error) {
 	// Create mount context with Unix auth if available
 	var unixAuth *rpc.UnixAuth
 	if authCtx.UID != nil && authCtx.GID != nil {
@@ -1060,7 +1156,7 @@ func handleMountDump(
 	handler *mount.Handler,
 	reg *registry.Registry,
 	data []byte,
-) ([]byte, error) {
+) (*HandlerResult, error) {
 	ctx := &mount.DumpContext{
 		Context:    authCtx.Context,
 		ClientAddr: authCtx.ClientAddr,
@@ -1074,7 +1170,7 @@ func handleMountDump(
 		},
 		mount.MountErrIO,
 		func(status uint32) *mount.DumpResponse {
-			return &mount.DumpResponse{Entries: []mount.DumpEntry{}}
+			return &mount.DumpResponse{Status: status, Entries: []mount.DumpEntry{}}
 		},
 	)
 }
@@ -1084,7 +1180,7 @@ func handleMountUmnt(
 	handler *mount.Handler,
 	reg *registry.Registry,
 	data []byte,
-) ([]byte, error) {
+) (*HandlerResult, error) {
 	ctx := &mount.UmountContext{
 		Context:    authCtx.Context,
 		ClientAddr: authCtx.ClientAddr,
@@ -1098,7 +1194,7 @@ func handleMountUmnt(
 		},
 		mount.MountErrIO,
 		func(status uint32) *mount.UmountResponse {
-			return &mount.UmountResponse{}
+			return &mount.UmountResponse{Status: status}
 		},
 	)
 }
@@ -1108,7 +1204,7 @@ func handleMountUmntAll(
 	handler *mount.Handler,
 	reg *registry.Registry,
 	data []byte,
-) ([]byte, error) {
+) (*HandlerResult, error) {
 	ctx := &mount.UmountAllContext{
 		Context:    authCtx.Context,
 		ClientAddr: authCtx.ClientAddr,
@@ -1122,7 +1218,7 @@ func handleMountUmntAll(
 		},
 		mount.MountErrIO,
 		func(status uint32) *mount.UmountAllResponse {
-			return &mount.UmountAllResponse{}
+			return &mount.UmountAllResponse{Status: status}
 		},
 	)
 }
@@ -1132,7 +1228,7 @@ func handleMountExport(
 	handler *mount.Handler,
 	reg *registry.Registry,
 	data []byte,
-) ([]byte, error) {
+) (*HandlerResult, error) {
 	exportCtx := &mount.ExportContext{
 		Context: authCtx.Context,
 	}
@@ -1145,7 +1241,7 @@ func handleMountExport(
 		},
 		mount.MountErrIO,
 		func(status uint32) *mount.ExportResponse {
-			return &mount.ExportResponse{Entries: []mount.ExportEntry{}}
+			return &mount.ExportResponse{Status: status, Entries: []mount.ExportEntry{}}
 		},
 	)
 }

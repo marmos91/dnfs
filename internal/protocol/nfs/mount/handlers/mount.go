@@ -66,6 +66,11 @@ type MountResponse struct {
 	AuthFlavors []int32
 }
 
+// GetStatus returns the status code from the response.
+func (r *MountResponse) GetStatus() uint32 {
+	return r.Status
+}
+
 // MountContext contains the context information needed to process a mount request.
 // This includes client identification, authentication details, and cancellation handling.
 type MountContext struct {

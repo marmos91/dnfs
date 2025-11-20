@@ -96,6 +96,11 @@ type MkdirResponse struct {
 	WccAfter *types.NFSFileAttr
 }
 
+// GetStatus returns the status code from the response.
+func (r *MkdirResponse) GetStatus() uint32 {
+	return r.Status
+}
+
 // MkdirContext contains the context information needed to process a MKDIR request.
 // This includes client identification, authentication details, and cancellation
 // handling for access control and auditing purposes.

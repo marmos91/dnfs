@@ -40,9 +40,16 @@ type ExportContext struct {
 // The response format follows the XDR specification for a linked list,
 // where each entry is followed by a boolean indicating if more entries exist.
 type ExportResponse struct {
+	Status uint32
 	// Entries is the list of currently exported filesystems
 	// Each entry contains the export path and optionally a list of allowed groups
 	Entries []ExportEntry
+}
+
+// GetStatus returns the status code from the response.
+// EXPORT responses don't have a status field, always return 0 (success).
+func (r *ExportResponse) GetStatus() uint32 {
+	return r.Status
 }
 
 // ExportEntry represents a single export entry in the EXPORT response.
@@ -159,6 +166,7 @@ func (h *Handler) Export(
 	}
 
 	return &ExportResponse{
+		Status:  MountOK,
 		Entries: entries,
 	}, nil
 }

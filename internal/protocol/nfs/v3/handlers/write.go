@@ -117,6 +117,11 @@ type WriteResponse struct {
 	Verf       uint64             // Write verifier
 }
 
+// GetStatus returns the status code from the response.
+func (r *WriteResponse) GetStatus() uint32 {
+	return r.Status
+}
+
 // WriteContext contains the context information needed to process a WRITE request.
 // This includes client identification and authentication details for access control.
 type WriteContext struct {

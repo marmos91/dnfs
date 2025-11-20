@@ -54,6 +54,11 @@ type GetAttrResponse struct {
 	Attr *types.NFSFileAttr
 }
 
+// GetStatus returns the status code from the response.
+func (r *GetAttrResponse) GetStatus() uint32 {
+	return r.Status
+}
+
 // GetAttrContext contains the context information needed to process a GETATTR request.
 // This includes client identification for auditing purposes and cancellation handling.
 type GetAttrContext struct {

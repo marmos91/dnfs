@@ -27,7 +27,13 @@ type UmountAllRequest struct {
 // Note: Like UMNT, UMNTALL always succeeds per the protocol specification.
 // The server acknowledges the request regardless of whether any mounts existed.
 type UmountAllResponse struct {
-	// Empty struct - UMNTALL returns void (no response data)
+	Status uint32
+}
+
+// GetStatus returns the status code from the response.
+// UMOUNTALL responses don't have a status field, always return 0 (success).
+func (r *UmountAllResponse) GetStatus() uint32 {
+	return r.Status
 }
 
 // UmountAllContext contains the context information needed to process an unmount-all request.
@@ -97,7 +103,7 @@ func (h *Handler) UmntAll(
 	case <-ctx.Context.Done():
 		logger.Debug("Unmount-all request cancelled before processing: client=%s error=%v",
 			ctx.ClientAddr, ctx.Context.Err())
-		return &UmountAllResponse{}, ctx.Context.Err()
+		return &UmountAllResponse{Status: MountOK}, ctx.Context.Err()
 	default:
 	}
 
@@ -118,7 +124,7 @@ func (h *Handler) UmntAll(
 	// UMNTALL always returns void/success per RFC 1813
 	// Even if RemoveShareMount failed or was cancelled, we return success
 	// because the client-side unmount has already occurred
-	return &UmountAllResponse{}, nil
+	return &UmountAllResponse{Status: MountOK}, nil
 }
 
 // DecodeUmountAllRequest decodes an UMOUNTALL request.

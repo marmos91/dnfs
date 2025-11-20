@@ -128,6 +128,11 @@ type MknodResponse struct {
 	DirAttrAfter *types.NFSFileAttr
 }
 
+// GetStatus returns the status code from the response.
+func (r *MknodResponse) GetStatus() uint32 {
+	return r.Status
+}
+
 // MknodContext contains the context information needed to process a MKNOD request.
 // This includes client identification and authentication details for access control.
 type MknodContext struct {

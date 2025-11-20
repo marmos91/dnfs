@@ -37,7 +37,13 @@ type UmountRequest struct {
 // This is because unmounting is primarily a client-side operation.
 // The server's mount tracking is informational and used by the DUMP procedure.
 type UmountResponse struct {
-	// Empty struct - UMNT returns void (no response data)
+	Status uint32
+}
+
+// GetStatus returns the status code from the response.
+// UMOUNT responses don't have a status field, always return 0 (success).
+func (r *UmountResponse) GetStatus() uint32 {
+	return r.Status
 }
 
 // UmountContext contains the context information needed to process an unmount request.
@@ -125,7 +131,7 @@ func (h *Handler) Umnt(
 	case <-ctx.Context.Done():
 		logger.Debug("Unmount request cancelled before processing: path=%s client=%s error=%v",
 			req.DirPath, ctx.ClientAddr, ctx.Context.Err())
-		return &UmountResponse{}, ctx.Context.Err()
+		return &UmountResponse{Status: MountOK}, ctx.Context.Err()
 	default:
 	}
 
@@ -151,7 +157,7 @@ func (h *Handler) Umnt(
 	// UMNT always returns void/success per RFC 1813
 	// Even if RemoveMount failed or was cancelled, we return success
 	// because the client-side unmount has already occurred
-	return &UmountResponse{}, nil
+	return &UmountResponse{Status: MountOK}, nil
 }
 
 // DecodeUmountRequest decodes an UMOUNT request from XDR-encoded bytes.

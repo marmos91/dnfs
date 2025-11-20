@@ -102,6 +102,11 @@ type ReadDirPlusResponse struct {
 	Eof bool
 }
 
+// GetStatus returns the status code from the response.
+func (r *ReadDirPlusResponse) GetStatus() uint32 {
+	return r.Status
+}
+
 // DirPlusEntry represents a single directory entry with full information.
 // This includes the basic directory entry information plus optional
 // attributes and file handle for the entry.

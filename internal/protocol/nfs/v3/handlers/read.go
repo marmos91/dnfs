@@ -88,6 +88,11 @@ type ReadResponse struct {
 	Data []byte
 }
 
+// GetStatus returns the status code from the response.
+func (r *ReadResponse) GetStatus() uint32 {
+	return r.Status
+}
+
 // ReadContext contains the context information needed to process a READ request.
 // This includes client identification and authentication details for access control.
 type ReadContext struct {

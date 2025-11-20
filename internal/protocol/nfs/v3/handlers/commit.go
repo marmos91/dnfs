@@ -84,6 +84,11 @@ type CommitResponse struct {
 	WriteVerifier uint64
 }
 
+// GetStatus returns the status code from the response.
+func (r *CommitResponse) GetStatus() uint32 {
+	return r.Status
+}
+
 // CommitContext contains the context information needed to process a COMMIT request.
 // This includes client identification and authentication details.
 type CommitContext struct {

@@ -5,6 +5,7 @@ import (
 	"context"
 
 	"github.com/marmos91/dittofs/internal/logger"
+	"github.com/marmos91/dittofs/internal/protocol/nfs/types"
 )
 
 // ============================================================================
@@ -35,7 +36,13 @@ type NullRequest struct {
 //
 // The response is encoded in XDR format (empty) before being sent to the client.
 type NullResponse struct {
-	// No fields - NULL returns no data
+	// Status is always NFS3OK for NULL (NULL always succeeds)
+	Status uint32
+}
+
+// GetStatus returns the status code from the response.
+func (r *NullResponse) GetStatus() uint32 {
+	return r.Status
 }
 
 // NullContext contains the context information for a NULL request.
@@ -249,7 +256,7 @@ func (h *Handler) Null(
 	logger.Debug("NULL: request completed successfully: client=%s", clientIP)
 
 	// Return empty response - NULL always succeeds
-	return &NullResponse{}, nil
+	return &NullResponse{Status: types.NFS3OK}, nil
 }
 
 // ============================================================================

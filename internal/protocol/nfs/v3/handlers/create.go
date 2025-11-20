@@ -82,6 +82,11 @@ type CreateResponse struct {
 	DirAfter *types.NFSFileAttr
 }
 
+// GetStatus returns the status code from the response.
+func (r *CreateResponse) GetStatus() uint32 {
+	return r.Status
+}
+
 // CreateContext contains the context information for processing a CREATE request.
 //
 // This includes client identification, authentication details, and cancellation

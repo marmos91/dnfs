@@ -74,6 +74,11 @@ type RemoveResponse struct {
 	DirWccAfter *types.NFSFileAttr
 }
 
+// GetStatus returns the status code from the response.
+func (r *RemoveResponse) GetStatus() uint32 {
+	return r.Status
+}
+
 // RemoveContext contains the context information needed to process a REMOVE request.
 // This includes client identification, authentication details, and cancellation handling
 // for access control.

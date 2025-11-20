@@ -31,9 +31,16 @@ type DumpRequest struct {
 // The response format follows the XDR specification for a linked list,
 // where each entry is followed by a boolean indicating if more entries exist.
 type DumpResponse struct {
+	Status uint32
 	// Entries is the list of currently active mounts
 	// Each entry contains the client hostname/address and mounted directory path
 	Entries []DumpEntry
+}
+
+// GetStatus returns the status code from the response.
+// DUMP responses don't have a status field, always return 0 (success).
+func (r *DumpResponse) GetStatus() uint32 {
+	return r.Status
 }
 
 // DumpEntry represents a single mount entry in the DUMP response.
@@ -166,6 +173,7 @@ func (h *Handler) Dump(ctx *DumpContext, req *DumpRequest) (*DumpResponse, error
 	}
 
 	return &DumpResponse{
+		Status:  MountOK,
 		Entries: entries,
 	}, nil
 }

@@ -85,6 +85,11 @@ type SetAttrResponse struct {
 	AttrAfter *types.NFSFileAttr
 }
 
+// GetStatus returns the status code from the response.
+func (r *SetAttrResponse) GetStatus() uint32 {
+	return r.Status
+}
+
 // SetAttrContext contains the context information needed to process a SETATTR request.
 // This includes client identification and authentication details for access control.
 type SetAttrContext struct {

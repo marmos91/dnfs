@@ -10,6 +10,7 @@ import (
 	"github.com/marmos91/dittofs/internal/logger"
 	"github.com/marmos91/dittofs/pkg/adapter"
 	"github.com/marmos91/dittofs/pkg/gc"
+	"github.com/marmos91/dittofs/pkg/metrics"
 	"github.com/marmos91/dittofs/pkg/registry"
 )
 
@@ -55,6 +56,9 @@ type DittoServer struct {
 
 	// gc is the garbage collector for orphaned content (optional)
 	gc *gc.Collector
+
+	// metricsServer is the HTTP server exposing Prometheus metrics (optional)
+	metricsServer *metrics.Server
 
 	// shutdownTimeout is the maximum time to wait for adapter shutdown
 	shutdownTimeout time.Duration
@@ -134,6 +138,35 @@ func (s *DittoServer) SetGC(collector *gc.Collector) {
 
 	if collector != nil {
 		logger.Info("Garbage collector registered")
+	}
+}
+
+// SetMetricsServer sets the metrics HTTP server for the server.
+//
+// The metrics server exposes Prometheus metrics at /metrics endpoint.
+// This is optional - if not set, metrics collection is disabled.
+//
+// SetMetricsServer() must be called before Serve() is called.
+//
+// Parameters:
+//   - metricsServer: The metrics HTTP server instance (may be nil to disable metrics)
+//
+// Panics if Serve() has already been called.
+//
+// Thread safety:
+// Safe to call concurrently with AddAdapter() before Serve() is called.
+func (s *DittoServer) SetMetricsServer(metricsServer *metrics.Server) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.served {
+		panic("cannot set metrics server after Serve() has been called")
+	}
+
+	s.metricsServer = metricsServer
+
+	if metricsServer != nil {
+		logger.Info("Metrics server registered on port %d", metricsServer.Port())
 	}
 }
 
@@ -284,6 +317,17 @@ func (s *DittoServer) serve(ctx context.Context) error {
 
 	logger.Info("Starting DittoServer with %d adapter(s)", len(adapters))
 
+	// Start metrics server if configured
+	metricsErrChan := make(chan error, 1)
+	if s.metricsServer != nil {
+		go func() {
+			if err := s.metricsServer.Start(ctx); err != nil {
+				logger.Error("Metrics server error: %v", err)
+				metricsErrChan <- err
+			}
+		}()
+	}
+
 	// Start garbage collector if configured
 	if s.gc != nil {
 		s.gc.Start()
@@ -391,6 +435,17 @@ func (s *DittoServer) serve(ctx context.Context) error {
 
 		if err := s.gc.Stop(gcCtx); err != nil {
 			logger.Error("Garbage collector shutdown error: %v", err)
+		}
+	}
+
+	// Stop metrics server
+	if s.metricsServer != nil {
+		logger.Debug("Stopping metrics server")
+		metricsCtx, metricsCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer metricsCancel()
+
+		if err := s.metricsServer.Stop(metricsCtx); err != nil {
+			logger.Error("Metrics server shutdown error: %v", err)
 		}
 	}
 
