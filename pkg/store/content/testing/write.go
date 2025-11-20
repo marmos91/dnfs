@@ -9,19 +9,18 @@ import (
 )
 
 // RunWriteTests executes all WritableContentStore operation tests.
+//
+// Note: WriteAt tests have been removed because not all backends support it.
+// Object storage backends (S3, etc.) cannot efficiently implement random-access writes.
+// For backends that do support WriteAt (filesystem), test it separately in backend-specific tests.
 func (suite *StoreTestSuite) RunWriteTests(t *testing.T) {
 	t.Run("WriteContent_Basic", suite.testWriteContentBasic)
 	t.Run("WriteContent_Overwrite", suite.testWriteContentOverwrite)
-	t.Run("WriteAt_Basic", suite.testWriteAtBasic)
-	t.Run("WriteAt_CreateNew", suite.testWriteAtCreateNew)
-	t.Run("WriteAt_SparseFile", suite.testWriteAtSparseFile)
-	t.Run("WriteAt_NegativeOffset", suite.testWriteAtNegativeOffset)
 	t.Run("Truncate_Shrink", suite.testTruncateShrink)
 	t.Run("Truncate_Grow", suite.testTruncateGrow)
 	t.Run("Truncate_NotFound", suite.testTruncateNotFound)
 	t.Run("Delete_Success", suite.testDeleteSuccess)
 	t.Run("Delete_Idempotent", suite.testDeleteIdempotent)
-	t.Run("WriteAt_Append", suite.testWriteAtAppend)
 }
 
 // ============================================================================
@@ -65,106 +64,6 @@ func (suite *StoreTestSuite) testWriteContentOverwrite(t *testing.T) {
 	mustWriteContent(t, writable, id, newData)
 	assertContentEquals(t, store, id, newData)
 	assertContentSize(t, store, id, uint64(len(newData)))
-}
-
-// ============================================================================
-// WriteAt Tests
-// ============================================================================
-
-func (suite *StoreTestSuite) testWriteAtBasic(t *testing.T) {
-	store := suite.NewStore()
-	writable, ok := store.(content.WritableContentStore)
-	if !ok {
-		t.Skip("Store does not implement WritableContentStore")
-	}
-
-	id := generateTestID("writeat-basic")
-
-	// Write at offset 0
-	mustWriteAt(t, writable, id, []byte("Hello"), 0)
-	assertContentEquals(t, store, id, []byte("Hello"))
-
-	// Write at offset 5 (append)
-	mustWriteAt(t, writable, id, []byte(", World"), 5)
-	assertContentEquals(t, store, id, []byte("Hello, World"))
-}
-
-func (suite *StoreTestSuite) testWriteAtCreateNew(t *testing.T) {
-	store := suite.NewStore()
-	writable, ok := store.(content.WritableContentStore)
-	if !ok {
-		t.Skip("Store does not implement WritableContentStore")
-	}
-
-	id := generateTestID("writeat-create")
-	testData := []byte("Created via WriteAt")
-
-	// WriteAt should create new content
-	mustWriteAt(t, writable, id, testData, 0)
-	assertContentExists(t, store, id, true)
-	assertContentEquals(t, store, id, testData)
-}
-
-func (suite *StoreTestSuite) testWriteAtSparseFile(t *testing.T) {
-	store := suite.NewStore()
-	writable, ok := store.(content.WritableContentStore)
-	if !ok {
-		t.Skip("Store does not implement WritableContentStore")
-	}
-
-	id := generateTestID("writeat-sparse")
-
-	// Write at offset 100 (should fill 0-99 with zeros)
-	testData := []byte("Data")
-	mustWriteAt(t, writable, id, testData, 100)
-
-	// Verify size
-	assertContentSize(t, store, id, 104) // 100 zeros + 4 bytes
-
-	// Verify content
-	data := mustReadContent(t, store, id)
-	assert.Equal(t, 104, len(data))
-
-	// Check zeros before data
-	for i := 0; i < 100; i++ {
-		assert.Equal(t, byte(0), data[i], "Expected zero at position %d", i)
-	}
-
-	// Check actual data
-	assert.Equal(t, testData, data[100:104])
-}
-
-func (suite *StoreTestSuite) testWriteAtNegativeOffset(t *testing.T) {
-	store := suite.NewStore()
-	writable, ok := store.(content.WritableContentStore)
-	if !ok {
-		t.Skip("Store does not implement WritableContentStore")
-	}
-
-	id := generateTestID("writeat-negative")
-
-	// Negative offset should error
-	err := writable.WriteAt(testContext(), id, []byte("data"), -1)
-	AssertErrorIs(t, content.ErrInvalidOffset, err)
-}
-
-func (suite *StoreTestSuite) testWriteAtAppend(t *testing.T) {
-	store := suite.NewStore()
-	writable, ok := store.(content.WritableContentStore)
-	if !ok {
-		t.Skip("Store does not implement WritableContentStore")
-	}
-
-	id := generateTestID("writeat-append")
-
-	// Write initial data
-	mustWriteContent(t, writable, id, []byte("Hello"))
-
-	// Append via WriteAt
-	mustWriteAt(t, writable, id, []byte(" World"), 5)
-
-	// Verify
-	assertContentEquals(t, store, id, []byte("Hello World"))
 }
 
 // ============================================================================

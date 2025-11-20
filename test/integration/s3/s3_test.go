@@ -1,9 +1,10 @@
 //go:build integration
 
-package s3
+package s3_test
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/marmos91/dittofs/pkg/store/content"
+	s3store "github.com/marmos91/dittofs/pkg/store/content/s3"
 	contenttesting "github.com/marmos91/dittofs/pkg/store/content/testing"
 	"github.com/marmos91/dittofs/pkg/store/metadata"
 )
@@ -119,28 +121,31 @@ func TestS3ContentStore_Integration(t *testing.T) {
 	defer cleanup()
 
 	// ========================================================================
-	// Create S3 content store
-	// ========================================================================
-
-	store, err := NewS3ContentStore(ctx, S3ContentStoreConfig{
-		Client:    client,
-		Bucket:    bucketName,
-		KeyPrefix: "test/",
-		PartSize:  5 * 1024 * 1024, // 5MB parts
-	})
-	if err != nil {
-		t.Fatalf("Failed to create S3 content store: %v", err)
-	}
-
-	// ========================================================================
 	// Run standard test suite
 	// ========================================================================
+	// Each test gets a fresh store instance with unique key prefix for isolation
 
+	testCounter := 0
 	suite := &contenttesting.StoreTestSuite{
 		NewStore: func() content.ContentStore {
+			testCounter++
+			store, err := s3store.NewS3ContentStore(ctx, s3store.S3ContentStoreConfig{
+				Client:        client,
+				Bucket:        bucketName,
+				KeyPrefix:     fmt.Sprintf("test-%d/", testCounter), // Unique prefix per test
+				PartSize:      5 * 1024 * 1024,                      // 5MB parts
+				StatsCacheTTL: 1,                                    // 1 nanosecond - effectively disables caching for tests
+			})
+			if err != nil {
+				t.Fatalf("Failed to create S3 content store for test %d: %v", testCounter, err)
+			}
 			return store
 		},
 	}
+
+	// Run all test suites
+	// Note: WriteAt and SeekableOperations are not supported by S3 (incompatible with object storage)
+	// Those tests have been removed from the common test suite
 	suite.Run(t)
 }
 
@@ -160,7 +165,7 @@ func TestS3ContentStore_Multipart(t *testing.T) {
 	// Create S3 content store
 	// ========================================================================
 
-	store, err := NewS3ContentStore(ctx, S3ContentStoreConfig{
+	store, err := s3store.NewS3ContentStore(ctx, s3store.S3ContentStoreConfig{
 		Client:   client,
 		Bucket:   bucketName,
 		PartSize: 5 * 1024 * 1024,

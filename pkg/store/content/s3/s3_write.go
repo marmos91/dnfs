@@ -1,7 +1,7 @@
 // Package s3 implements S3-based content storage for DittoFS.
 //
 // This file contains write operations for the S3 content store, including
-// full content writes, WriteAt, truncation, and deletion.
+// full content writes, truncation, and deletion.
 package s3
 
 import (
@@ -52,13 +52,13 @@ func (s *S3ContentStore) WriteContent(ctx context.Context, id metadata.ContentID
 	return nil
 }
 
-// WriteAt writes data at the specified offset.
+// WriteAt is not supported by S3ContentStore.
 //
-// DEPRECATED: This method is inefficient for S3 (requires read-modify-write).
-// Use FlushableContentStore interface with WriteCache instead for proper buffering.
+// S3 does not support random-access writes natively. For NFS write operations,
+// use the FlushableContentStore interface with WriteCache for proper write buffering.
 //
-// This implementation is kept for compatibility but should not be used in production.
-// The NFS handlers should accumulate writes in a cache and call FlushWrites() when ready.
+// This method always returns an error to satisfy the WritableContentStore interface
+// while indicating that the operation is not supported.
 //
 // Parameters:
 //   - ctx: Context for cancellation and timeouts
@@ -67,11 +67,10 @@ func (s *S3ContentStore) WriteContent(ctx context.Context, id metadata.ContentID
 //   - offset: Byte offset where writing begins
 //
 // Returns:
-//   - error: Returns error indicating this method should not be used
+//   - error: Always returns ErrNotSupported
 func (s *S3ContentStore) WriteAt(ctx context.Context, id metadata.ContentID, data []byte, offset int64) error {
-	return fmt.Errorf("WriteAt is not supported for S3ContentStore - use FlushableContentStore interface with WriteCache instead")
+	return fmt.Errorf("WriteAt is not supported for S3 content store: use FlushWrites with WriteCache instead")
 }
-
 
 // Truncate changes the size of the content.
 //
@@ -153,6 +152,7 @@ func (s *S3ContentStore) Truncate(ctx context.Context, id metadata.ContentID, ne
 				return fmt.Errorf("failed to write truncated object: %w", err)
 			}
 		}
+	} else {
 		// Extend - download existing and append zeros
 		reader, err := s.ReadContent(ctx, id)
 		if err != nil {

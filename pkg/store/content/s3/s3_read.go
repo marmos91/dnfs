@@ -173,8 +173,15 @@ func (s *S3ContentStore) GetContentSize(ctx context.Context, id metadata.Content
 		Key:    aws.String(key),
 	})
 	if err != nil {
+		// Check for various "not found" error types
 		var notFound *types.NoSuchKey
-		if errors.As(err, &notFound) {
+		var notFoundErr *types.NotFound
+		if errors.As(err, &notFound) || errors.As(err, &notFoundErr) {
+			return 0, fmt.Errorf("content %s: %w", id, content.ErrContentNotFound)
+		}
+		// Also check for 404 status code in error message (for compatibility)
+		if strings.Contains(err.Error(), "StatusCode: 404") ||
+			strings.Contains(err.Error(), "NotFound") {
 			return 0, fmt.Errorf("content %s: %w", id, content.ErrContentNotFound)
 		}
 		return 0, fmt.Errorf("failed to head object: %w", err)
@@ -213,8 +220,15 @@ func (s *S3ContentStore) ContentExists(ctx context.Context, id metadata.ContentI
 		Key:    aws.String(key),
 	})
 	if err != nil {
+		// Check for various "not found" error types
 		var notFound *types.NoSuchKey
-		if errors.As(err, &notFound) {
+		var notFoundErr *types.NotFound
+		if errors.As(err, &notFound) || errors.As(err, &notFoundErr) {
+			return false, nil
+		}
+		// Also check for 404 status code in error message (for compatibility)
+		if strings.Contains(err.Error(), "StatusCode: 404") ||
+			strings.Contains(err.Error(), "NotFound") {
 			return false, nil
 		}
 		return false, fmt.Errorf("failed to check object existence: %w", err)

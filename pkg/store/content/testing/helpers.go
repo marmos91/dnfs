@@ -26,13 +26,6 @@ func mustWriteContent(t *testing.T, store content.WritableContentStore, id metad
 	require.NoError(t, err, "WriteContent should succeed")
 }
 
-// mustWriteAt writes data at offset and fails the test if it errors.
-func mustWriteAt(t *testing.T, store content.WritableContentStore, id metadata.ContentID, data []byte, offset int64) {
-	t.Helper()
-	err := store.WriteAt(testContext(), id, data, offset)
-	require.NoError(t, err, "WriteAt should succeed")
-}
-
 // mustReadContent reads content and fails the test if it errors.
 func mustReadContent(t *testing.T, store content.ContentStore, id metadata.ContentID) []byte {
 	t.Helper()
