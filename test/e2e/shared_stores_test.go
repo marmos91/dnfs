@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -79,24 +80,13 @@ func (tc *MultiShareTestContext) setupStores() {
 	var err error
 
 	// Create metadata store (shared by all shares)
-	tc.MetadataStore, err = tc.Config.CreateMetadataStore(tc.ctx, &TestContext{
-		T:        tc.T,
-		Config:   tc.Config,
-		ctx:      tc.ctx,
-		tempDirs: tc.tempDirs,
-	})
+	tc.MetadataStore, err = tc.Config.CreateMetadataStore(tc.ctx, tc)
 	if err != nil {
 		tc.T.Fatalf("Failed to create metadata store: %v", err)
 	}
 
 	// Create content store (shared by all shares)
-	tc.ContentStore, err = tc.Config.CreateContentStore(tc.ctx, &TestContext{
-		T:        tc.T,
-		Config:   tc.Config,
-		ctx:      tc.ctx,
-		tempDirs: tc.tempDirs,
-		Port:     tc.Port,
-	})
+	tc.ContentStore, err = tc.Config.CreateContentStore(tc.ctx, tc)
 	if err != nil {
 		tc.T.Fatalf("Failed to create content store: %v", err)
 	}
@@ -341,7 +331,7 @@ func (tc *MultiShareTestContext) unmountShare(share *ShareMount) {
 	share.Mounted = false
 }
 
-// Path returns the absolute path for a file within a specific share
+// Path returns the absolute path for a filesystem item within a specific share
 func (tc *MultiShareTestContext) Path(shareName, relativePath string) string {
 	share, exists := tc.Shares[shareName]
 	if !exists {
@@ -360,6 +350,16 @@ func (tc *MultiShareTestContext) CreateTempDir(prefix string) string {
 	}
 	tc.tempDirs = append(tc.tempDirs, dir)
 	return dir
+}
+
+// GetConfig returns the test configuration
+func (tc *MultiShareTestContext) GetConfig() *TestConfig {
+	return tc.Config
+}
+
+// GetPort returns the server port
+func (tc *MultiShareTestContext) GetPort() int {
+	return tc.Port
 }
 
 // ============================================================================
@@ -531,7 +531,7 @@ func testSharedStoresIsolation(t *testing.T, config *TestConfig) {
 		// Verify share1 only has share1 files (plus any from previous tests)
 		for _, entry := range entries1 {
 			name := entry.Name()
-			if len(name) >= 6 && name[:6] == "share2" {
+			if strings.HasPrefix(name, "share2") {
 				t.Errorf("Share1 directory listing contains file from share2: %s", name)
 			}
 		}
@@ -539,7 +539,7 @@ func testSharedStoresIsolation(t *testing.T, config *TestConfig) {
 		// Verify share2 only has share2 files (plus any from previous tests)
 		for _, entry := range entries2 {
 			name := entry.Name()
-			if len(name) >= 6 && name[:6] == "share1" {
+			if strings.HasPrefix(name, "share1") {
 				t.Errorf("Share2 directory listing contains file from share1: %s", name)
 			}
 		}
