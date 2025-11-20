@@ -4,7 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-DittoFS is an experimental modular virtual filesystem written in Go that decouples file interfaces from storage backends. It implements NFSv3 protocol server in pure Go (userspace, no FUSE required) with pluggable metadata and content repositories.
+DittoFS is an experimental modular virtual filesystem written in Go that decouples file interfaces from storage backends.
+It implements NFSv3 protocol server in pure Go (userspace, no FUSE required) with pluggable metadata and content repositories.
 
 **Status**: Experimental - not production ready.
 

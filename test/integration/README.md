@@ -299,7 +299,6 @@ services:
 
 - [Main README](../../README.md) - Project overview
 - [E2E Tests](../e2e/README.md) - End-to-end NFS protocol tests
-- [Benchmarks](../e2e/BENCHMARKS.md) - Performance benchmarking
 - [CLAUDE.md](../../CLAUDE.md) - Development guidelines
 
 ## Support
