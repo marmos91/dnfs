@@ -114,7 +114,9 @@ metadata:
         db_path: /tmp/dittofs-metadata-isolated
 ```
 
-> **Persistence**: BadgerDB stores all metadata persistently on disk. File handles, directory structure, permissions, and all metadata survive server restarts. The memory backend loses all data when the server stops.
+> **Persistence**: BadgerDB stores all metadata persistently on disk. File handles, directory structure,
+> permissions, and all metadata survive server restarts. The memory backend loses all data when
+> the server stops.
 
 ### 4. Content Configuration
 
@@ -152,7 +154,9 @@ content:
       memory: {}
 ```
 
-> **S3 Path Design**: The S3 store uses path-based object keys (e.g., `export/docs/report.pdf`) that mirror the filesystem structure. This enables easy bucket inspection and metadata reconstruction for disaster recovery.
+> **S3 Path Design**: The S3 store uses path-based object keys (e.g., `export/docs/report.pdf`)
+> that mirror the filesystem structure. This enables easy bucket inspection and metadata
+> reconstruction for disaster recovery.
 >
 > **S3 Production Features**: The S3 content store includes production-ready optimizations:
 >

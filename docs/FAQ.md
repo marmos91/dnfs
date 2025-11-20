@@ -13,11 +13,16 @@ Common questions about DittoFS and their answers.
 
 ### What is DittoFS?
 
-DittoFS is a modular virtual filesystem written entirely in Go that decouples file access protocols from storage backends. It currently supports NFSv3 with pluggable metadata and content repositories, making it easy to serve files over NFS from various backends (memory, filesystem, S3, BadgerDB, etc.).
+DittoFS is a modular virtual filesystem written entirely in Go that decouples file access protocols
+from storage backends. It currently supports NFSv3 with pluggable metadata and content repositories,
+making it easy to serve files over NFS from various backends (memory, filesystem, S3, BadgerDB, etc.).
 
 ### Why not use FUSE?
 
-FUSE adds an additional abstraction layer and requires kernel modules. DittoFS runs entirely in userspace and implements protocols directly, giving better control over protocol behavior, easier debugging, and no kernel dependencies. This also makes deployment simpler - just a single binary with no special permissions.
+FUSE adds an additional abstraction layer and requires kernel modules. DittoFS runs entirely in
+userspace and implements protocols directly, giving better control over protocol behavior, easier
+debugging, and no kernel dependencies. This also makes deployment simpler - just a single binary with
+no special permissions.
 
 ### Can I use this in production?
 
@@ -98,11 +103,14 @@ metadata:
 
 ### Can I import an existing filesystem into DittoFS?
 
-Not yet, but the path-based file handle strategy in BadgerDB enables this as a future feature. The handles are deterministic based on file paths (`shareName:/path/to/file`), making filesystem scanning and import possible.
+Not yet, but the path-based file handle strategy in BadgerDB enables this as a future feature. The
+handles are deterministic based on file paths (`shareName:/path/to/file`), making filesystem scanning
+and import possible.
 
 ### Is content deduplication supported?
 
-Not currently, but the content store abstraction allows for implementing content-addressable storage with deduplication. This could be added as a custom content store or a wrapper around existing stores.
+Not currently, but the content store abstraction allows for implementing content-addressable storage
+with deduplication. This could be added as a custom content store or a wrapper around existing stores.
 
 ## Usage Questions
 
