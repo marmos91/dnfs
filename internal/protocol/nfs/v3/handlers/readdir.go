@@ -264,7 +264,7 @@ func (h *Handler) ReadDir(
 	// ========================================================================
 
 	dirHandle := metadata.FileHandle(req.DirHandle)
-	shareName, path, err := metadata.DecodeShareHandle(dirHandle)
+	shareName, path, err := metadata.DecodeFileHandle(dirHandle)
 	if err != nil {
 		logger.Warn("READDIR failed: invalid directory handle: dir=%x client=%s error=%v",
 			req.DirHandle, clientIP, err)

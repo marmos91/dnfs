@@ -1,10 +1,6 @@
 package badger
 
 import (
-	"crypto/sha256"
-	"fmt"
-	"strings"
-
 	"github.com/marmos91/dittofs/pkg/store/metadata"
 	"github.com/marmos91/dittofs/pkg/store/metadata/internal"
 )
@@ -12,185 +8,84 @@ import (
 // File Handle Generation Strategy
 // ================================
 //
-// DittoFS uses path-based file handles to enable filesystem import/export and
-// metadata reconstruction from content stores. The handle format is designed to
-// be deterministic (same path = same handle) and reversible (can extract path
-// from handle).
+// DittoFS uses UUID-based file handles to comply with NFS RFC 1813's 64-byte limit
+// while supporting arbitrarily deep directory hierarchies. The handle format is:
 //
 // Handle Format:
-//    Format: "shareName:fullPath"
-//    Example: "/export:/images/photo.jpg" → []byte("/export:/images/photo.jpg")
-//    Size: Variable, typically 20-200 bytes
-//    Limit: 256 bytes (aligned with typical OS filename limits)
+//    Format: "shareName:uuid"
+//    Example: "/export:550e8400-e29b-41d4-a716-446655440000"
+//    Size: Typically 45 bytes (well under 64-byte NFS limit)
 //
-// If a path would exceed 256 bytes, the operation fails with an appropriate error.
-// This limit is chosen to align with common filesystem constraints (255-byte
-// filename limit on most systems) while staying within reasonable NFS handle sizes.
+// Benefits:
+//   - Always under 64 bytes (NFS RFC 1813 compliant)
+//   - No path length limitations
+//   - Stable across file renames (UUID doesn't change)
+//   - Future-proof for multi-protocol support (SMB can use UUIDs directly)
+//
+// The UUID is generated when a file is created and never changes, even if the
+// file is renamed or moved.
 
 const (
-	// maxNFSHandleSize is the maximum file handle size we support.
-	// Increased from RFC 1813's 64-byte recommendation to 256 bytes to accommodate
-	// longer paths while staying within typical OS limits (255-char filenames).
-	maxNFSHandleSize = 256
+	// maxNFSHandleSize is the NFS RFC 1813 recommended maximum (64 bytes).
+	// With UUID-based handles ("shareName:uuid"), we stay well under this limit.
+	maxNFSHandleSize = 64
 )
 
-// generateFileHandle creates a deterministic file handle from a share name and path.
+// generateFileHandle creates a file handle from a File.
 //
-// The handle format is simple: "shareName:fullPath"
-// If the resulting handle exceeds maxNFSHandleSize (256 bytes), an error is returned.
+// This is used by the protocol layer to convert internal File objects into
+// opaque byte handles for transmission to NFS clients.
 //
-// Thread Safety: Safe for concurrent use (pure function).
-//
-// Parameters:
-//   - shareName: The name of the share (e.g., "/export")
-//   - fullPath: The full path within the share (e.g., "/images/photo.jpg")
-//
-// Returns:
-//   - metadata.FileHandle: Deterministic handle for the file
-//   - error: Error if the handle would exceed size limit
-//
-// Example:
-//
-//	handle, err := generateFileHandle("/export", "/images/photo.jpg")
-//	// Returns: []byte("/export:/images/photo.jpg"), nil
-func generateFileHandle(shareName, fullPath string) (metadata.FileHandle, error) {
-	// Construct the path-based handle format
-	pathBased := shareName + ":" + fullPath
-
-	// Check if it fits within our size limit
-	if len(pathBased) > maxNFSHandleSize {
-		return nil, fmt.Errorf("file handle too long (%d bytes, max %d): path too deep or filename too long",
-			len(pathBased), maxNFSHandleSize)
-	}
-
-	return metadata.FileHandle([]byte(pathBased)), nil
-}
-
-// decodeFileHandle extracts the share name and full path from a file handle.
-//
-// Handles are always in the format: "shareName:fullPath"
-// This function simply splits on the first ":" character.
+// The handle format: "shareName:uuid"
+// Example: "/export:550e8400-e29b-41d4-a716-446655440000"
 //
 // Thread Safety: Safe for concurrent use (pure function).
 //
 // Parameters:
-//   - handle: The file handle to decode
+//   - file: The file to generate a handle for
 //
 // Returns:
-//   - shareName: The share name
-//   - fullPath: The full path
-//   - error: Error if handle format is invalid
+//   - metadata.FileHandle: Handle for the file (always under 64 bytes)
+//   - error: Error if handle would exceed NFS limit (should never happen with UUIDs)
 //
 // Example:
 //
-//	share, path, err := decodeFileHandle([]byte("/export:/file.txt"))
-//	// Returns: "/export", "/file.txt", nil
-func decodeFileHandle(handle metadata.FileHandle) (shareName, fullPath string, err error) {
-	if len(handle) == 0 {
-		return "", "", fmt.Errorf("empty file handle")
-	}
-
-	// Decode path-based handle
-	s := string(handle)
-	idx := strings.Index(s, ":")
-	if idx < 0 {
-		return "", "", fmt.Errorf("invalid handle format: missing separator")
-	}
-
-	shareName = s[:idx]
-	fullPath = s[idx+1:]
-
-	// Validate the components
-	if shareName == "" {
-		return "", "", fmt.Errorf("invalid handle: empty share name")
-	}
-	if fullPath == "" {
-		return "", "", fmt.Errorf("invalid handle: empty path")
-	}
-
-	return shareName, fullPath, nil
+//	handle, err := generateFileHandle(file)
+//	// Returns: []byte("/export:550e8400-e29b-41d4-a716-446655440000"), nil
+func generateFileHandle(file *metadata.File) (metadata.FileHandle, error) {
+	return metadata.EncodeFileHandle(file)
 }
 
-// handleToKey converts a FileHandle to a string key for database indexing.
+// buildFullPath constructs the full path for a file from its parent's path and child name.
 //
-// This is a helper for using FileHandles as database keys. It converts the
-// byte slice to a string using a simple cast.
+// This is used during file creation to determine the complete path from the root.
+// With UUID-based handles, we simply append the child name to the parent's stored path.
 //
-// Thread Safety: Safe for concurrent use.
-//
-// Parameters:
-//   - handle: The file handle to convert
-//
-// Returns:
-//   - string: String representation for database indexing
-func handleToKey(handle metadata.FileHandle) string {
-	return string(handle)
-}
-
-// buildFullPath constructs the full path for a file by walking up the parent chain.
-//
-// This is used during file creation to determine the complete path from the root
-// to the file being created. It's necessary for generating deterministic handles.
-//
-// Thread Safety: Must be called with appropriate locking on the store.
+// Thread Safety: Safe for concurrent use (pure function).
 //
 // Parameters:
-//   - store: The BadgerDB store (for parent lookups)
-//   - parentHandle: The parent directory handle
+//   - parentPath: The parent directory's path (from the parent File object)
 //   - childName: The name of the child being created
 //
 // Returns:
 //   - string: The full path (e.g., "/images/photo.jpg")
-//   - error: Error if parent chain is broken or lookup fails
 //
 // Example:
 //
-//	path, err := buildFullPath(store, dirHandle, "photo.jpg")
-//	// Returns: "/images/photo.jpg" if dirHandle points to "/images"
-func buildFullPath(store pathBuilder, parentHandle metadata.FileHandle, childName string) (string, error) {
-	// If parent is empty, this is a root
-	if len(parentHandle) == 0 {
-		return "/" + childName, nil
-	}
-
-	// Try to decode the parent handle to get its path
-	_, parentPath, isHash, err := decodeFileHandle(parentHandle)
-	if err != nil {
-		return "", fmt.Errorf("failed to decode parent handle: %w", err)
-	}
-
-	// If parent uses hash-based handle, we need to look it up
-	if isHash {
-		fullHandleStr, err := store.lookupHashedHandlePath(parentHandle)
-		if err != nil {
-			return "", fmt.Errorf("failed to lookup hashed parent handle: %w", err)
-		}
-		// lookupHashedHandlePath returns "shareName:fullPath", extract just the path
-		idx := strings.Index(fullHandleStr, ":")
-		if idx < 0 {
-			return "", fmt.Errorf("invalid hashed handle mapping format: %s", fullHandleStr)
-		}
-		parentPath = fullHandleStr[idx+1:]
-	}
-
-	// Construct the full path
+//	path := buildFullPath("/images", "photo.jpg")
+//	// Returns: "/images/photo.jpg"
+func buildFullPath(parentPath, childName string) string {
+	// Ensure we don't create double slashes
 	if parentPath == "/" {
-		return "/" + childName, nil
+		return "/" + childName
 	}
-
-	return parentPath + "/" + childName, nil
+	return parentPath + "/" + childName
 }
 
 // buildContentID is a convenience wrapper around internal.BuildContentID.
 // See internal.BuildContentID for full documentation.
 func buildContentID(shareName, fullPath string) string {
 	return internal.BuildContentID(shareName, fullPath)
-}
-
-// pathBuilder is an interface for looking up paths from hashed handles.
-// This allows buildFullPath to work without circular dependencies.
-type pathBuilder interface {
-	lookupHashedHandlePath(handle metadata.FileHandle) (string, error)
 }
 
 // fileHandleToID converts a FileHandle ([]byte) to a uint64 file ID.

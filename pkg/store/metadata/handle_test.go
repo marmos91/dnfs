@@ -114,7 +114,7 @@ func TestDecodeShareHandle(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			shareName, path, err := DecodeShareHandle(tt.handle)
+			shareName, path, err := DecodeFileHandle(tt.handle)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("DecodeShareHandle() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -149,7 +149,7 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 			handle := EncodeShareHandle(tt.shareName, tt.path)
 
 			// Decode
-			shareName, path, err := DecodeShareHandle(handle)
+			shareName, path, err := DecodeFileHandle(handle)
 			if err != nil {
 				t.Fatalf("DecodeShareHandle() error = %v", err)
 			}

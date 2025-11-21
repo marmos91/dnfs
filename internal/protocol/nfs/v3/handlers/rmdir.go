@@ -245,7 +245,7 @@ func (h *Handler) Rmdir(
 	// ========================================================================
 
 	parentHandle := metadata.FileHandle(req.DirHandle)
-	shareName, path, err := metadata.DecodeShareHandle(parentHandle)
+	shareName, path, err := metadata.DecodeFileHandle(parentHandle)
 	if err != nil {
 		logger.Warn("RMDIR failed: invalid directory handle: dir=%x client=%s error=%v",
 			req.DirHandle, clientIP, err)

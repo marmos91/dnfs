@@ -6,6 +6,7 @@ import (
 	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
+	"github.com/google/uuid"
 	"github.com/marmos91/dittofs/internal/logger"
 	"github.com/marmos91/dittofs/pkg/store/metadata"
 )
@@ -71,7 +72,14 @@ func (s *BadgerMetadataStore) RemoveFile(
 
 	err = s.db.Update(func(txn *badger.Txn) error {
 		// Verify parent exists and is a directory
-		item, err := txn.Get(keyFile(parentHandle))
+		_, parentID, err := metadata.DecodeFileHandle(parentHandle)
+		if err != nil {
+			return &metadata.StoreError{
+				Code:    metadata.ErrInvalidHandle,
+				Message: "invalid parent handle",
+			}
+		}
+		item, err := txn.Get(keyFile(parentID))
 		if err == badger.ErrKeyNotFound {
 			return &metadata.StoreError{
 				Code:    metadata.ErrNotFound,
@@ -82,20 +90,20 @@ func (s *BadgerMetadataStore) RemoveFile(
 			return fmt.Errorf("failed to get parent: %w", err)
 		}
 
-		var parentData *fileData
+		var parentFile *metadata.File
 		err = item.Value(func(val []byte) error {
-			pd, err := decodeFileData(val)
+			pd, err := decodeFile(val)
 			if err != nil {
 				return err
 			}
-			parentData = pd
+			parentFile = pd
 			return nil
 		})
 		if err != nil {
 			return err
 		}
 
-		if parentData.Attr.Type != metadata.FileTypeDirectory {
+		if parentFile.Type != metadata.FileTypeDirectory {
 			return &metadata.StoreError{
 				Code:    metadata.ErrNotDirectory,
 				Message: "parent is not a directory",
@@ -103,7 +111,7 @@ func (s *BadgerMetadataStore) RemoveFile(
 		}
 
 		// Find the file
-		childItem, err := txn.Get(keyChild(parentHandle, name))
+		childItem, err := txn.Get(keyChild(parentID, name))
 		if err == badger.ErrKeyNotFound {
 			return &metadata.StoreError{
 				Code:    metadata.ErrNotFound,
@@ -115,10 +123,12 @@ func (s *BadgerMetadataStore) RemoveFile(
 			return fmt.Errorf("failed to find child: %w", err)
 		}
 
-		var fileHandle metadata.FileHandle
+		var fileID uuid.UUID
 		err = childItem.Value(func(val []byte) error {
-			fileHandle = metadata.FileHandle(val)
-			removedHandle = fileHandle // Save for cache invalidation
+			if len(val) != 16 {
+				return fmt.Errorf("invalid UUID length: %d", len(val))
+			}
+			copy(fileID[:], val)
 			return nil
 		})
 		if err != nil {
@@ -126,7 +136,7 @@ func (s *BadgerMetadataStore) RemoveFile(
 		}
 
 		// Get file data
-		fileItem, err := txn.Get(keyFile(fileHandle))
+		fileItem, err := txn.Get(keyFile(fileID))
 		if err == badger.ErrKeyNotFound {
 			return &metadata.StoreError{
 				Code:    metadata.ErrNotFound,
@@ -137,21 +147,24 @@ func (s *BadgerMetadataStore) RemoveFile(
 			return fmt.Errorf("failed to get file: %w", err)
 		}
 
-		var fileData *fileData
+		var file *metadata.File
 		err = fileItem.Value(func(val []byte) error {
-			fd, err := decodeFileData(val)
+			fd, err := decodeFile(val)
 			if err != nil {
 				return err
 			}
-			fileData = fd
+			file = fd
 			return nil
 		})
 		if err != nil {
 			return err
 		}
 
+		// Generate handle for logging
+		removedHandle, _ = metadata.EncodeFileHandle(file)
+
 		// Verify it's not a directory
-		if fileData.Attr.Type == metadata.FileTypeDirectory {
+		if file.Type == metadata.FileTypeDirectory {
 			return &metadata.StoreError{
 				Code:    metadata.ErrIsDirectory,
 				Message: "cannot remove directory with RemoveFile, use RemoveDirectory",
@@ -160,7 +173,7 @@ func (s *BadgerMetadataStore) RemoveFile(
 		}
 
 		// Get link count
-		linkCountItem, err := txn.Get(keyLinkCount(fileHandle))
+		linkCountItem, err := txn.Get(keyLinkCount(fileID))
 		if err != nil {
 			return fmt.Errorf("failed to get link count: %w", err)
 		}
@@ -180,16 +193,16 @@ func (s *BadgerMetadataStore) RemoveFile(
 
 		// Make a copy of attributes to return
 		returnAttr = &metadata.FileAttr{
-			Type:       fileData.Attr.Type,
-			Mode:       fileData.Attr.Mode,
-			UID:        fileData.Attr.UID,
-			GID:        fileData.Attr.GID,
-			Size:       fileData.Attr.Size,
-			Atime:      fileData.Attr.Atime,
-			Mtime:      fileData.Attr.Mtime,
-			Ctime:      fileData.Attr.Ctime,
-			ContentID:  fileData.Attr.ContentID,
-			LinkTarget: fileData.Attr.LinkTarget,
+			Type:       file.Type,
+			Mode:       file.Mode,
+			UID:        file.UID,
+			GID:        file.GID,
+			Size:       file.Size,
+			Atime:      file.Atime,
+			Mtime:      file.Mtime,
+			Ctime:      file.Ctime,
+			ContentID:  file.ContentID,
+			LinkTarget: file.LinkTarget,
 		}
 
 		// Decrement link count
@@ -198,40 +211,39 @@ func (s *BadgerMetadataStore) RemoveFile(
 			// Empty ContentID signals to caller that content should NOT be deleted
 			returnAttr.ContentID = ""
 			linkCount--
-			if err := txn.Set(keyLinkCount(fileHandle), encodeUint32(linkCount)); err != nil {
+			if err := txn.Set(keyLinkCount(fileID), encodeUint32(linkCount)); err != nil {
 				return fmt.Errorf("failed to update link count: %w", err)
 			}
 		} else {
 			// This was the last link, remove all metadata
 			// ContentID is returned so caller can delete content
-			if err := txn.Delete(keyFile(fileHandle)); err != nil {
+			if err := txn.Delete(keyFile(fileID)); err != nil {
 				return fmt.Errorf("failed to delete file: %w", err)
 			}
-			if err := txn.Delete(keyLinkCount(fileHandle)); err != nil {
+			if err := txn.Delete(keyLinkCount(fileID)); err != nil {
 				return fmt.Errorf("failed to delete link count: %w", err)
 			}
-			if err := txn.Delete(keyParent(fileHandle)); err != nil && err != badger.ErrKeyNotFound {
+			if err := txn.Delete(keyParent(fileID)); err != nil && err != badger.ErrKeyNotFound {
 				return fmt.Errorf("failed to delete parent: %w", err)
 			}
-			// Clean up device numbers and handle mapping if present (ignore not found)
-			_ = txn.Delete(keyDeviceNumber(fileHandle))
-			_ = txn.Delete(keyHandleMapping(fileHandle))
+			// Clean up device numbers if present (ignore not found)
+			_ = txn.Delete(keyDeviceNumber(fileID))
 		}
 
 		// Remove from parent's children
-		if err := txn.Delete(keyChild(parentHandle, name)); err != nil {
+		if err := txn.Delete(keyChild(parentID, name)); err != nil {
 			return fmt.Errorf("failed to remove child: %w", err)
 		}
 
 		// Update parent timestamps
 		now := time.Now()
-		parentData.Attr.Mtime = now
-		parentData.Attr.Ctime = now
-		parentBytes, err := encodeFileData(parentData)
+		parentFile.Mtime = now
+		parentFile.Ctime = now
+		parentBytes, err := encodeFile(parentFile)
 		if err != nil {
 			return err
 		}
-		if err := txn.Set(keyFile(parentHandle), parentBytes); err != nil {
+		if err := txn.Set(keyFile(parentID), parentBytes); err != nil {
 			return fmt.Errorf("failed to update parent: %w", err)
 		}
 
@@ -366,11 +378,18 @@ func (s *BadgerMetadataStore) attemptRemoveDirectory(
 	removedHandle *metadata.FileHandle,
 ) (int, bool, error) {
 	var childCountCapture int
-	var dirHandle metadata.FileHandle
+	var dirID uuid.UUID
 
 	err := s.db.Update(func(txn *badger.Txn) error {
 		// Verify parent exists and is a directory
-		item, err := txn.Get(keyFile(parentHandle))
+		_, parentID, err := metadata.DecodeFileHandle(parentHandle)
+		if err != nil {
+			return &metadata.StoreError{
+				Code:    metadata.ErrInvalidHandle,
+				Message: "invalid parent handle",
+			}
+		}
+		item, err := txn.Get(keyFile(parentID))
 		if err == badger.ErrKeyNotFound {
 			return &metadata.StoreError{
 				Code:    metadata.ErrNotFound,
@@ -381,20 +400,20 @@ func (s *BadgerMetadataStore) attemptRemoveDirectory(
 			return fmt.Errorf("failed to get parent: %w", err)
 		}
 
-		var parentData *fileData
+		var parentFile *metadata.File
 		err = item.Value(func(val []byte) error {
-			pd, err := decodeFileData(val)
+			pd, err := decodeFile(val)
 			if err != nil {
 				return err
 			}
-			parentData = pd
+			parentFile = pd
 			return nil
 		})
 		if err != nil {
 			return err
 		}
 
-		if parentData.Attr.Type != metadata.FileTypeDirectory {
+		if parentFile.Type != metadata.FileTypeDirectory {
 			return &metadata.StoreError{
 				Code:    metadata.ErrNotDirectory,
 				Message: "parent is not a directory",
@@ -402,7 +421,7 @@ func (s *BadgerMetadataStore) attemptRemoveDirectory(
 		}
 
 		// Find the directory
-		childItem, err := txn.Get(keyChild(parentHandle, name))
+		childItem, err := txn.Get(keyChild(parentID, name))
 		if err == badger.ErrKeyNotFound {
 			return &metadata.StoreError{
 				Code:    metadata.ErrNotFound,
@@ -415,8 +434,10 @@ func (s *BadgerMetadataStore) attemptRemoveDirectory(
 		}
 
 		err = childItem.Value(func(val []byte) error {
-			dirHandle = metadata.FileHandle(val)
-			*removedHandle = dirHandle // Save for cache invalidation
+			if len(val) != 16 {
+				return fmt.Errorf("invalid UUID length: %d", len(val))
+			}
+			copy(dirID[:], val)
 			return nil
 		})
 		if err != nil {
@@ -424,7 +445,7 @@ func (s *BadgerMetadataStore) attemptRemoveDirectory(
 		}
 
 		// Get directory data
-		dirItem, err := txn.Get(keyFile(dirHandle))
+		dirItem, err := txn.Get(keyFile(dirID))
 		if err == badger.ErrKeyNotFound {
 			return &metadata.StoreError{
 				Code:    metadata.ErrNotFound,
@@ -435,21 +456,25 @@ func (s *BadgerMetadataStore) attemptRemoveDirectory(
 			return fmt.Errorf("failed to get directory: %w", err)
 		}
 
-		var dirData *fileData
+		var dir *metadata.File
 		err = dirItem.Value(func(val []byte) error {
-			dd, err := decodeFileData(val)
+			dd, err := decodeFile(val)
 			if err != nil {
 				return err
 			}
-			dirData = dd
+			dir = dd
 			return nil
 		})
 		if err != nil {
 			return err
 		}
 
+		// Generate handle for logging
+		dirHandle, _ := metadata.EncodeFileHandle(dir)
+		*removedHandle = dirHandle
+
 		// Verify it's a directory
-		if dirData.Attr.Type != metadata.FileTypeDirectory {
+		if dir.Type != metadata.FileTypeDirectory {
 			return &metadata.StoreError{
 				Code:    metadata.ErrNotDirectory,
 				Message: "not a directory",
@@ -459,7 +484,7 @@ func (s *BadgerMetadataStore) attemptRemoveDirectory(
 
 		// Check if directory is empty by attempting to find any children
 		opts := badger.DefaultIteratorOptions
-		opts.Prefix = keyChildPrefix(dirHandle)
+		opts.Prefix = keyChildPrefix(dirID)
 		opts.PrefetchValues = false // We only need to check existence
 
 		it := txn.NewIterator(opts)
@@ -474,7 +499,7 @@ func (s *BadgerMetadataStore) attemptRemoveDirectory(
 				childCount++
 				if len(childNames) < 10 {
 					key := it.Item().Key()
-					prefix := keyChildPrefix(dirHandle)
+					prefix := keyChildPrefix(dirID)
 					if len(key) > len(prefix) {
 						childNames = append(childNames, string(key[len(prefix):]))
 					}
@@ -495,26 +520,24 @@ func (s *BadgerMetadataStore) attemptRemoveDirectory(
 		}
 
 		// Remove directory metadata
-		if err := txn.Delete(keyFile(dirHandle)); err != nil {
+		if err := txn.Delete(keyFile(dirID)); err != nil {
 			return fmt.Errorf("failed to delete directory: %w", err)
 		}
-		if err := txn.Delete(keyLinkCount(dirHandle)); err != nil {
+		if err := txn.Delete(keyLinkCount(dirID)); err != nil {
 			return fmt.Errorf("failed to delete link count: %w", err)
 		}
-		if err := txn.Delete(keyParent(dirHandle)); err != nil && err != badger.ErrKeyNotFound {
+		if err := txn.Delete(keyParent(dirID)); err != nil && err != badger.ErrKeyNotFound {
 			return fmt.Errorf("failed to delete parent: %w", err)
 		}
-		// Clean up handle mapping if it's a hashed handle (ignore not found)
-		_ = txn.Delete(keyHandleMapping(dirHandle))
 
 		// Remove from parent's children
-		if err := txn.Delete(keyChild(parentHandle, name)); err != nil {
+		if err := txn.Delete(keyChild(parentID, name)); err != nil {
 			return fmt.Errorf("failed to remove child: %w", err)
 		}
 
 		// Decrement parent's link count
 		// (removing a subdirectory removes one ".." reference to parent)
-		parentLinkItem, err := txn.Get(keyLinkCount(parentHandle))
+		parentLinkItem, err := txn.Get(keyLinkCount(parentID))
 		if err == nil {
 			var parentLinkCount uint32
 			err = parentLinkItem.Value(func(val []byte) error {
@@ -531,7 +554,7 @@ func (s *BadgerMetadataStore) attemptRemoveDirectory(
 
 			if parentLinkCount > 0 {
 				parentLinkCount--
-				if err := txn.Set(keyLinkCount(parentHandle), encodeUint32(parentLinkCount)); err != nil {
+				if err := txn.Set(keyLinkCount(parentID), encodeUint32(parentLinkCount)); err != nil {
 					return fmt.Errorf("failed to update parent link count: %w", err)
 				}
 			}
@@ -539,13 +562,13 @@ func (s *BadgerMetadataStore) attemptRemoveDirectory(
 
 		// Update parent timestamps
 		now := time.Now()
-		parentData.Attr.Mtime = now
-		parentData.Attr.Ctime = now
-		parentBytes, err := encodeFileData(parentData)
+		parentFile.Mtime = now
+		parentFile.Ctime = now
+		parentBytes, err := encodeFile(parentFile)
 		if err != nil {
 			return err
 		}
-		if err := txn.Set(keyFile(parentHandle), parentBytes); err != nil {
+		if err := txn.Set(keyFile(parentID), parentBytes); err != nil {
 			return fmt.Errorf("failed to update parent: %w", err)
 		}
 

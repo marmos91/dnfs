@@ -210,7 +210,7 @@ func (h *Handler) Link(
 	// ========================================================================
 
 	dirHandle := metadata.FileHandle(req.DirHandle)
-	shareName, path, err := metadata.DecodeShareHandle(dirHandle)
+	shareName, path, err := metadata.DecodeFileHandle(dirHandle)
 	if err != nil {
 		logger.Warn("LINK failed: invalid directory handle: dir=%x client=%s error=%v",
 			req.DirHandle, clientIP, err)
@@ -219,7 +219,7 @@ func (h *Handler) Link(
 
 	// Decode file handle to verify it's from the same share
 	fileHandle := metadata.FileHandle(req.FileHandle)
-	fileShareName, _, err := metadata.DecodeShareHandle(fileHandle)
+	fileShareName, _, err := metadata.DecodeFileHandle(fileHandle)
 	if err != nil {
 		logger.Warn("LINK failed: invalid file handle: file=%x client=%s error=%v",
 			req.FileHandle, clientIP, err)

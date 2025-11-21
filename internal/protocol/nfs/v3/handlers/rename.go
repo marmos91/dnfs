@@ -261,7 +261,7 @@ func (h *Handler) Rename(
 	// ========================================================================
 
 	fromDirHandle := metadata.FileHandle(req.FromDirHandle)
-	fromShareName, fromPath, err := metadata.DecodeShareHandle(fromDirHandle)
+	fromShareName, fromPath, err := metadata.DecodeFileHandle(fromDirHandle)
 	if err != nil {
 		logger.Warn("RENAME failed: invalid source directory handle: dir=%x client=%s error=%v",
 			req.FromDirHandle, clientIP, err)
@@ -269,7 +269,7 @@ func (h *Handler) Rename(
 	}
 
 	toDirHandle := metadata.FileHandle(req.ToDirHandle)
-	toShareName, toPath, err := metadata.DecodeShareHandle(toDirHandle)
+	toShareName, toPath, err := metadata.DecodeFileHandle(toDirHandle)
 	if err != nil {
 		logger.Warn("RENAME failed: invalid destination directory handle: dir=%x client=%s error=%v",
 			req.ToDirHandle, clientIP, err)

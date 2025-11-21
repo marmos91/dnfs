@@ -239,7 +239,7 @@ func (h *Handler) ReadLink(
 	// ========================================================================
 
 	fileHandle := metadata.FileHandle(req.Handle)
-	shareName, path, err := metadata.DecodeShareHandle(fileHandle)
+	shareName, path, err := metadata.DecodeFileHandle(fileHandle)
 	if err != nil {
 		logger.Warn("READLINK failed: invalid file handle: handle=%x client=%s error=%v",
 			req.Handle, clientIP, err)

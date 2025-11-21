@@ -46,7 +46,14 @@ func (s *BadgerMetadataStore) PrepareWrite(
 
 	err := s.db.View(func(txn *badger.Txn) error {
 		// Get file attributes
-		item, err := txn.Get(keyFile(handle))
+		_, id, err := metadata.DecodeFileHandle(handle)
+		if err != nil {
+			return &metadata.StoreError{
+				Code:    metadata.ErrInvalidHandle,
+				Message: "invalid file handle",
+			}
+		}
+		item, err := txn.Get(keyFile(id))
 		if err == badger.ErrKeyNotFound {
 			return &metadata.StoreError{
 				Code:    metadata.ErrNotFound,
@@ -57,25 +64,23 @@ func (s *BadgerMetadataStore) PrepareWrite(
 			return fmt.Errorf("failed to get file: %w", err)
 		}
 
-		var fileData *fileData
+		var file *metadata.File
 		err = item.Value(func(val []byte) error {
-			fd, err := decodeFileData(val)
+			fd, err := decodeFile(val)
 			if err != nil {
 				return err
 			}
-			fileData = fd
+			file = fd
 			return nil
 		})
 		if err != nil {
 			return err
 		}
 
-		attr := fileData.Attr
-
 		// Verify it's a regular file
-		if attr.Type != metadata.FileTypeRegular {
+		if file.Type != metadata.FileTypeRegular {
 			// Return appropriate error based on file type
-			if attr.Type == metadata.FileTypeDirectory {
+			if file.Type == metadata.FileTypeDirectory {
 				return &metadata.StoreError{
 					Code:    metadata.ErrIsDirectory,
 					Message: "cannot write to directory",
@@ -94,7 +99,7 @@ func (s *BadgerMetadataStore) PrepareWrite(
 		//
 		// Without this exception, operations like "cp -p" that preserve mode 0444
 		// files would fail because SETATTR changes mode to 0444 before WRITE operations.
-		isOwner := ctx.Identity.UID != nil && *ctx.Identity.UID == attr.UID
+		isOwner := ctx.Identity.UID != nil && *ctx.Identity.UID == file.UID
 
 		if !isOwner {
 			// Non-owner: check permissions using normal Unix permission bits
@@ -112,16 +117,16 @@ func (s *BadgerMetadataStore) PrepareWrite(
 
 		// Make a copy of current attributes for PreWriteAttr
 		preWriteAttr := &metadata.FileAttr{
-			Type:       attr.Type,
-			Mode:       attr.Mode,
-			UID:        attr.UID,
-			GID:        attr.GID,
-			Size:       attr.Size,
-			Atime:      attr.Atime,
-			Mtime:      attr.Mtime,
-			Ctime:      attr.Ctime,
-			ContentID:  attr.ContentID,
-			LinkTarget: attr.LinkTarget,
+			Type:       file.Type,
+			Mode:       file.Mode,
+			UID:        file.UID,
+			GID:        file.GID,
+			Size:       file.Size,
+			Atime:      file.Atime,
+			Mtime:      file.Mtime,
+			Ctime:      file.Ctime,
+			ContentID:  file.ContentID,
+			LinkTarget: file.LinkTarget,
 		}
 
 		// Create write operation
@@ -129,7 +134,7 @@ func (s *BadgerMetadataStore) PrepareWrite(
 			Handle:       handle,
 			NewSize:      newSize,
 			NewMtime:     time.Now(),
-			ContentID:    attr.ContentID,
+			ContentID:    file.ContentID,
 			PreWriteAttr: preWriteAttr,
 		}
 
@@ -175,7 +180,14 @@ func (s *BadgerMetadataStore) CommitWrite(
 
 	err := s.db.Update(func(txn *badger.Txn) error {
 		// Get file attributes
-		item, err := txn.Get(keyFile(intent.Handle))
+		_, id, err := metadata.DecodeFileHandle(intent.Handle)
+		if err != nil {
+			return &metadata.StoreError{
+				Code:    metadata.ErrInvalidHandle,
+				Message: "invalid file handle",
+			}
+		}
+		item, err := txn.Get(keyFile(id))
 		if err == badger.ErrKeyNotFound {
 			return &metadata.StoreError{
 				Code:    metadata.ErrNotFound,
@@ -186,13 +198,13 @@ func (s *BadgerMetadataStore) CommitWrite(
 			return fmt.Errorf("failed to get file: %w", err)
 		}
 
-		var fileData *fileData
+		var file *metadata.File
 		err = item.Value(func(val []byte) error {
-			fd, err := decodeFileData(val)
+			fd, err := decodeFile(val)
 			if err != nil {
 				return err
 			}
-			fileData = fd
+			file = fd
 			return nil
 		})
 		if err != nil {
@@ -200,7 +212,7 @@ func (s *BadgerMetadataStore) CommitWrite(
 		}
 
 		// Verify it's still a regular file
-		if fileData.Attr.Type != metadata.FileTypeRegular {
+		if file.Type != metadata.FileTypeRegular {
 			return &metadata.StoreError{
 				Code:    metadata.ErrIsDirectory,
 				Message: "file type changed after prepare",
@@ -214,31 +226,31 @@ func (s *BadgerMetadataStore) CommitWrite(
 
 		// Apply metadata changes
 		now := time.Now()
-		fileData.Attr.Size = intent.NewSize
-		fileData.Attr.Mtime = now // Mtime is set when the write is committed
-		fileData.Attr.Ctime = now // Ctime always uses current time (metadata change time)
+		file.Size = intent.NewSize
+		file.Mtime = now // Mtime is set when the write is committed
+		file.Ctime = now // Ctime always uses current time (metadata change time)
 
 		// Store updated file data
-		fileBytes, err := encodeFileData(fileData)
+		fileBytes, err := encodeFile(file)
 		if err != nil {
 			return err
 		}
-		if err := txn.Set(keyFile(intent.Handle), fileBytes); err != nil {
+		if err := txn.Set(keyFile(id), fileBytes); err != nil {
 			return fmt.Errorf("failed to update file data: %w", err)
 		}
 
 		// Make a copy for return
 		updatedAttr = &metadata.FileAttr{
-			Type:       fileData.Attr.Type,
-			Mode:       fileData.Attr.Mode,
-			UID:        fileData.Attr.UID,
-			GID:        fileData.Attr.GID,
-			Size:       fileData.Attr.Size,
-			Atime:      fileData.Attr.Atime,
-			Mtime:      fileData.Attr.Mtime,
-			Ctime:      fileData.Attr.Ctime,
-			ContentID:  fileData.Attr.ContentID,
-			LinkTarget: fileData.Attr.LinkTarget,
+			Type:       file.Type,
+			Mode:       file.Mode,
+			UID:        file.UID,
+			GID:        file.GID,
+			Size:       file.Size,
+			Atime:      file.Atime,
+			Mtime:      file.Mtime,
+			Ctime:      file.Ctime,
+			ContentID:  file.ContentID,
+			LinkTarget: file.LinkTarget,
 		}
 
 		return nil
@@ -283,7 +295,14 @@ func (s *BadgerMetadataStore) PrepareRead(
 
 	err := s.db.View(func(txn *badger.Txn) error {
 		// Get file attributes
-		item, err := txn.Get(keyFile(handle))
+		_, id, err := metadata.DecodeFileHandle(handle)
+		if err != nil {
+			return &metadata.StoreError{
+				Code:    metadata.ErrInvalidHandle,
+				Message: "invalid file handle",
+			}
+		}
+		item, err := txn.Get(keyFile(id))
 		if err == badger.ErrKeyNotFound {
 			return &metadata.StoreError{
 				Code:    metadata.ErrNotFound,
@@ -294,25 +313,23 @@ func (s *BadgerMetadataStore) PrepareRead(
 			return fmt.Errorf("failed to get file: %w", err)
 		}
 
-		var fileData *fileData
+		var file *metadata.File
 		err = item.Value(func(val []byte) error {
-			fd, err := decodeFileData(val)
+			fd, err := decodeFile(val)
 			if err != nil {
 				return err
 			}
-			fileData = fd
+			file = fd
 			return nil
 		})
 		if err != nil {
 			return err
 		}
 
-		attr := fileData.Attr
-
 		// Verify it's a regular file
-		if attr.Type != metadata.FileTypeRegular {
+		if file.Type != metadata.FileTypeRegular {
 			// Return appropriate error based on file type
-			if attr.Type == metadata.FileTypeDirectory {
+			if file.Type == metadata.FileTypeDirectory {
 				return &metadata.StoreError{
 					Code:    metadata.ErrIsDirectory,
 					Message: "cannot read directory",
@@ -339,7 +356,7 @@ func (s *BadgerMetadataStore) PrepareRead(
 		}
 
 		// Return read metadata with a copy of attributes to prevent external modification
-		attrCopy := *attr
+		attrCopy := file.FileAttr
 		readMeta = &metadata.ReadMetadata{
 			Attr: &attrCopy,
 		}

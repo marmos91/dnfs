@@ -292,7 +292,7 @@ func (h *Handler) Commit(
 	// ========================================================================
 
 	handle := metadata.FileHandle(req.Handle)
-	shareName, path, err := metadata.DecodeShareHandle(handle)
+	shareName, path, err := metadata.DecodeFileHandle(handle)
 	if err != nil {
 		logger.Warn("COMMIT failed: invalid file handle: handle=%x client=%s error=%v",
 			req.Handle, clientIP, err)

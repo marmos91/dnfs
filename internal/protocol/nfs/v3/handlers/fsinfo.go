@@ -186,7 +186,7 @@ func (h *Handler) FsInfo(
 	// ========================================================================
 
 	fileHandle := metadata.FileHandle(req.Handle)
-	shareName, path, err := metadata.DecodeShareHandle(fileHandle)
+	shareName, path, err := metadata.DecodeFileHandle(fileHandle)
 	if err != nil {
 		logger.Warn("FSINFO failed: invalid file handle: handle=%x client=%s error=%v",
 			req.Handle, xdr.ExtractClientIP(ctx.ClientAddr), err)

@@ -304,7 +304,7 @@ func (h *Handler) SetAttr(
 	// ========================================================================
 
 	fileHandle := metadata.FileHandle(req.Handle)
-	shareName, path, err := metadata.DecodeShareHandle(fileHandle)
+	shareName, path, err := metadata.DecodeFileHandle(fileHandle)
 	if err != nil {
 		logger.Warn("SETATTR failed: invalid file handle: handle=%x client=%s error=%v",
 			req.Handle, clientIP, err)

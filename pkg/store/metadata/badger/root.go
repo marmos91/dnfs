@@ -6,27 +6,28 @@ import (
 	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
+	"github.com/google/uuid"
 	"github.com/marmos91/dittofs/pkg/store/metadata"
 )
 
 // CreateRootDirectory creates a root directory for a share without a parent.
 //
 // This is a special operation used during share initialization. The root directory
-// is created with a handle in the format "shareName:/" and has no parent.
+// is created with a new UUID and path "/" and has no parent.
 //
 // Parameters:
 //   - ctx: Context for cancellation
-//   - shareName: Name of the share (used to generate root handle)
+//   - shareName: Name of the share
 //   - attr: Directory attributes (Type must be FileTypeDirectory)
 //
 // Returns:
-//   - FileHandle: Handle of the newly created root directory
+//   - *File: Complete file information for the newly created root directory
 //   - error: ErrAlreadyExists if root exists, ErrInvalidArgument if not a directory
 func (s *BadgerMetadataStore) CreateRootDirectory(
 	ctx context.Context,
 	shareName string,
 	attr *metadata.FileAttr,
-) (metadata.FileHandle, error) {
+) (*metadata.File, error) {
 	// Check context cancellation
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -41,21 +42,10 @@ func (s *BadgerMetadataStore) CreateRootDirectory(
 		}
 	}
 
-	// Generate deterministic handle for root: "shareName:/"
-	rootHandle, isPathBased := generateFileHandle(shareName, "/")
+	var rootFile *metadata.File
 
 	// Execute in transaction for atomicity
 	err := s.db.Update(func(txn *badger.Txn) error {
-		// Check if root already exists - if so, just return success (idempotent)
-		_, err := txn.Get(keyFile(rootHandle))
-		if err == nil {
-			// Root already exists, this is OK (idempotent operation)
-			return nil
-		} else if err != badger.ErrKeyNotFound {
-			return fmt.Errorf("failed to check root existence: %w", err)
-		}
-
-		// Root doesn't exist, create it
 		// Complete root directory attributes with defaults
 		rootAttrCopy := *attr
 		if rootAttrCopy.Mode == 0 {
@@ -72,28 +62,25 @@ func (s *BadgerMetadataStore) CreateRootDirectory(
 			rootAttrCopy.Ctime = now
 		}
 
-		// If hash-based, store the reverse mapping
-		if !isPathBased {
-			if err := storeHashedHandleMapping(txn, rootHandle, shareName, "/"); err != nil {
-				return fmt.Errorf("failed to store handle mapping: %w", err)
-			}
+		// Create complete File struct for root directory
+		rootFile = &metadata.File{
+			ID:        uuid.New(),
+			ShareName: shareName,
+			Path:      "/",
+			FileAttr:  rootAttrCopy,
 		}
 
-		// Create fileData for root directory
-		fileData := &fileData{
-			Attr:      &rootAttrCopy,
-			ShareName: shareName,
-		}
-		fileBytes, err := encodeFileData(fileData)
+		// Encode and store file
+		fileBytes, err := encodeFile(rootFile)
 		if err != nil {
 			return err
 		}
-		if err := txn.Set(keyFile(rootHandle), fileBytes); err != nil {
+		if err := txn.Set(keyFile(rootFile.ID), fileBytes); err != nil {
 			return fmt.Errorf("failed to store root file data: %w", err)
 		}
 
 		// Set link count to 2 (. + share reference)
-		if err := txn.Set(keyLinkCount(rootHandle), encodeUint32(2)); err != nil {
+		if err := txn.Set(keyLinkCount(rootFile.ID), encodeUint32(2)); err != nil {
 			return fmt.Errorf("failed to store link count: %w", err)
 		}
 
@@ -104,5 +91,5 @@ func (s *BadgerMetadataStore) CreateRootDirectory(
 		return nil, err
 	}
 
-	return rootHandle, nil
+	return rootFile, nil
 }

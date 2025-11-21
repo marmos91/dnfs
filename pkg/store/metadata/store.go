@@ -158,13 +158,12 @@ type MetadataStore interface {
 	//   - name: Name to resolve (including "." and "..")
 	//
 	// Returns:
-	//   - FileHandle: Handle of the resolved file/directory
-	//   - *FileAttr: Complete attributes of the resolved file/directory
+	//   - *File: Complete file information (ID, ShareName, Path, and all attributes)
 	//   - error: ErrNotFound if name doesn't exist, ErrNotDirectory if dirHandle
 	//     is not a directory, ErrAccessDenied if no search permission, or context errors
-	Lookup(ctx *AuthContext, dirHandle FileHandle, name string) (FileHandle, *FileAttr, error)
+	Lookup(ctx *AuthContext, dirHandle FileHandle, name string) (*File, error)
 
-	// GetFile retrieves file attributes by handle.
+	// GetFile retrieves complete file information by handle.
 	//
 	// This is a lightweight operation that only reads metadata without permission
 	// checking. It's used for operations where permission checking has already been
@@ -176,10 +175,10 @@ type MetadataStore interface {
 	//   - handle: The file handle to query
 	//
 	// Returns:
-	//   - *FileAttr: Complete file attributes
+	//   - *File: Complete file information (ID, ShareName, Path, and all attributes)
 	//   - error: ErrNotFound if handle doesn't exist, ErrInvalidHandle if handle
 	//     is malformed, or context cancellation error
-	GetFile(ctx context.Context, handle FileHandle) (*FileAttr, error)
+	GetFile(ctx context.Context, handle FileHandle) (*File, error)
 
 	// SetFileAttributes updates file attributes with validation and access control.
 	//
@@ -243,9 +242,9 @@ type MetadataStore interface {
 	//   - attr: Directory attributes (Type must be FileTypeDirectory)
 	//
 	// Returns:
-	//   - FileHandle: Handle of the newly created root directory
+	//   - *File: Complete file information for the newly created root directory
 	//   - error: ErrAlreadyExists if root already exists, ErrInvalidArgument if not a directory
-	CreateRootDirectory(ctx context.Context, shareName string, attr *FileAttr) (FileHandle, error)
+	CreateRootDirectory(ctx context.Context, shareName string, attr *FileAttr) (*File, error)
 
 	// Create creates a new file or directory.
 	//
@@ -275,10 +274,10 @@ type MetadataStore interface {
 	//   - attr: Attributes including Type (must be Regular or Directory)
 	//
 	// Returns:
-	//   - FileHandle: Handle of the newly created file/directory
+	//   - *File: Complete file information for the newly created file/directory
 	//   - error: ErrInvalidArgument if Type is invalid, ErrAccessDenied if no write
 	//     permission, ErrAlreadyExists if name exists, or other errors
-	Create(ctx *AuthContext, parentHandle FileHandle, name string, attr *FileAttr) (FileHandle, error)
+	Create(ctx *AuthContext, parentHandle FileHandle, name string, attr *FileAttr) (*File, error)
 
 	// CreateSymlink creates a symbolic link pointing to a target path.
 	//
@@ -308,10 +307,10 @@ type MetadataStore interface {
 	//   - attr: Partial attributes (mode, uid, gid may be set)
 	//
 	// Returns:
-	//   - FileHandle: Handle of the newly created symlink
+	//   - *File: Complete file information for the newly created symlink
 	//   - error: ErrAccessDenied if no write permission, ErrAlreadyExists if name exists,
 	//     ErrNotDirectory if parent is not a directory, or context errors
-	CreateSymlink(ctx *AuthContext, parentHandle FileHandle, name string, target string, attr *FileAttr) (FileHandle, error)
+	CreateSymlink(ctx *AuthContext, parentHandle FileHandle, name string, target string, attr *FileAttr) (*File, error)
 
 	// CreateSpecialFile creates a special file (device, socket, or FIFO).
 	//
@@ -347,11 +346,11 @@ type MetadataStore interface {
 	//   - deviceMinor: Minor device number (for block/char devices, 0 otherwise)
 	//
 	// Returns:
-	//   - FileHandle: Handle of the newly created special file
+	//   - *File: Complete file information for the newly created special file
 	//   - error: ErrAccessDenied if insufficient privileges, ErrAlreadyExists if name
 	//     exists, ErrNotDirectory if parent is not a directory, ErrInvalidArgument
 	//     for invalid fileType, or context errors
-	CreateSpecialFile(ctx *AuthContext, parentHandle FileHandle, name string, fileType FileType, attr *FileAttr, deviceMajor, deviceMinor uint32) (FileHandle, error)
+	CreateSpecialFile(ctx *AuthContext, parentHandle FileHandle, name string, fileType FileType, attr *FileAttr, deviceMajor, deviceMinor uint32) (*File, error)
 
 	// CreateHardLink creates a hard link to an existing file.
 	//
@@ -428,9 +427,9 @@ type MetadataStore interface {
 	//	}
 	//
 	// Returns:
-	//   - *FileAttr: Attributes of the removed file (includes ContentID for content cleanup)
+	//   - *File: Complete file information for the removed file (includes ContentID for content cleanup)
 	//   - error: ErrAccessDenied, ErrNotFound, ErrIsDirectory, or context errors
-	RemoveFile(ctx *AuthContext, parentHandle FileHandle, name string) (*FileAttr, error)
+	RemoveFile(ctx *AuthContext, parentHandle FileHandle, name string) (*File, error)
 
 	// RemoveDirectory removes an empty directory's metadata from its parent.
 	//
@@ -527,10 +526,10 @@ type MetadataStore interface {
 	//
 	// Returns:
 	//   - string: The target path stored in the symlink
-	//   - *FileAttr: Attributes of the symlink itself (not the target)
+	//   - *File: Complete file information for the symlink itself (not the target)
 	//   - error: ErrNotFound if handle doesn't exist, ErrInvalidArgument if handle
 	//     is not a symlink, ErrAccessDenied if no read permission, or context errors
-	ReadSymlink(ctx *AuthContext, handle FileHandle) (string, *FileAttr, error)
+	ReadSymlink(ctx *AuthContext, handle FileHandle) (string, *File, error)
 
 	// ReadDirectory reads one page of directory entries with pagination support.
 	//
@@ -651,10 +650,10 @@ type MetadataStore interface {
 	//   - intent: The write intent from PrepareWrite
 	//
 	// Returns:
-	//   - *FileAttr: Updated file attributes after commit
+	//   - *File: Complete file information with updated attributes after commit
 	//   - error: ErrNotFound if file was deleted, ErrStaleHandle if file changed,
 	//     or context errors
-	CommitWrite(ctx *AuthContext, intent *WriteOperation) (*FileAttr, error)
+	CommitWrite(ctx *AuthContext, intent *WriteOperation) (*File, error)
 
 	// PrepareRead validates a read operation and returns file metadata.
 	//

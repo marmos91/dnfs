@@ -6,6 +6,7 @@ import (
 	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
+	"github.com/google/uuid"
 	"github.com/marmos91/dittofs/pkg/store/metadata"
 )
 
@@ -57,7 +58,14 @@ func (s *BadgerMetadataStore) ReadDirectory(
 
 	err = s.db.View(func(txn *badger.Txn) error {
 		// Get directory data
-		item, err := txn.Get(keyFile(dirHandle))
+		_, dirID, err := metadata.DecodeFileHandle(dirHandle)
+		if err != nil {
+			return &metadata.StoreError{
+				Code:    metadata.ErrInvalidHandle,
+				Message: "invalid directory handle",
+			}
+		}
+		item, err := txn.Get(keyFile(dirID))
 		if err == badger.ErrKeyNotFound {
 			return &metadata.StoreError{
 				Code:    metadata.ErrNotFound,
@@ -68,13 +76,13 @@ func (s *BadgerMetadataStore) ReadDirectory(
 			return fmt.Errorf("failed to get directory: %w", err)
 		}
 
-		var dirData *fileData
+		var dir *metadata.File
 		err = item.Value(func(val []byte) error {
-			dd, err := decodeFileData(val)
+			dd, err := decodeFile(val)
 			if err != nil {
 				return err
 			}
-			dirData = dd
+			dir = dd
 			return nil
 		})
 		if err != nil {
@@ -82,7 +90,7 @@ func (s *BadgerMetadataStore) ReadDirectory(
 		}
 
 		// Verify it's a directory
-		if dirData.Attr.Type != metadata.FileTypeDirectory {
+		if dir.Type != metadata.FileTypeDirectory {
 			return &metadata.StoreError{
 				Code:    metadata.ErrNotDirectory,
 				Message: "not a directory",
@@ -110,7 +118,7 @@ func (s *BadgerMetadataStore) ReadDirectory(
 		// Scan children using range iterator
 		opts := badger.DefaultIteratorOptions
 		opts.PrefetchValues = true
-		opts.Prefix = keyChildPrefix(dirHandle)
+		opts.Prefix = keyChildPrefix(dir.ID)
 
 		it := txn.NewIterator(opts)
 		defer it.Close()
@@ -131,20 +139,19 @@ func (s *BadgerMetadataStore) ReadDirectory(
 			key := item.Key()
 
 			// Extract child name from key: "c:<parent>:<name>"
-			prefix := keyChildPrefix(dirHandle)
+			prefix := keyChildPrefix(dir.ID)
 			if len(key) <= len(prefix) {
 				continue
 			}
 			childName := string(key[len(prefix):])
 
-			// Get child handle
-			// IMPORTANT: Must copy val because it's only valid inside the callback
-			var childHandle metadata.FileHandle
+			// Get child UUID from value
+			var childID uuid.UUID
 			err = item.Value(func(val []byte) error {
-				// Make a copy of val since it's only valid during this callback
-				handleCopy := make([]byte, len(val))
-				copy(handleCopy, val)
-				childHandle = metadata.FileHandle(handleCopy)
+				if len(val) != 16 {
+					return fmt.Errorf("invalid UUID length: %d", len(val))
+				}
+				copy(childID[:], val)
 				return nil
 			})
 			if err != nil {
@@ -157,13 +164,41 @@ func (s *BadgerMetadataStore) ReadDirectory(
 				continue
 			}
 
+			// Get child file to generate handle
+			childItem, err := txn.Get(keyFile(childID))
+			if err != nil {
+				// Child file not found - skip this entry
+				currentOffset++
+				continue
+			}
+
+			var childFile *metadata.File
+			err = childItem.Value(func(val []byte) error {
+				cf, err := decodeFile(val)
+				if err != nil {
+					return err
+				}
+				childFile = cf
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+
+			// Generate file handle for child
+			childHandle, err := metadata.EncodeFileHandle(childFile)
+			if err != nil {
+				// Skip entries we can't encode
+				currentOffset++
+				continue
+			}
+
 			// Create directory entry
-			// DirEntry uses file ID (uint64) - compute hash of handle for ID
 			entry := metadata.DirEntry{
 				ID:     fileHandleToID(childHandle),
 				Name:   childName,
-				Handle: childHandle, // Avoid Lookup() in READDIRPLUS
-				Attr:   nil,         // TODO: Could populate from cache for further optimization
+				Handle: childHandle,
+				Attr:   nil, // TODO: Could set to &childFile.FileAttr for optimization
 			}
 
 			// Estimate size (rough estimate: name + some overhead)
@@ -213,12 +248,12 @@ func (s *BadgerMetadataStore) ReadDirectory(
 //
 // Returns:
 //   - string: The target path stored in the symlink
-//   - *FileAttr: Attributes of the symlink itself (not the target)
+//   - *File: Complete file information for the symlink itself (not the target)
 //   - error: ErrNotFound, ErrInvalidArgument, ErrAccessDenied, or context errors
 func (s *BadgerMetadataStore) ReadSymlink(
 	ctx *metadata.AuthContext,
 	handle metadata.FileHandle,
-) (string, *metadata.FileAttr, error) {
+) (string, *metadata.File, error) {
 	// Check context cancellation
 	if err := ctx.Context.Err(); err != nil {
 		return "", nil, err
@@ -237,11 +272,18 @@ func (s *BadgerMetadataStore) ReadSymlink(
 	}
 
 	var target string
-	var attr *metadata.FileAttr
+	var file *metadata.File
 
 	err = s.db.View(func(txn *badger.Txn) error {
 		// Get file data
-		item, err := txn.Get(keyFile(handle))
+		_, id, err := metadata.DecodeFileHandle(handle)
+		if err != nil {
+			return &metadata.StoreError{
+				Code:    metadata.ErrInvalidHandle,
+				Message: "invalid file handle",
+			}
+		}
+		item, err := txn.Get(keyFile(id))
 		if err == badger.ErrKeyNotFound {
 			return &metadata.StoreError{
 				Code:    metadata.ErrNotFound,
@@ -252,13 +294,12 @@ func (s *BadgerMetadataStore) ReadSymlink(
 			return fmt.Errorf("failed to get file: %w", err)
 		}
 
-		var fileData *fileData
 		err = item.Value(func(val []byte) error {
-			fd, err := decodeFileData(val)
+			fd, err := decodeFile(val)
 			if err != nil {
 				return err
 			}
-			fileData = fd
+			file = fd
 			return nil
 		})
 		if err != nil {
@@ -266,15 +307,14 @@ func (s *BadgerMetadataStore) ReadSymlink(
 		}
 
 		// Verify it's a symlink
-		if fileData.Attr.Type != metadata.FileTypeSymlink {
+		if file.Type != metadata.FileTypeSymlink {
 			return &metadata.StoreError{
 				Code:    metadata.ErrInvalidArgument,
 				Message: "not a symbolic link",
 			}
 		}
 
-		target = fileData.Attr.LinkTarget
-		attr = fileData.Attr
+		target = file.LinkTarget
 
 		return nil
 	})
@@ -283,9 +323,7 @@ func (s *BadgerMetadataStore) ReadSymlink(
 		return "", nil, err
 	}
 
-	// Return copy of attributes
-	attrCopy := *attr
-	return target, &attrCopy, nil
+	return target, file, nil
 }
 
 // CreateSymlink creates a symbolic link pointing to a target path.
@@ -310,7 +348,7 @@ func (s *BadgerMetadataStore) CreateSymlink(
 	name string,
 	target string,
 	attr *metadata.FileAttr,
-) (metadata.FileHandle, error) {
+) (*metadata.File, error) {
 	// Check context cancellation
 	if err := ctx.Context.Err(); err != nil {
 		return nil, err
@@ -345,11 +383,18 @@ func (s *BadgerMetadataStore) CreateSymlink(
 		}
 	}
 
-	var newHandle metadata.FileHandle
+	var newFile *metadata.File
 
 	err = s.db.Update(func(txn *badger.Txn) error {
 		// Verify parent exists and is a directory
-		item, err := txn.Get(keyFile(parentHandle))
+		_, parentID, err := metadata.DecodeFileHandle(parentHandle)
+		if err != nil {
+			return &metadata.StoreError{
+				Code:    metadata.ErrInvalidHandle,
+				Message: "invalid parent handle",
+			}
+		}
+		item, err := txn.Get(keyFile(parentID))
 		if err == badger.ErrKeyNotFound {
 			return &metadata.StoreError{
 				Code:    metadata.ErrNotFound,
@@ -360,20 +405,20 @@ func (s *BadgerMetadataStore) CreateSymlink(
 			return fmt.Errorf("failed to get parent: %w", err)
 		}
 
-		var parentData *fileData
+		var parentFile *metadata.File
 		err = item.Value(func(val []byte) error {
-			pd, err := decodeFileData(val)
+			pd, err := decodeFile(val)
 			if err != nil {
 				return err
 			}
-			parentData = pd
+			parentFile = pd
 			return nil
 		})
 		if err != nil {
 			return err
 		}
 
-		if parentData.Attr.Type != metadata.FileTypeDirectory {
+		if parentFile.Type != metadata.FileTypeDirectory {
 			return &metadata.StoreError{
 				Code:    metadata.ErrNotDirectory,
 				Message: "parent is not a directory",
@@ -381,7 +426,7 @@ func (s *BadgerMetadataStore) CreateSymlink(
 		}
 
 		// Check if name already exists
-		_, err = txn.Get(keyChild(parentHandle, name))
+		_, err = txn.Get(keyChild(parentFile.ID, name))
 		if err == nil {
 			return &metadata.StoreError{
 				Code:    metadata.ErrAlreadyExists,
@@ -392,21 +437,9 @@ func (s *BadgerMetadataStore) CreateSymlink(
 			return fmt.Errorf("failed to check child existence: %w", err)
 		}
 
-		// Build full path and generate deterministic handle
-		fullPath, err := buildFullPath(s, parentHandle, name)
-		if err != nil {
-			return fmt.Errorf("failed to build full path: %w", err)
-		}
-
-		handle, isPathBased := generateFileHandle(parentData.ShareName, fullPath)
-		newHandle = handle
-
-		// If hash-based, store the reverse mapping
-		if !isPathBased {
-			if err := storeHashedHandleMapping(txn, handle, parentData.ShareName, fullPath); err != nil {
-				return fmt.Errorf("failed to store handle mapping: %w", err)
-			}
-		}
+		// Build full path and generate new UUID
+		fullPath := buildFullPath(parentFile.Path, name)
+		newID := uuid.New()
 
 		now := time.Now()
 
@@ -427,56 +460,57 @@ func (s *BadgerMetadataStore) CreateSymlink(
 			}
 		}
 
-		// Create symlink attributes
-		newAttr := &metadata.FileAttr{
-			Type:       metadata.FileTypeSymlink,
-			Mode:       mode & 0o7777,
-			UID:        uid,
-			GID:        gid,
-			Size:       uint64(len(target)),
-			Atime:      now,
-			Mtime:      now,
-			Ctime:      now,
-			LinkTarget: target,
-			ContentID:  "",
+		// Create complete File struct for symlink
+		newFile := &metadata.File{
+			ID:        newID,
+			ShareName: parentFile.ShareName,
+			Path:      fullPath,
+			FileAttr: metadata.FileAttr{
+				Type:       metadata.FileTypeSymlink,
+				Mode:       mode & 0o7777,
+				UID:        uid,
+				GID:        gid,
+				Size:       uint64(len(target)),
+				Atime:      now,
+				Mtime:      now,
+				Ctime:      now,
+				LinkTarget: target,
+				ContentID:  "",
+			},
 		}
 
 		// Store symlink
-		fileData := &fileData{
-			Attr:      newAttr,
-			ShareName: parentData.ShareName,
-		}
-		fileBytes, err := encodeFileData(fileData)
+		fileBytes, err := encodeFile(newFile)
 		if err != nil {
 			return err
 		}
-		if err := txn.Set(keyFile(handle), fileBytes); err != nil {
+		if err := txn.Set(keyFile(newID), fileBytes); err != nil {
 			return fmt.Errorf("failed to store symlink: %w", err)
 		}
 
 		// Set link count
-		if err := txn.Set(keyLinkCount(handle), encodeUint32(1)); err != nil {
+		if err := txn.Set(keyLinkCount(newID), encodeUint32(1)); err != nil {
 			return fmt.Errorf("failed to store link count: %w", err)
 		}
 
-		// Add to parent's children
-		if err := txn.Set(keyChild(parentHandle, name), []byte(handle)); err != nil {
+		// Add to parent's children (store UUID bytes)
+		if err := txn.Set(keyChild(parentID, name), newID[:]); err != nil {
 			return fmt.Errorf("failed to add child: %w", err)
 		}
 
-		// Set parent relationship
-		if err := txn.Set(keyParent(handle), []byte(parentHandle)); err != nil {
+		// Set parent relationship (store parent UUID bytes)
+		if err := txn.Set(keyParent(newID), parentID[:]); err != nil {
 			return fmt.Errorf("failed to set parent: %w", err)
 		}
 
 		// Update parent timestamps
-		parentData.Attr.Mtime = now
-		parentData.Attr.Ctime = now
-		parentBytes, err := encodeFileData(parentData)
+		parentFile.Mtime = now
+		parentFile.Ctime = now
+		parentBytes, err := encodeFile(parentFile)
 		if err != nil {
 			return err
 		}
-		if err := txn.Set(keyFile(parentHandle), parentBytes); err != nil {
+		if err := txn.Set(keyFile(parentID), parentBytes); err != nil {
 			return fmt.Errorf("failed to update parent: %w", err)
 		}
 
@@ -487,7 +521,7 @@ func (s *BadgerMetadataStore) CreateSymlink(
 		return nil, err
 	}
 
-	return newHandle, nil
+	return newFile, nil
 }
 
 // CreateSpecialFile creates a special file (device, socket, or FIFO).
@@ -506,7 +540,7 @@ func (s *BadgerMetadataStore) CreateSymlink(
 //   - deviceMinor: Minor device number (for block/char devices, 0 otherwise)
 //
 // Returns:
-//   - FileHandle: Handle of the newly created special file
+//   - *File: Complete file information for the newly created special file
 //   - error: Various errors based on validation failures
 func (s *BadgerMetadataStore) CreateSpecialFile(
 	ctx *metadata.AuthContext,
@@ -515,7 +549,7 @@ func (s *BadgerMetadataStore) CreateSpecialFile(
 	fileType metadata.FileType,
 	attr *metadata.FileAttr,
 	deviceMajor, deviceMinor uint32,
-) (metadata.FileHandle, error) {
+) (*metadata.File, error) {
 	// Check context cancellation
 	if err := ctx.Context.Err(); err != nil {
 		return nil, err
@@ -564,11 +598,18 @@ func (s *BadgerMetadataStore) CreateSpecialFile(
 		}
 	}
 
-	var newHandle metadata.FileHandle
+	var newFile *metadata.File
 
 	err = s.db.Update(func(txn *badger.Txn) error {
 		// Verify parent exists and is a directory
-		item, err := txn.Get(keyFile(parentHandle))
+		_, parentID, err := metadata.DecodeFileHandle(parentHandle)
+		if err != nil {
+			return &metadata.StoreError{
+				Code:    metadata.ErrInvalidHandle,
+				Message: "invalid parent handle",
+			}
+		}
+		item, err := txn.Get(keyFile(parentID))
 		if err == badger.ErrKeyNotFound {
 			return &metadata.StoreError{
 				Code:    metadata.ErrNotFound,
@@ -579,20 +620,20 @@ func (s *BadgerMetadataStore) CreateSpecialFile(
 			return fmt.Errorf("failed to get parent: %w", err)
 		}
 
-		var parentData *fileData
+		var parentFile *metadata.File
 		err = item.Value(func(val []byte) error {
-			pd, err := decodeFileData(val)
+			pd, err := decodeFile(val)
 			if err != nil {
 				return err
 			}
-			parentData = pd
+			parentFile = pd
 			return nil
 		})
 		if err != nil {
 			return err
 		}
 
-		if parentData.Attr.Type != metadata.FileTypeDirectory {
+		if parentFile.Type != metadata.FileTypeDirectory {
 			return &metadata.StoreError{
 				Code:    metadata.ErrNotDirectory,
 				Message: "parent is not a directory",
@@ -600,7 +641,7 @@ func (s *BadgerMetadataStore) CreateSpecialFile(
 		}
 
 		// Check if name already exists
-		_, err = txn.Get(keyChild(parentHandle, name))
+		_, err = txn.Get(keyChild(parentFile.ID, name))
 		if err == nil {
 			return &metadata.StoreError{
 				Code:    metadata.ErrAlreadyExists,
@@ -611,21 +652,9 @@ func (s *BadgerMetadataStore) CreateSpecialFile(
 			return fmt.Errorf("failed to check child existence: %w", err)
 		}
 
-		// Build full path and generate deterministic handle
-		fullPath, err := buildFullPath(s, parentHandle, name)
-		if err != nil {
-			return fmt.Errorf("failed to build full path: %w", err)
-		}
-
-		handle, isPathBased := generateFileHandle(parentData.ShareName, fullPath)
-		newHandle = handle
-
-		// If hash-based, store the reverse mapping
-		if !isPathBased {
-			if err := storeHashedHandleMapping(txn, handle, parentData.ShareName, fullPath); err != nil {
-				return fmt.Errorf("failed to store handle mapping: %w", err)
-			}
-		}
+		// Build full path and generate new UUID
+		fullPath := buildFullPath(parentFile.Path, name)
+		newID := uuid.New()
 
 		now := time.Now()
 
@@ -646,30 +675,31 @@ func (s *BadgerMetadataStore) CreateSpecialFile(
 			}
 		}
 
-		// Create special file attributes
-		newAttr := &metadata.FileAttr{
-			Type:       fileType,
-			Mode:       mode & 0o7777,
-			UID:        uid,
-			GID:        gid,
-			Size:       0,
-			Atime:      now,
-			Mtime:      now,
-			Ctime:      now,
-			LinkTarget: "",
-			ContentID:  "",
+		// Create complete File struct for special file
+		newFile = &metadata.File{
+			ID:        newID,
+			ShareName: parentFile.ShareName,
+			Path:      fullPath,
+			FileAttr: metadata.FileAttr{
+				Type:       fileType,
+				Mode:       mode & 0o7777,
+				UID:        uid,
+				GID:        gid,
+				Size:       0,
+				Atime:      now,
+				Mtime:      now,
+				Ctime:      now,
+				LinkTarget: "",
+				ContentID:  "",
+			},
 		}
 
 		// Store special file
-		fileData := &fileData{
-			Attr:      newAttr,
-			ShareName: parentData.ShareName,
-		}
-		fileBytes, err := encodeFileData(fileData)
+		fileBytes, err := encodeFile(newFile)
 		if err != nil {
 			return err
 		}
-		if err := txn.Set(keyFile(handle), fileBytes); err != nil {
+		if err := txn.Set(keyFile(newID), fileBytes); err != nil {
 			return fmt.Errorf("failed to store special file: %w", err)
 		}
 
@@ -683,34 +713,34 @@ func (s *BadgerMetadataStore) CreateSpecialFile(
 			if err != nil {
 				return err
 			}
-			if err := txn.Set(keyDeviceNumber(handle), devBytes); err != nil {
+			if err := txn.Set(keyDeviceNumber(newID), devBytes); err != nil {
 				return fmt.Errorf("failed to store device numbers: %w", err)
 			}
 		}
 
 		// Set link count
-		if err := txn.Set(keyLinkCount(handle), encodeUint32(1)); err != nil {
+		if err := txn.Set(keyLinkCount(newID), encodeUint32(1)); err != nil {
 			return fmt.Errorf("failed to store link count: %w", err)
 		}
 
-		// Add to parent's children
-		if err := txn.Set(keyChild(parentHandle, name), []byte(handle)); err != nil {
+		// Add to parent's children (store UUID bytes)
+		if err := txn.Set(keyChild(parentID, name), newID[:]); err != nil {
 			return fmt.Errorf("failed to add child: %w", err)
 		}
 
-		// Set parent relationship
-		if err := txn.Set(keyParent(handle), []byte(parentHandle)); err != nil {
+		// Set parent relationship (store parent UUID bytes)
+		if err := txn.Set(keyParent(newID), parentID[:]); err != nil {
 			return fmt.Errorf("failed to set parent: %w", err)
 		}
 
 		// Update parent timestamps
-		parentData.Attr.Mtime = now
-		parentData.Attr.Ctime = now
-		parentBytes, err := encodeFileData(parentData)
+		parentFile.Mtime = now
+		parentFile.Ctime = now
+		parentBytes, err := encodeFile(parentFile)
 		if err != nil {
 			return err
 		}
-		if err := txn.Set(keyFile(parentHandle), parentBytes); err != nil {
+		if err := txn.Set(keyFile(parentID), parentBytes); err != nil {
 			return fmt.Errorf("failed to update parent: %w", err)
 		}
 
@@ -721,5 +751,5 @@ func (s *BadgerMetadataStore) CreateSpecialFile(
 		return nil, err
 	}
 
-	return newHandle, nil
+	return newFile, nil
 }

@@ -1,7 +1,7 @@
 package badger
 
 import (
-	"github.com/marmos91/dittofs/pkg/store/metadata"
+	"github.com/google/uuid"
 )
 
 // Database Key Namespace Design
@@ -14,106 +14,100 @@ import (
 //   - Makes the database structure self-documenting
 //   - Supports future extensions without schema changes
 //
+// UUID-Based File Identification:
+//
+// Files are identified by UUID v4 (random), which provides:
+//   - Always under 64-byte NFS handle limit (shareName:uuid ≈ 45 bytes)
+//   - No path length limitations
+//   - Stable across renames (UUID doesn't change when file is moved)
+//   - Collision resistance without coordination
+//
 // Key Namespace Prefixes:
 //
 // Data Type             Prefix   Key Format                              Value Type
 // ==================================================================================
-// File Attributes       "f:"     f:<handleKey>                          fileData (JSON)
-// Parent Relationships  "p:"     p:<childHandleKey>                     parentHandle (bytes)
-// Children Map          "c:"     c:<parentHandleKey>:<childName>        childHandle (bytes)
+// File Data             "f:"     f:<uuid>                               File (JSON)
+// Parent Relationships  "p:"     p:<childUUID>                          parentUUID (bytes)
+// Children Map          "c:"     c:<parentUUID>:<childName>             childUUID (bytes)
 // Shares                "s:"     s:<shareName>                          shareData (JSON)
-// Link Counts           "l:"     l:<handleKey>                          uint32 (binary)
-// Device Numbers        "d:"     d:<handleKey>                          deviceNumber (JSON)
-// Pending Writes        "w:"     w:<operationID>                        WriteOperation (JSON)
-// Mount Sessions        "m:"     m:<shareName>|<clientAddr>             ShareSession (JSON)
-// Handle Mapping        "hmap:"  hmap:<handleKey>                       shareName:fullPath (string)
+// Link Counts           "l:"     l:<uuid>                               uint32 (binary)
+// Device Numbers        "d:"     d:<uuid>                               deviceNumber (JSON)
 // Server Config         "cfg:"   cfg:server                             MetadataServerConfig (JSON)
 // Filesystem Caps       "cap:"   cap:fs                                 FilesystemCapabilities (JSON)
 //
 // Key Design Rationale:
 //
-// 1. File Attributes (f:)
+// 1. File Data (f:)
 //    - One entry per file/directory
-//    - Handle is unique, so no collisions
-//    - Point lookup: O(1)
+//    - Stores complete File struct (ID, ShareName, Path, and all FileAttr fields)
+//    - UUID is unique, so no collisions
+//    - Point lookup by UUID: O(1)
+//    - Example: f:550e8400-e29b-41d4-a716-446655440000
 //
 // 2. Parent Relationships (p:)
-//    - Maps each file to its parent directory
+//    - Maps each file UUID to its parent directory UUID
 //    - Used for upward traversal (e.g., getting parent for "..")
 //    - Point lookup: O(1)
+//    - Example: p:550e8400... → parent-uuid-bytes
 //
 // 3. Children Map (c:)
 //    - Denormalized: one entry per child (not one map per directory)
-//    - Enables efficient range scans: all keys with prefix "c:<parent>:"
-//    - Format: c:<parentHandle>:<childName> → childHandle
-//    - List children: range scan from "c:<parent>:" to "c:<parent>:\xff"
+//    - Enables efficient range scans: all keys with prefix "c:<parentUUID>:"
+//    - Format: c:<parentUUID>:<childName> → childUUID
+//    - List children: range scan from "c:<parentUUID>:" to "c:<parentUUID>:\xff"
 //    - O(n) where n = number of children (unavoidable for directory listing)
+//    - Example: c:parent-uuid:file.txt → child-uuid-bytes
 //
 // 4. Shares (s:)
 //    - One entry per share configuration
 //    - Share names are unique
 //    - Point lookup: O(1)
+//    - Example: s:/export
 //
 // 5. Link Counts (l:)
 //    - Tracks number of hard links to each file
 //    - Used to determine when to delete content (count reaches 0)
 //    - Point lookup: O(1)
+//    - Example: l:550e8400...
 //
 // 6. Device Numbers (d:)
 //    - Only for block/char device special files
 //    - Stores major/minor device numbers
 //    - Sparse: most files don't have entries here
 //    - Point lookup: O(1)
+//    - Example: d:550e8400...
 //
-// 7. Pending Writes (w:)
-//    - Tracks in-flight two-phase write operations
-//    - Operation IDs are UUIDs (unique)
-//    - Used for PrepareWrite/CommitWrite coordination
+// 7. Server Config (cfg:)
+//    - Singleton: one configuration per server
 //    - Point lookup: O(1)
 //
-// 8. Mount Sessions (m:)
-//    - Tracks which clients have mounted which shares
-//    - Used for administrative monitoring (DUMP procedure)
-//    - Composite key: shareName + "|" + clientAddr
-//    - List all sessions: range scan "m:" to "m:\xff"
-//    - O(n) where n = number of active sessions
-//
-// 9. Handle Mapping (hmap:)
-//    - Reverse mapping for hash-based file handles
-//    - Only used for handles that don't fit in 64 bytes
-//    - Maps handle → original path
-//    - Sparse: most files use path-based handles
+// 8. Filesystem Capabilities (cap:)
+//    - Singleton: one set of capabilities per server
 //    - Point lookup: O(1)
 //
-// 10. Server Config (cfg:)
-//     - Singleton: one configuration per server
-//     - Point lookup: O(1)
-//
-// 11. Filesystem Capabilities (cap:)
-//     - Singleton: one set of capabilities per server
-//     - Point lookup: O(1)
+// Removed Prefixes (no longer needed with UUIDs):
+//   - Handle Mapping (hmap:) - UUIDs always fit in 64 bytes, no hash needed
+//   - Pending Writes (w:) - Not implemented in current version
+//   - Mount Sessions (m:) - Not implemented in current version
 
 const (
-	// prefixFile is the key prefix for file attributes
+	// prefixFile is the key prefix for file data (File struct with UUID)
 	prefixFile = "f:"
 
-	// prefixParent is the key prefix for parent relationships
+	// prefixParent is the key prefix for parent relationships (UUID → parentUUID)
 	prefixParent = "p:"
 
-	// prefixChild is the key prefix for children mappings
+	// prefixChild is the key prefix for children mappings (parentUUID:name → childUUID)
 	prefixChild = "c:"
 
 	// prefixShare is the key prefix for share configurations
 	prefixShare = "s:"
 
-	// prefixLinkCount is the key prefix for link counts
+	// prefixLinkCount is the key prefix for link counts (UUID → count)
 	prefixLinkCount = "l:"
 
-	// prefixDeviceNumber is the key prefix for device numbers
+	// prefixDeviceNumber is the key prefix for device numbers (UUID → device)
 	prefixDeviceNumber = "d:"
-
-	// prefixHandleMapping is the key prefix for hash-based handle reverse mapping
-	prefixHandleMapping = "hmap:"
 
 	// prefixConfig is the key prefix for server configuration
 	prefixConfig = "cfg:"
@@ -128,65 +122,69 @@ const (
 // They ensure consistent key formatting and prevent errors from manual
 // string concatenation.
 
-// keyFile generates a key for file attributes.
+// keyFile generates a key for file data.
 //
-// Format: "f:<handleKey>"
+// Format: "f:<uuid>"
+// Example: "f:550e8400-e29b-41d4-a716-446655440000"
 //
 // Parameters:
-//   - handle: The file handle
+//   - id: The file UUID
 //
 // Returns:
-//   - []byte: Database key for file attributes
-func keyFile(handle metadata.FileHandle) []byte {
-	return []byte(prefixFile + handleToKey(handle))
+//   - []byte: Database key for file data
+func keyFile(id uuid.UUID) []byte {
+	return []byte(prefixFile + id.String())
 }
 
 // keyParent generates a key for parent relationship.
 //
-// Format: "p:<childHandleKey>"
+// Format: "p:<childUUID>"
+// Example: "p:550e8400-e29b-41d4-a716-446655440000"
 //
 // Parameters:
-//   - childHandle: The child file handle
+//   - childID: The child file UUID
 //
 // Returns:
 //   - []byte: Database key for parent relationship
-func keyParent(childHandle metadata.FileHandle) []byte {
-	return []byte(prefixParent + handleToKey(childHandle))
+func keyParent(childID uuid.UUID) []byte {
+	return []byte(prefixParent + childID.String())
 }
 
 // keyChild generates a key for a child entry in a directory.
 //
-// Format: "c:<parentHandleKey>:<childName>"
+// Format: "c:<parentUUID>:<childName>"
+// Example: "c:550e8400-e29b-41d4-a716-446655440000:report.pdf"
 //
 // This format enables efficient range scans to list all children of a directory.
-// Range: ["c:<parent>:", "c:<parent>:\xff")
+// Range: ["c:<parentUUID>:", "c:<parentUUID>:\xff")
 //
 // Parameters:
-//   - parentHandle: The parent directory handle
+//   - parentID: The parent directory UUID
 //   - childName: The name of the child
 //
 // Returns:
 //   - []byte: Database key for child entry
-func keyChild(parentHandle metadata.FileHandle, childName string) []byte {
-	return []byte(prefixChild + handleToKey(parentHandle) + ":" + childName)
+func keyChild(parentID uuid.UUID, childName string) []byte {
+	return []byte(prefixChild + parentID.String() + ":" + childName)
 }
 
 // keyChildPrefix generates a key prefix for range scanning children.
 //
-// Format: "c:<parentHandleKey>:"
+// Format: "c:<parentUUID>:"
+// Example: "c:550e8400-e29b-41d4-a716-446655440000:"
 //
 // Use this to scan all children of a directory with range query:
 //
-//	from: keyChildPrefix(handle)
-//	to:   keyChildPrefixEnd(handle)
+//	from: keyChildPrefix(parentID)
+//	to:   append(keyChildPrefix(parentID), 0xff)
 //
 // Parameters:
-//   - parentHandle: The parent directory handle
+//   - parentID: The parent directory UUID
 //
 // Returns:
 //   - []byte: Database key prefix for children
-func keyChildPrefix(parentHandle metadata.FileHandle) []byte {
-	return []byte(prefixChild + handleToKey(parentHandle) + ":")
+func keyChildPrefix(parentID uuid.UUID) []byte {
+	return []byte(prefixChild + parentID.String() + ":")
 }
 
 // keyShare generates a key for share configuration.
@@ -204,44 +202,30 @@ func keyShare(shareName string) []byte {
 
 // keyLinkCount generates a key for file link count.
 //
-// Format: "l:<handleKey>"
+// Format: "l:<uuid>"
+// Example: "l:550e8400-e29b-41d4-a716-446655440000"
 //
 // Parameters:
-//   - handle: The file handle
+//   - id: The file UUID
 //
 // Returns:
 //   - []byte: Database key for link count
-func keyLinkCount(handle metadata.FileHandle) []byte {
-	return []byte(prefixLinkCount + handleToKey(handle))
+func keyLinkCount(id uuid.UUID) []byte {
+	return []byte(prefixLinkCount + id.String())
 }
 
 // keyDeviceNumber generates a key for device numbers.
 //
-// Format: "d:<handleKey>"
+// Format: "d:<uuid>"
+// Example: "d:550e8400-e29b-41d4-a716-446655440000"
 //
 // Parameters:
-//   - handle: The file handle
+//   - id: The file UUID
 //
 // Returns:
 //   - []byte: Database key for device numbers
-func keyDeviceNumber(handle metadata.FileHandle) []byte {
-	return []byte(prefixDeviceNumber + handleToKey(handle))
-}
-
-// keyHandleMapping generates a key for hash-based handle reverse mapping.
-//
-// Format: "hmap:<handleKey>"
-//
-// This is only used for handles that exceeded the NFS size limit and were
-// converted to hash-based format. The value is the original "shareName:fullPath".
-//
-// Parameters:
-//   - handle: The hash-based file handle
-//
-// Returns:
-//   - []byte: Database key for handle mapping
-func keyHandleMapping(handle metadata.FileHandle) []byte {
-	return []byte(prefixHandleMapping + handleToKey(handle))
+func keyDeviceNumber(id uuid.UUID) []byte {
+	return []byte(prefixDeviceNumber + id.String())
 }
 
 // keyServerConfig generates the key for server configuration.

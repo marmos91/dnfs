@@ -153,7 +153,7 @@ func (h *Handler) Mount(
 	h.Registry.RecordMount(clientIP, req.DirPath, time.Now().Unix())
 
 	// Encode root file handle for this share
-	rootHandle := metadata.EncodeShareHandle(req.DirPath, "/")
+	rootHandle := metadata.EncodeFileHandle(req.DirPath, "/")
 
 	// Return the authentication flavor used for mount
 	authFlavors := []int32{int32(ctx.AuthFlavor)}
