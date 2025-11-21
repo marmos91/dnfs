@@ -123,9 +123,15 @@ func TestHardLinkMultiple(t *testing.T) {
 		}
 
 		// Remove all but one link
-		os.Remove(originalPath)
-		os.Remove(link1Path)
-		os.Remove(link2Path)
+		if err := os.Remove(originalPath); err != nil {
+			t.Fatalf("Failed to remove original: %v", err)
+		}
+		if err := os.Remove(link1Path); err != nil {
+			t.Fatalf("Failed to remove link1: %v", err)
+		}
+		if err := os.Remove(link2Path); err != nil {
+			t.Fatalf("Failed to remove link2: %v", err)
+		}
 
 		// Verify last link still has content
 		data, err := os.ReadFile(link3Path)

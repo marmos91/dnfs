@@ -1289,18 +1289,20 @@ func (s *BadgerMetadataStore) Move(
 						}
 					}
 
-					// Decrement destination directory's link count (removing subdirectory)
-					destDirLinkItem, err := txn.Get(keyLinkCount(toDirID))
-					if err == nil {
-						var destDirLinkCount uint32
-						err = destDirLinkItem.Value(func(val []byte) error {
-							destDirLinkCount, err = decodeUint32(val)
-							return err
-						})
-						if err == nil && destDirLinkCount > 0 {
-							newCount := destDirLinkCount - 1
-							if err := txn.Set(keyLinkCount(toDirID), encodeUint32(newCount)); err != nil {
-								return fmt.Errorf("failed to update destination dir link count: %w", err)
+					// Only decrement if we're not about to add a directory back in the same parent
+					if sourceFile.Type != metadata.FileTypeDirectory || fromDirID != toDirID {
+						destDirLinkItem, err := txn.Get(keyLinkCount(toDirID))
+						if err == nil {
+							var destDirLinkCount uint32
+							err = destDirLinkItem.Value(func(val []byte) error {
+								destDirLinkCount, err = decodeUint32(val)
+								return err
+							})
+							if err == nil && destDirLinkCount > 0 {
+								newCount := destDirLinkCount - 1
+								if err := txn.Set(keyLinkCount(toDirID), encodeUint32(newCount)); err != nil {
+									return fmt.Errorf("failed to update destination dir link count: %w", err)
+								}
 							}
 						}
 					}
