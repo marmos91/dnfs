@@ -362,7 +362,7 @@ func (h *Handler) Remove(
 
 			// Get updated directory attributes for WCC data (best effort)
 			var wccAfter *types.NFSFileAttr
-			if dirAttr, getErr := metadataStore.GetFile(ctx.Context, dirHandle); getErr == nil {
+			if dirFile, getErr := metadataStore.GetFile(ctx.Context, dirHandle); getErr == nil {
 				dirID := xdr.ExtractFileID(dirHandle)
 				wccAfter = xdr.MetadataToNFS(&dirFile.FileAttr, dirID)
 			}
@@ -379,7 +379,7 @@ func (h *Handler) Remove(
 
 		// Get updated directory attributes for WCC data (best effort)
 		var wccAfter *types.NFSFileAttr
-		if dirAttr, getErr := metadataStore.GetFile(ctx.Context, dirHandle); getErr == nil {
+		if dirFile, getErr := metadataStore.GetFile(ctx.Context, dirHandle); getErr == nil {
 			dirID := xdr.ExtractFileID(dirHandle)
 			wccAfter = xdr.MetadataToNFS(&dirFile.FileAttr, dirID)
 		}
@@ -442,7 +442,7 @@ func (h *Handler) Remove(
 	// ========================================================================
 
 	// Get updated directory attributes for WCC data
-	dirAttr, err = metadataStore.GetFile(ctx.Context, dirHandle)
+	dirFile, err = metadataStore.GetFile(ctx.Context, dirHandle)
 	if err != nil {
 		logger.Warn("REMOVE: file removed but cannot get updated directory attributes: dir=%x error=%v",
 			req.DirHandle, err)
@@ -450,7 +450,7 @@ func (h *Handler) Remove(
 	}
 
 	var wccAfter *types.NFSFileAttr
-	if dirAttr != nil {
+	if dirFile != nil {
 		dirID := xdr.ExtractFileID(dirHandle)
 		wccAfter = xdr.MetadataToNFS(&dirFile.FileAttr, dirID)
 	}

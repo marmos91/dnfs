@@ -239,7 +239,7 @@ func (h *Handler) ReadLink(
 	// ========================================================================
 
 	fileHandle := metadata.FileHandle(req.Handle)
-	shareName, path, err := metadata.DecodeFileHandle(fileHandle)
+	shareName, _, err := metadata.DecodeFileHandle(fileHandle)
 	if err != nil {
 		logger.Warn("READLINK failed: invalid file handle: handle=%x client=%s error=%v",
 			req.Handle, clientIP, err)
@@ -261,7 +261,7 @@ func (h *Handler) ReadLink(
 		return &ReadLinkResponse{NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrIO}}, nil
 	}
 
-	logger.Debug("READLINK: share=%s path=%s", shareName, path)
+	// Symlink file resolved in store
 
 	// ========================================================================
 	// Step 3: Build authentication context for store
@@ -293,7 +293,7 @@ func (h *Handler) ReadLink(
 	// - Handling any I/O errors
 	// - Respecting context cancellation
 
-	target, attr, err := metadataStore.ReadSymlink(authCtx, fileHandle)
+	target, file, err := metadataStore.ReadSymlink(authCtx, fileHandle)
 	if err != nil {
 		// Check if error is due to context cancellation
 		if err == context.Canceled || err == context.DeadlineExceeded {
@@ -322,7 +322,7 @@ func (h *Handler) ReadLink(
 		req.Handle, target, len(target), clientIP)
 
 	logger.Debug("READLINK details: fileid=%d mode=%o uid=%d gid=%d size=%d",
-		fileid, attr.Mode, attr.UID, attr.GID, attr.Size)
+		fileid, file.Mode, file.UID, file.GID, file.Size)
 
 	return &ReadLinkResponse{
 		NFSResponseBase: NFSResponseBase{Status: types.NFS3OK},

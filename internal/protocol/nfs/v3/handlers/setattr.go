@@ -332,7 +332,7 @@ func (h *Handler) SetAttr(
 	// Step 3: Get current file attributes for WCC and guard check
 	// ========================================================================
 
-	currentAttr, err := metadataStore.GetFile(ctx.Context, fileHandle)
+	currentFile, err := metadataStore.GetFile(ctx.Context, fileHandle)
 	if err != nil {
 		// Check if error is due to context cancellation
 		if err == context.Canceled || err == context.DeadlineExceeded {
@@ -347,7 +347,7 @@ func (h *Handler) SetAttr(
 	}
 
 	// Capture pre-operation attributes for WCC data
-	wccBefore := xdr.CaptureWccAttr(currentAttr)
+	wccBefore := xdr.CaptureWccAttr(&currentFile.FileAttr)
 
 	// ========================================================================
 	// Handle Empty SETATTR (No-Op)
@@ -365,7 +365,7 @@ func (h *Handler) SetAttr(
 
 		// Return current attributes without modification
 		fileID := xdr.ExtractFileID(fileHandle)
-		wccAfter := xdr.MetadataToNFS(currentAttr, fileID)
+		wccAfter := xdr.MetadataToNFS(&currentFile.FileAttr, fileID)
 
 		return &SetAttrResponse{
 			NFSResponseBase: NFSResponseBase{Status: types.NFS3OK},
@@ -396,7 +396,7 @@ func (h *Handler) SetAttr(
 	// operation should be rejected to prevent lost updates.
 
 	if req.Guard.Check {
-		currentCtime := xdr.TimeToTimeVal(currentAttr.Ctime)
+		currentCtime := xdr.TimeToTimeVal(currentFile.Ctime)
 
 		// Compare ctime from guard with current ctime
 		if currentCtime.Seconds != req.Guard.Time.Seconds ||
@@ -442,7 +442,7 @@ func (h *Handler) SetAttr(
 			req.Handle, clientIP, err)
 
 		fileID := xdr.ExtractFileID(fileHandle)
-		wccAfter := xdr.MetadataToNFS(currentAttr, fileID)
+		wccAfter := xdr.MetadataToNFS(&currentFile.FileAttr, fileID)
 
 		return &SetAttrResponse{
 			NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrIO},
@@ -480,7 +480,7 @@ func (h *Handler) SetAttr(
 
 		// Get updated attributes for WCC data (best effort)
 		var wccAfter *types.NFSFileAttr
-		if attr, getErr := metadataStore.GetFile(ctx.Context, fileHandle); getErr == nil {
+		if file, getErr := metadataStore.GetFile(ctx.Context, fileHandle); getErr == nil {
 			fileID := xdr.ExtractFileID(fileHandle)
 			wccAfter = xdr.MetadataToNFS(&file.FileAttr, fileID)
 		}
@@ -500,7 +500,7 @@ func (h *Handler) SetAttr(
 	// ========================================================================
 
 	// Get updated file attributes for WCC data
-	updatedAttr, err := metadataStore.GetFile(ctx.Context, fileHandle)
+	updatedFile, err := metadataStore.GetFile(ctx.Context, fileHandle)
 	if err != nil {
 		// Check if error is due to context cancellation
 		if err == context.Canceled || err == context.DeadlineExceeded {
@@ -515,19 +515,19 @@ func (h *Handler) SetAttr(
 	}
 
 	var wccAfter *types.NFSFileAttr
-	if updatedAttr != nil {
+	if updatedFile != nil {
 		fileID := xdr.ExtractFileID(fileHandle)
-		wccAfter = xdr.MetadataToNFS(updatedAttr, fileID)
+		wccAfter = xdr.MetadataToNFS(&updatedFile.FileAttr, fileID)
 	}
 
 	logger.Info("SETATTR successful: handle=%x client=%s", req.Handle, clientIP)
 
-	if updatedAttr != nil {
+	if updatedFile != nil {
 		logger.Debug("SETATTR details: old_size=%d new_size=%d old_mode=%o new_mode=%o",
-			currentAttr.Size, updatedAttr.Size, currentAttr.Mode, updatedAttr.Mode)
+			currentFile.Size, updatedFile.Size, currentFile.Mode, updatedFile.Mode)
 	} else {
 		logger.Debug("SETATTR details: old_size=%d new_size=unknown old_mode=%o new_mode=unknown",
-			currentAttr.Size, currentAttr.Mode)
+			currentFile.Size, currentFile.Mode)
 	}
 
 	return &SetAttrResponse{
