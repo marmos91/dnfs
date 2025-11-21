@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"bytes"
-	"context"
 	"encoding/binary"
 	"fmt"
 	"strings"
@@ -50,18 +49,7 @@ type RemoveRequest struct {
 //
 // The response is encoded in XDR format before being sent back to the client.
 type RemoveResponse struct {
-	// Status indicates the result of the remove operation.
-	// Common values:
-	//   - types.NFS3OK (0): Success
-	//   - types.NFS3ErrNoEnt (2): File or directory not found
-	//   - types.NFS3ErrNotDir (20): DirHandle is not a directory
-	//   - types.NFS3ErrIsDir (21): Attempted to remove a directory (use RMDIR)
-	//   - NFS3ErrAcces (13): Permission denied
-	//   - types.NFS3ErrIO (5): I/O error
-	//   - NFS3ErrStale (70): Stale file handle
-	//   - types.NFS3ErrBadHandle (10001): Invalid file handle
-	//   - NFS3ErrNameTooLong (63): Filename too long
-	Status uint32
+	NFSResponseBase // Embeds Status field and GetStatus() method
 
 	// DirWccBefore contains pre-operation attributes of the parent directory.
 	// Used for weak cache consistency to help clients detect changes.
@@ -73,49 +61,6 @@ type RemoveResponse struct {
 	// May be nil on error, but should be present on success.
 	DirWccAfter *types.NFSFileAttr
 }
-
-// RemoveContext contains the context information needed to process a REMOVE request.
-// This includes client identification, authentication details, and cancellation handling
-// for access control.
-type RemoveContext struct {
-	// Context carries cancellation signals and deadlines
-	// The Remove handler checks this context to abort operations if the client
-	// disconnects or the request times out
-	Context context.Context
-
-	// ClientAddr is the network address of the client making the request.
-	// Format: "IP:port" (e.g., "192.168.1.100:1234")
-	ClientAddr string
-
-	// AuthFlavor is the authentication method used by the client.
-	// Common values:
-	//   - 0: AUTH_NULL (no authentication)
-	//   - 1: AUTH_UNIX (Unix UID/GID authentication)
-	AuthFlavor uint32
-
-	// UID is the authenticated user ID (from AUTH_UNIX).
-	// Used for access control checks by the store.
-	// Only valid when AuthFlavor == AUTH_UNIX.
-	UID *uint32
-
-	// GID is the authenticated group ID (from AUTH_UNIX).
-	// Used for access control checks by the store.
-	// Only valid when AuthFlavor == AUTH_UNIX.
-	GID *uint32
-
-	// GIDs is a list of supplementary group IDs (from AUTH_UNIX).
-	// Used for checking if user belongs to file's group.
-	// Only valid when AuthFlavor == AUTH_UNIX.
-	GIDs []uint32
-}
-
-// Implement NFSAuthContext interface for RemoveContext
-func (c *RemoveContext) GetContext() context.Context { return c.Context }
-func (c *RemoveContext) GetClientAddr() string       { return c.ClientAddr }
-func (c *RemoveContext) GetAuthFlavor() uint32       { return c.AuthFlavor }
-func (c *RemoveContext) GetUID() *uint32             { return c.UID }
-func (c *RemoveContext) GetGID() *uint32             { return c.GID }
-func (c *RemoveContext) GetGIDs() []uint32           { return c.GIDs }
 
 // ============================================================================
 // Protocol Handler
@@ -253,7 +198,7 @@ func (c *RemoveContext) GetGIDs() []uint32           { return c.GIDs }
 //	    // File removed successfully
 //	}
 func (h *Handler) Remove(
-	ctx *RemoveContext,
+	ctx *NFSHandlerContext,
 	req *RemoveRequest,
 ) (*RemoveResponse, error) {
 	// Check for cancellation before starting any work
@@ -262,7 +207,7 @@ func (h *Handler) Remove(
 	case <-ctx.Context.Done():
 		logger.Debug("REMOVE cancelled before processing: file='%s' dir=%x client=%s error=%v",
 			req.Filename, req.DirHandle, ctx.ClientAddr, ctx.Context.Err())
-		return &RemoveResponse{Status: types.NFS3ErrIO}, ctx.Context.Err()
+		return &RemoveResponse{NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrIO}}, ctx.Context.Err()
 	default:
 	}
 
@@ -279,7 +224,7 @@ func (h *Handler) Remove(
 	if err := validateRemoveRequest(req); err != nil {
 		logger.Warn("REMOVE validation failed: file='%s' client=%s error=%v",
 			req.Filename, clientIP, err)
-		return &RemoveResponse{Status: err.nfsStatus}, nil
+		return &RemoveResponse{NFSResponseBase: NFSResponseBase{Status: err.nfsStatus}}, nil
 	}
 
 	// ========================================================================
@@ -287,18 +232,18 @@ func (h *Handler) Remove(
 	// ========================================================================
 
 	dirHandle := metadata.FileHandle(req.DirHandle)
-	shareName, path, err := metadata.DecodeShareHandle(dirHandle)
+	shareName, path, err := metadata.DecodeFileHandle(dirHandle)
 	if err != nil {
 		logger.Warn("REMOVE failed: invalid directory handle: dir=%x client=%s error=%v",
 			req.DirHandle, clientIP, err)
-		return &RemoveResponse{Status: types.NFS3ErrBadHandle}, nil
+		return &RemoveResponse{NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrBadHandle}}, nil
 	}
 
 	// Check if share exists
 	if !h.Registry.ShareExists(shareName) {
 		logger.Warn("REMOVE failed: share not found: share=%s dir=%x client=%s",
 			shareName, req.DirHandle, clientIP)
-		return &RemoveResponse{Status: types.NFS3ErrStale}, nil
+		return &RemoveResponse{NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrStale}}, nil
 	}
 
 	// Get metadata store for this share
@@ -306,7 +251,7 @@ func (h *Handler) Remove(
 	if err != nil {
 		logger.Error("REMOVE failed: cannot get metadata store: share=%s dir=%x client=%s error=%v",
 			shareName, req.DirHandle, clientIP, err)
-		return &RemoveResponse{Status: types.NFS3ErrIO}, nil
+		return &RemoveResponse{NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrIO}}, nil
 	}
 
 	// Get content store for this share
@@ -314,7 +259,7 @@ func (h *Handler) Remove(
 	if err != nil {
 		logger.Error("REMOVE failed: cannot get content store: share=%s dir=%x client=%s error=%v",
 			shareName, req.DirHandle, clientIP, err)
-		return &RemoveResponse{Status: types.NFS3ErrIO}, nil
+		return &RemoveResponse{NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrIO}}, nil
 	}
 
 	logger.Debug("REMOVE: share=%s path=%s file=%s", shareName, path, req.Filename)
@@ -323,22 +268,22 @@ func (h *Handler) Remove(
 	// Step 3: Capture pre-operation directory attributes for WCC
 	// ========================================================================
 
-	dirAttr, err := metadataStore.GetFile(ctx.Context, dirHandle)
+	dirFile, err := metadataStore.GetFile(ctx.Context, dirHandle)
 	if err != nil {
 		// Check if the error is due to context cancellation
 		if ctx.Context.Err() != nil {
 			logger.Debug("REMOVE cancelled during directory lookup: file='%s' dir=%x client=%s error=%v",
 				req.Filename, req.DirHandle, clientIP, ctx.Context.Err())
-			return &RemoveResponse{Status: types.NFS3ErrIO}, ctx.Context.Err()
+			return &RemoveResponse{NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrIO}}, ctx.Context.Err()
 		}
 
 		logger.Warn("REMOVE failed: directory not found: dir=%x client=%s error=%v",
 			req.DirHandle, clientIP, err)
-		return &RemoveResponse{Status: types.NFS3ErrNoEnt}, nil
+		return &RemoveResponse{NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrNoEnt}}, nil
 	}
 
 	// Capture pre-operation attributes for WCC data
-	wccBefore := xdr.CaptureWccAttr(dirAttr)
+	wccBefore := xdr.CaptureWccAttr(&dirFile.FileAttr)
 
 	// Check for cancellation before the remove operation
 	// This is the most critical check - we don't want to start removing
@@ -349,12 +294,12 @@ func (h *Handler) Remove(
 			req.Filename, req.DirHandle, clientIP, ctx.Context.Err())
 
 		dirID := xdr.ExtractFileID(dirHandle)
-		wccAfter := xdr.MetadataToNFS(dirAttr, dirID)
+		wccAfter := xdr.MetadataToNFS(&dirFile.FileAttr, dirID)
 
 		return &RemoveResponse{
-			Status:       types.NFS3ErrIO,
-			DirWccBefore: wccBefore,
-			DirWccAfter:  wccAfter,
+			NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrIO},
+			DirWccBefore:    wccBefore,
+			DirWccAfter:     wccAfter,
 		}, ctx.Context.Err()
 	default:
 	}
@@ -363,7 +308,7 @@ func (h *Handler) Remove(
 	// Step 3: Build authentication context with share-level identity mapping
 	// ========================================================================
 
-	authCtx, err := BuildAuthContextWithMapping(ctx, h.Registry, dirHandle)
+	authCtx, err := BuildAuthContextWithMapping(ctx, h.Registry, ctx.Share)
 	if err != nil {
 		// Check if the error is due to context cancellation
 		if ctx.Context.Err() != nil {
@@ -371,12 +316,12 @@ func (h *Handler) Remove(
 				req.Filename, req.DirHandle, clientIP, ctx.Context.Err())
 
 			dirID := xdr.ExtractFileID(dirHandle)
-			wccAfter := xdr.MetadataToNFS(dirAttr, dirID)
+			wccAfter := xdr.MetadataToNFS(&dirFile.FileAttr, dirID)
 
 			return &RemoveResponse{
-				Status:       types.NFS3ErrIO,
-				DirWccBefore: wccBefore,
-				DirWccAfter:  wccAfter,
+				NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrIO},
+				DirWccBefore:    wccBefore,
+				DirWccAfter:     wccAfter,
 			}, ctx.Context.Err()
 		}
 
@@ -384,12 +329,12 @@ func (h *Handler) Remove(
 			req.Filename, req.DirHandle, clientIP, err)
 
 		dirID := xdr.ExtractFileID(dirHandle)
-		wccAfter := xdr.MetadataToNFS(dirAttr, dirID)
+		wccAfter := xdr.MetadataToNFS(&dirFile.FileAttr, dirID)
 
 		return &RemoveResponse{
-			Status:       types.NFS3ErrIO,
-			DirWccBefore: wccBefore,
-			DirWccAfter:  wccAfter,
+			NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrIO},
+			DirWccBefore:    wccBefore,
+			DirWccAfter:     wccAfter,
 		}, nil
 	}
 
@@ -417,15 +362,15 @@ func (h *Handler) Remove(
 
 			// Get updated directory attributes for WCC data (best effort)
 			var wccAfter *types.NFSFileAttr
-			if dirAttr, getErr := metadataStore.GetFile(ctx.Context, dirHandle); getErr == nil {
+			if dirFile, getErr := metadataStore.GetFile(ctx.Context, dirHandle); getErr == nil {
 				dirID := xdr.ExtractFileID(dirHandle)
-				wccAfter = xdr.MetadataToNFS(dirAttr, dirID)
+				wccAfter = xdr.MetadataToNFS(&dirFile.FileAttr, dirID)
 			}
 
 			return &RemoveResponse{
-				Status:       types.NFS3ErrIO,
-				DirWccBefore: wccBefore,
-				DirWccAfter:  wccAfter,
+				NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrIO},
+				DirWccBefore:    wccBefore,
+				DirWccAfter:     wccAfter,
 			}, ctx.Context.Err()
 		}
 
@@ -434,15 +379,15 @@ func (h *Handler) Remove(
 
 		// Get updated directory attributes for WCC data (best effort)
 		var wccAfter *types.NFSFileAttr
-		if dirAttr, getErr := metadataStore.GetFile(ctx.Context, dirHandle); getErr == nil {
+		if dirFile, getErr := metadataStore.GetFile(ctx.Context, dirHandle); getErr == nil {
 			dirID := xdr.ExtractFileID(dirHandle)
-			wccAfter = xdr.MetadataToNFS(dirAttr, dirID)
+			wccAfter = xdr.MetadataToNFS(&dirFile.FileAttr, dirID)
 		}
 
 		return &RemoveResponse{
-			Status:       nfsStatus,
-			DirWccBefore: wccBefore,
-			DirWccAfter:  wccAfter,
+			NFSResponseBase: NFSResponseBase{Status: nfsStatus},
+			DirWccBefore:    wccBefore,
+			DirWccAfter:     wccAfter,
 		}, nil
 	}
 
@@ -497,7 +442,7 @@ func (h *Handler) Remove(
 	// ========================================================================
 
 	// Get updated directory attributes for WCC data
-	dirAttr, err = metadataStore.GetFile(ctx.Context, dirHandle)
+	dirFile, err = metadataStore.GetFile(ctx.Context, dirHandle)
 	if err != nil {
 		logger.Warn("REMOVE: file removed but cannot get updated directory attributes: dir=%x error=%v",
 			req.DirHandle, err)
@@ -505,9 +450,9 @@ func (h *Handler) Remove(
 	}
 
 	var wccAfter *types.NFSFileAttr
-	if dirAttr != nil {
+	if dirFile != nil {
 		dirID := xdr.ExtractFileID(dirHandle)
-		wccAfter = xdr.MetadataToNFS(dirAttr, dirID)
+		wccAfter = xdr.MetadataToNFS(&dirFile.FileAttr, dirID)
 	}
 
 	logger.Info("REMOVE successful: file='%s' dir=%x client=%s",
@@ -519,9 +464,9 @@ func (h *Handler) Remove(
 		nfsType, removedFileAttr.Size)
 
 	return &RemoveResponse{
-		Status:       types.NFS3OK,
-		DirWccBefore: wccBefore,
-		DirWccAfter:  wccAfter,
+		NFSResponseBase: NFSResponseBase{Status: types.NFS3OK},
+		DirWccBefore:    wccBefore,
+		DirWccAfter:     wccAfter,
 	}, nil
 }
 
@@ -757,7 +702,7 @@ func DecodeRemoveRequest(data []byte) (*RemoveRequest, error) {
 // Example:
 //
 //	resp := &RemoveResponse{
-//	    Status:       types.NFS3OK,
+//	    NFSResponseBase: NFSResponseBase{Status: types.NFS3OK},
 //	    DirWccBefore: wccBefore,
 //	    DirWccAfter:  wccAfter,
 //	}

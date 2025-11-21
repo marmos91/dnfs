@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"bytes"
-	"context"
 	"encoding/binary"
 	"fmt"
 
@@ -50,17 +49,7 @@ type LookupRequest struct {
 //
 // The response is encoded in XDR format before being sent back to the client.
 type LookupResponse struct {
-	// Status indicates the result of the lookup operation.
-	// Common values:
-	//   - types.NFS3OK (0): Success - file found
-	//   - types.NFS3ErrNoEnt (2): File not found in directory
-	//   - types.NFS3ErrNotDir (20): DirHandle is not a directory
-	//   - types.NFS3ErrIO (5): I/O error
-	//   - NFS3ErrAcces (13): Permission denied
-	//   - NFS3ErrStale (70): Stale directory handle
-	//   - types.NFS3ErrBadHandle (10001): Invalid directory handle
-	//   - NFS3ErrNameTooLong (63): Filename exceeds limits
-	Status uint32
+	NFSResponseBase // Embeds Status field and GetStatus() method
 
 	// FileHandle is the handle of the found file or directory.
 	// Only present when Status == types.NFS3OK.
@@ -77,45 +66,6 @@ type LookupResponse struct {
 	// Helps clients maintain cache consistency for the directory.
 	DirAttr *types.NFSFileAttr
 }
-
-// LookupContext contains the context information needed to process a LOOKUP request.
-// This includes client identification and authentication details for access control.
-type LookupContext struct {
-	Context context.Context
-
-	// ClientAddr is the network address of the client making the request.
-	// Format: "IP:port" (e.g., "192.168.1.100:1234")
-	ClientAddr string
-
-	// AuthFlavor is the authentication method used by the client.
-	// Common values:
-	//   - 0: AUTH_NULL (no authentication)
-	//   - 1: AUTH_UNIX (Unix UID/GID authentication)
-	AuthFlavor uint32
-
-	// UID is the authenticated user ID (from AUTH_UNIX).
-	// Used for access control checks by the store.
-	// Only valid when AuthFlavor == AUTH_UNIX.
-	UID *uint32
-
-	// GID is the authenticated group ID (from AUTH_UNIX).
-	// Used for access control checks by the store.
-	// Only valid when AuthFlavor == AUTH_UNIX.
-	GID *uint32
-
-	// GIDs is a list of supplementary group IDs (from AUTH_UNIX).
-	// Used for checking if user belongs to file's group.
-	// Only valid when AuthFlavor == AUTH_UNIX.
-	GIDs []uint32
-}
-
-// Implement NFSAuthContext interface for LookupContext
-func (c *LookupContext) GetContext() context.Context { return c.Context }
-func (c *LookupContext) GetClientAddr() string       { return c.ClientAddr }
-func (c *LookupContext) GetAuthFlavor() uint32       { return c.AuthFlavor }
-func (c *LookupContext) GetUID() *uint32             { return c.UID }
-func (c *LookupContext) GetGID() *uint32             { return c.GID }
-func (c *LookupContext) GetGIDs() []uint32           { return c.GIDs }
 
 // ============================================================================
 // Protocol Handler
@@ -229,14 +179,15 @@ func (c *LookupContext) GetGIDs() []uint32           { return c.GIDs }
 //
 // Example:
 //
-//	handler := &DefaultNFSHandler{}
+//	handler := &Handler{}
 //	req := &LookupRequest{
 //	    DirHandle: dirHandle,
 //	    Filename:  "myfile.txt",
 //	}
-//	ctx := &LookupContext{
+//	ctx := &NFSHandlerContext{
 //	    Context:    context.Background(),
 //	    ClientAddr: "192.168.1.100:1234",
+//	    Share:      "/export",
 //	    AuthFlavor: 1, // AUTH_UNIX
 //	    UID:        &uid,
 //	    GID:        &gid,
@@ -249,7 +200,7 @@ func (c *LookupContext) GetGIDs() []uint32           { return c.GIDs }
 //	    // Use resp.FileHandle for subsequent operations
 //	}
 func (h *Handler) Lookup(
-	ctx *LookupContext,
+	ctx *NFSHandlerContext,
 	req *LookupRequest,
 ) (*LookupResponse, error) {
 	// Extract client IP for logging
@@ -266,7 +217,7 @@ func (h *Handler) Lookup(
 	case <-ctx.Context.Done():
 		logger.Warn("LOOKUP cancelled: file='%s' dir=%x client=%s error=%v",
 			req.Filename, req.DirHandle, clientIP, ctx.Context.Err())
-		return &LookupResponse{Status: types.NFS3ErrIO}, nil
+		return &LookupResponse{NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrIO}}, nil
 	default:
 	}
 
@@ -277,7 +228,7 @@ func (h *Handler) Lookup(
 	if err := validateLookupRequest(req); err != nil {
 		logger.Warn("LOOKUP validation failed: file='%s' client=%s error=%v",
 			req.Filename, clientIP, err)
-		return &LookupResponse{Status: err.nfsStatus}, nil
+		return &LookupResponse{NFSResponseBase: NFSResponseBase{Status: err.nfsStatus}}, nil
 	}
 
 	// ========================================================================
@@ -285,18 +236,18 @@ func (h *Handler) Lookup(
 	// ========================================================================
 
 	dirHandle := metadata.FileHandle(req.DirHandle)
-	shareName, path, err := metadata.DecodeShareHandle(dirHandle)
+	shareName, _, err := metadata.DecodeFileHandle(dirHandle)
 	if err != nil {
 		logger.Warn("LOOKUP failed: invalid directory handle: dir=%x client=%s error=%v",
 			req.DirHandle, clientIP, err)
-		return &LookupResponse{Status: types.NFS3ErrBadHandle}, nil
+		return &LookupResponse{NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrBadHandle}}, nil
 	}
 
 	// Check if share exists
 	if !h.Registry.ShareExists(shareName) {
 		logger.Warn("LOOKUP failed: share not found: share=%s dir=%x client=%s",
 			shareName, req.DirHandle, clientIP)
-		return &LookupResponse{Status: types.NFS3ErrStale}, nil
+		return &LookupResponse{NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrStale}}, nil
 	}
 
 	// Get metadata store for this share
@@ -304,10 +255,10 @@ func (h *Handler) Lookup(
 	if err != nil {
 		logger.Error("LOOKUP failed: cannot get metadata store: share=%s dir=%x client=%s error=%v",
 			shareName, req.DirHandle, clientIP, err)
-		return &LookupResponse{Status: types.NFS3ErrIO}, nil
+		return &LookupResponse{NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrIO}}, nil
 	}
 
-	logger.Debug("LOOKUP: share=%s path=%s file=%s", shareName, path, req.Filename)
+	logger.Debug("LOOKUP: share=%s file=%s", shareName, req.Filename)
 
 	// ========================================================================
 	// Step 4: Verify directory handle exists and is valid
@@ -318,29 +269,29 @@ func (h *Handler) Lookup(
 	case <-ctx.Context.Done():
 		logger.Warn("LOOKUP cancelled before GetFile (dir): file='%s' dir=%x client=%s error=%v",
 			req.Filename, req.DirHandle, clientIP, ctx.Context.Err())
-		return &LookupResponse{Status: types.NFS3ErrIO}, nil
+		return &LookupResponse{NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrIO}}, nil
 	default:
 	}
 
-	dirAttr, err := metadataStore.GetFile(ctx.Context, dirHandle)
+	dirFile, err := metadataStore.GetFile(ctx.Context, dirHandle)
 	if err != nil {
 		logger.Warn("LOOKUP failed: directory not found: dir=%x client=%s error=%v",
 			req.DirHandle, clientIP, err)
-		return &LookupResponse{Status: types.NFS3ErrNoEnt}, nil
+		return &LookupResponse{NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrNoEnt}}, nil
 	}
 
 	// Verify parent is actually a directory
-	if dirAttr.Type != metadata.FileTypeDirectory {
+	if dirFile.Type != metadata.FileTypeDirectory {
 		logger.Warn("LOOKUP failed: handle not a directory: dir=%x type=%d client=%s",
-			req.DirHandle, dirAttr.Type, clientIP)
+			req.DirHandle, dirFile.Type, clientIP)
 
 		// Include directory attributes even on error for cache consistency
 		dirID := xdr.ExtractFileID(dirHandle)
-		nfsDirAttr := xdr.MetadataToNFS(dirAttr, dirID)
+		nfsDirAttr := xdr.MetadataToNFS(&dirFile.FileAttr, dirID)
 
 		return &LookupResponse{
-			Status:  types.NFS3ErrNotDir,
-			DirAttr: nfsDirAttr,
+			NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrNotDir},
+			DirAttr:         nfsDirAttr,
 		}, nil
 	}
 
@@ -348,24 +299,24 @@ func (h *Handler) Lookup(
 	// Step 4: Build AuthContext with share-level identity mapping
 	// ========================================================================
 
-	authCtx, err := BuildAuthContextWithMapping(ctx, h.Registry, dirHandle)
+	authCtx, err := BuildAuthContextWithMapping(ctx, h.Registry, ctx.Share)
 	if err != nil {
 		// Check if the error is due to context cancellation
 		if ctx.Context.Err() != nil {
 			logger.Debug("LOOKUP cancelled during auth context building: file='%s' dir=%x client=%s error=%v",
 				req.Filename, req.DirHandle, clientIP, ctx.Context.Err())
-			return &LookupResponse{Status: types.NFS3ErrIO}, nil
+			return &LookupResponse{NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrIO}}, nil
 		}
 
 		logger.Error("LOOKUP failed: failed to build auth context: file='%s' dir=%x client=%s error=%v",
 			req.Filename, req.DirHandle, clientIP, err)
 
 		dirID := xdr.ExtractFileID(dirHandle)
-		nfsDirAttr := xdr.MetadataToNFS(dirAttr, dirID)
+		nfsDirAttr := xdr.MetadataToNFS(&dirFile.FileAttr, dirID)
 
 		return &LookupResponse{
-			Status:  types.NFS3ErrIO,
-			DirAttr: nfsDirAttr,
+			NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrIO},
+			DirAttr:         nfsDirAttr,
 		}, nil
 	}
 
@@ -386,16 +337,16 @@ func (h *Handler) Lookup(
 
 		// Include directory post-op attributes for cache consistency
 		dirID := xdr.ExtractFileID(dirHandle)
-		nfsDirAttr := xdr.MetadataToNFS(dirAttr, dirID)
+		nfsDirAttr := xdr.MetadataToNFS(&dirFile.FileAttr, dirID)
 
 		return &LookupResponse{
-			Status:  types.NFS3ErrIO,
-			DirAttr: nfsDirAttr,
+			NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrIO},
+			DirAttr:         nfsDirAttr,
 		}, nil
 	default:
 	}
 
-	childHandle, childAttr, err := metadataStore.Lookup(authCtx, dirHandle, req.Filename)
+	childFile, err := metadataStore.Lookup(authCtx, dirHandle, req.Filename)
 	if err != nil {
 		logger.Debug("LOOKUP failed: child not found or access denied: file='%s' dir=%x client=%s error=%v",
 			req.Filename, req.DirHandle, clientIP, err)
@@ -405,38 +356,53 @@ func (h *Handler) Lookup(
 
 		// Include directory post-op attributes for cache consistency
 		dirID := xdr.ExtractFileID(dirHandle)
-		nfsDirAttr := xdr.MetadataToNFS(dirAttr, dirID)
+		nfsDirAttr := xdr.MetadataToNFS(&dirFile.FileAttr, dirID)
 
 		return &LookupResponse{
-			Status:  status,
-			DirAttr: nfsDirAttr,
+			NFSResponseBase: NFSResponseBase{Status: status},
+			DirAttr:         nfsDirAttr,
 		}, nil
 	}
 
 	// ========================================================================
 	// Step 6: Build success response with file handle and attributes
 	// ========================================================================
-	// store.Lookup() already returned both handle and attributes,
+	// store.Lookup() already returned the File object with attributes,
 	// so we don't need a separate GetFile() call!
+
+	// Encode child file handle
+	childHandle, err := metadata.EncodeFileHandle(childFile)
+	if err != nil {
+		logger.Error("LOOKUP failed: cannot encode child handle: file='%s' dir=%x client=%s error=%v",
+			req.Filename, req.DirHandle, clientIP, err)
+
+		dirID := xdr.ExtractFileID(dirHandle)
+		nfsDirAttr := xdr.MetadataToNFS(&dirFile.FileAttr, dirID)
+
+		return &LookupResponse{
+			NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrIO},
+			DirAttr:         nfsDirAttr,
+		}, nil
+	}
 
 	// Generate file IDs from handles for NFS attributes
 	childID := xdr.ExtractFileID(childHandle)
-	nfsChildAttr := xdr.MetadataToNFS(childAttr, childID)
+	nfsChildAttr := xdr.MetadataToNFS(&childFile.FileAttr, childID)
 
 	dirID := xdr.ExtractFileID(dirHandle)
-	nfsDirAttr := xdr.MetadataToNFS(dirAttr, dirID)
+	nfsDirAttr := xdr.MetadataToNFS(&dirFile.FileAttr, dirID)
 
 	logger.Info("LOOKUP successful: file='%s' handle=%x type=%d size=%d client=%s",
-		req.Filename, childHandle, nfsChildAttr.Type, childAttr.Size, clientIP)
+		req.Filename, childHandle, nfsChildAttr.Type, childFile.Size, clientIP)
 
 	logger.Debug("LOOKUP details: child_id=%d child_mode=%o dir_id=%d",
-		childID, childAttr.Mode, dirID)
+		childID, childFile.Mode, dirID)
 
 	return &LookupResponse{
-		Status:     types.NFS3OK,
-		FileHandle: childHandle,
-		Attr:       nfsChildAttr,
-		DirAttr:    nfsDirAttr,
+		NFSResponseBase: NFSResponseBase{Status: types.NFS3OK},
+		FileHandle:      childHandle,
+		Attr:            nfsChildAttr,
+		DirAttr:         nfsDirAttr,
 	}, nil
 }
 
@@ -668,7 +634,7 @@ func DecodeLookupRequest(data []byte) (*LookupRequest, error) {
 // Example:
 //
 //	resp := &LookupResponse{
-//	    Status:     types.NFS3OK,
+//	    NFSResponseBase: NFSResponseBase{Status: types.NFS3OK},
 //	    FileHandle: fileHandle,
 //	    Attr:       fileAttr,
 //	    DirAttr:    dirAttr,

@@ -60,19 +60,7 @@ type SetAttrRequest struct {
 //
 // The response is encoded in XDR format before being sent back to the client.
 type SetAttrResponse struct {
-	// Status indicates the result of the setattr operation.
-	// Common values:
-	//   - types.NFS3OK (0): Success
-	//   - NFS3ErrPerm (1): Not owner (for ownership changes)
-	//   - types.NFS3ErrNoEnt (2): File not found
-	//   - NFS3ErrAcces (13): Permission denied
-	//   - NFS3ErrRoFs (30): Read-only file system
-	//   - types.NFS3ErrNotSync (10002): Guard check failed
-	//   - types.NFS3ErrIO (5): I/O error
-	//   - NFS3ErrStale (70): Stale file handle
-	//   - types.NFS3ErrBadHandle (10001): Invalid file handle
-	//   - NFS3ErrInval (22): Invalid argument (e.g., invalid size)
-	Status uint32
+	NFSResponseBase // Embeds Status field and GetStatus() method
 
 	// AttrBefore contains pre-operation weak cache consistency data.
 	// Used for cache consistency to help clients detect changes.
@@ -84,45 +72,6 @@ type SetAttrResponse struct {
 	// May be nil on error, but should be present on success.
 	AttrAfter *types.NFSFileAttr
 }
-
-// SetAttrContext contains the context information needed to process a SETATTR request.
-// This includes client identification and authentication details for access control.
-type SetAttrContext struct {
-	Context context.Context
-
-	// ClientAddr is the network address of the client making the request.
-	// Format: "IP:port" (e.g., "192.168.1.100:1234")
-	ClientAddr string
-
-	// AuthFlavor is the authentication method used by the client.
-	// Common values:
-	//   - 0: AUTH_NULL (no authentication)
-	//   - 1: AUTH_UNIX (Unix UID/GID authentication)
-	AuthFlavor uint32
-
-	// UID is the authenticated user ID (from AUTH_UNIX).
-	// Used for access control checks by the store.
-	// Only valid when AuthFlavor == AUTH_UNIX.
-	UID *uint32
-
-	// GID is the authenticated group ID (from AUTH_UNIX).
-	// Used for access control checks by the store.
-	// Only valid when AuthFlavor == AUTH_UNIX.
-	GID *uint32
-
-	// GIDs is a list of supplementary group IDs (from AUTH_UNIX).
-	// Used for checking if user belongs to file's group.
-	// Only valid when AuthFlavor == AUTH_UNIX.
-	GIDs []uint32
-}
-
-// Implement NFSAuthContext interface for SetAttrContext
-func (c *SetAttrContext) GetContext() context.Context { return c.Context }
-func (c *SetAttrContext) GetClientAddr() string       { return c.ClientAddr }
-func (c *SetAttrContext) GetAuthFlavor() uint32       { return c.AuthFlavor }
-func (c *SetAttrContext) GetUID() *uint32             { return c.UID }
-func (c *SetAttrContext) GetGID() *uint32             { return c.GID }
-func (c *SetAttrContext) GetGIDs() []uint32           { return c.GIDs }
 
 // ============================================================================
 // Protocol Handler
@@ -316,7 +265,7 @@ func (c *SetAttrContext) GetGIDs() []uint32           { return c.GIDs }
 //	    // Attributes updated successfully
 //	}
 func (h *Handler) SetAttr(
-	ctx *SetAttrContext,
+	ctx *NFSHandlerContext,
 	req *SetAttrRequest,
 ) (*SetAttrResponse, error) {
 	// ========================================================================
@@ -347,7 +296,7 @@ func (h *Handler) SetAttr(
 	if err := validateSetAttrRequest(req); err != nil {
 		logger.Warn("SETATTR validation failed: handle=%x client=%s error=%v",
 			req.Handle, clientIP, err)
-		return &SetAttrResponse{Status: err.nfsStatus}, nil
+		return &SetAttrResponse{NFSResponseBase: NFSResponseBase{Status: err.nfsStatus}}, nil
 	}
 
 	// ========================================================================
@@ -355,18 +304,18 @@ func (h *Handler) SetAttr(
 	// ========================================================================
 
 	fileHandle := metadata.FileHandle(req.Handle)
-	shareName, path, err := metadata.DecodeShareHandle(fileHandle)
+	shareName, path, err := metadata.DecodeFileHandle(fileHandle)
 	if err != nil {
 		logger.Warn("SETATTR failed: invalid file handle: handle=%x client=%s error=%v",
 			req.Handle, clientIP, err)
-		return &SetAttrResponse{Status: types.NFS3ErrBadHandle}, nil
+		return &SetAttrResponse{NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrBadHandle}}, nil
 	}
 
 	// Check if share exists
 	if !h.Registry.ShareExists(shareName) {
 		logger.Warn("SETATTR failed: share not found: share=%s handle=%x client=%s",
 			shareName, req.Handle, clientIP)
-		return &SetAttrResponse{Status: types.NFS3ErrStale}, nil
+		return &SetAttrResponse{NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrStale}}, nil
 	}
 
 	// Get metadata store for this share
@@ -374,7 +323,7 @@ func (h *Handler) SetAttr(
 	if err != nil {
 		logger.Error("SETATTR failed: cannot get metadata store: share=%s handle=%x client=%s error=%v",
 			shareName, req.Handle, clientIP, err)
-		return &SetAttrResponse{Status: types.NFS3ErrIO}, nil
+		return &SetAttrResponse{NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrIO}}, nil
 	}
 
 	logger.Debug("SETATTR: share=%s path=%s", shareName, path)
@@ -383,7 +332,7 @@ func (h *Handler) SetAttr(
 	// Step 3: Get current file attributes for WCC and guard check
 	// ========================================================================
 
-	currentAttr, err := metadataStore.GetFile(ctx.Context, fileHandle)
+	currentFile, err := metadataStore.GetFile(ctx.Context, fileHandle)
 	if err != nil {
 		// Check if error is due to context cancellation
 		if err == context.Canceled || err == context.DeadlineExceeded {
@@ -394,11 +343,11 @@ func (h *Handler) SetAttr(
 
 		logger.Warn("SETATTR failed: file not found: handle=%x client=%s error=%v",
 			req.Handle, clientIP, err)
-		return &SetAttrResponse{Status: types.NFS3ErrNoEnt}, nil
+		return &SetAttrResponse{NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrNoEnt}}, nil
 	}
 
 	// Capture pre-operation attributes for WCC data
-	wccBefore := xdr.CaptureWccAttr(currentAttr)
+	wccBefore := xdr.CaptureWccAttr(&currentFile.FileAttr)
 
 	// ========================================================================
 	// Handle Empty SETATTR (No-Op)
@@ -416,12 +365,12 @@ func (h *Handler) SetAttr(
 
 		// Return current attributes without modification
 		fileID := xdr.ExtractFileID(fileHandle)
-		wccAfter := xdr.MetadataToNFS(currentAttr, fileID)
+		wccAfter := xdr.MetadataToNFS(&currentFile.FileAttr, fileID)
 
 		return &SetAttrResponse{
-			Status:     types.NFS3OK,
-			AttrBefore: wccBefore,
-			AttrAfter:  wccAfter,
+			NFSResponseBase: NFSResponseBase{Status: types.NFS3OK},
+			AttrBefore:      wccBefore,
+			AttrAfter:       wccAfter,
 		}, nil
 	}
 
@@ -447,7 +396,7 @@ func (h *Handler) SetAttr(
 	// operation should be rejected to prevent lost updates.
 
 	if req.Guard.Check {
-		currentCtime := xdr.TimeToTimeVal(currentAttr.Ctime)
+		currentCtime := xdr.TimeToTimeVal(currentFile.Ctime)
 
 		// Compare ctime from guard with current ctime
 		if currentCtime.Seconds != req.Guard.Time.Seconds ||
@@ -460,15 +409,15 @@ func (h *Handler) SetAttr(
 
 			// Get updated attributes for WCC data (best effort)
 			var wccAfter *types.NFSFileAttr
-			if attr, err := metadataStore.GetFile(ctx.Context, fileHandle); err == nil {
+			if file, err := metadataStore.GetFile(ctx.Context, fileHandle); err == nil {
 				fileID := xdr.ExtractFileID(fileHandle)
-				wccAfter = xdr.MetadataToNFS(attr, fileID)
+				wccAfter = xdr.MetadataToNFS(&file.FileAttr, fileID)
 			}
 
 			return &SetAttrResponse{
-				Status:     types.NFS3ErrNotSync,
-				AttrBefore: wccBefore,
-				AttrAfter:  wccAfter,
+				NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrNotSync},
+				AttrBefore:      wccBefore,
+				AttrAfter:       wccAfter,
 			}, nil
 		}
 
@@ -480,7 +429,7 @@ func (h *Handler) SetAttr(
 	// Step 4: Build authentication context with share-level identity mapping
 	// ========================================================================
 
-	authCtx, err := BuildAuthContextWithMapping(ctx, h.Registry, fileHandle)
+	authCtx, err := BuildAuthContextWithMapping(ctx, h.Registry, ctx.Share)
 	if err != nil {
 		// Check if the error is due to context cancellation
 		if ctx.Context.Err() != nil {
@@ -493,12 +442,12 @@ func (h *Handler) SetAttr(
 			req.Handle, clientIP, err)
 
 		fileID := xdr.ExtractFileID(fileHandle)
-		wccAfter := xdr.MetadataToNFS(currentAttr, fileID)
+		wccAfter := xdr.MetadataToNFS(&currentFile.FileAttr, fileID)
 
 		return &SetAttrResponse{
-			Status:     types.NFS3ErrIO,
-			AttrBefore: wccBefore,
-			AttrAfter:  wccAfter,
+			NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrIO},
+			AttrBefore:      wccBefore,
+			AttrAfter:       wccAfter,
 		}, nil
 	}
 
@@ -531,18 +480,18 @@ func (h *Handler) SetAttr(
 
 		// Get updated attributes for WCC data (best effort)
 		var wccAfter *types.NFSFileAttr
-		if attr, getErr := metadataStore.GetFile(ctx.Context, fileHandle); getErr == nil {
+		if file, getErr := metadataStore.GetFile(ctx.Context, fileHandle); getErr == nil {
 			fileID := xdr.ExtractFileID(fileHandle)
-			wccAfter = xdr.MetadataToNFS(attr, fileID)
+			wccAfter = xdr.MetadataToNFS(&file.FileAttr, fileID)
 		}
 
 		// Map store errors to NFS status codes
 		status := xdr.MapStoreErrorToNFSStatus(err, clientIP, "SETATTR")
 
 		return &SetAttrResponse{
-			Status:     status,
-			AttrBefore: wccBefore,
-			AttrAfter:  wccAfter,
+			NFSResponseBase: NFSResponseBase{Status: status},
+			AttrBefore:      wccBefore,
+			AttrAfter:       wccAfter,
 		}, nil
 	}
 
@@ -551,7 +500,7 @@ func (h *Handler) SetAttr(
 	// ========================================================================
 
 	// Get updated file attributes for WCC data
-	updatedAttr, err := metadataStore.GetFile(ctx.Context, fileHandle)
+	updatedFile, err := metadataStore.GetFile(ctx.Context, fileHandle)
 	if err != nil {
 		// Check if error is due to context cancellation
 		if err == context.Canceled || err == context.DeadlineExceeded {
@@ -566,25 +515,25 @@ func (h *Handler) SetAttr(
 	}
 
 	var wccAfter *types.NFSFileAttr
-	if updatedAttr != nil {
+	if updatedFile != nil {
 		fileID := xdr.ExtractFileID(fileHandle)
-		wccAfter = xdr.MetadataToNFS(updatedAttr, fileID)
+		wccAfter = xdr.MetadataToNFS(&updatedFile.FileAttr, fileID)
 	}
 
 	logger.Info("SETATTR successful: handle=%x client=%s", req.Handle, clientIP)
 
-	if updatedAttr != nil {
+	if updatedFile != nil {
 		logger.Debug("SETATTR details: old_size=%d new_size=%d old_mode=%o new_mode=%o",
-			currentAttr.Size, updatedAttr.Size, currentAttr.Mode, updatedAttr.Mode)
+			currentFile.Size, updatedFile.Size, currentFile.Mode, updatedFile.Mode)
 	} else {
 		logger.Debug("SETATTR details: old_size=%d new_size=unknown old_mode=%o new_mode=unknown",
-			currentAttr.Size, currentAttr.Mode)
+			currentFile.Size, currentFile.Mode)
 	}
 
 	return &SetAttrResponse{
-		Status:     types.NFS3OK,
-		AttrBefore: wccBefore,
-		AttrAfter:  wccAfter,
+		NFSResponseBase: NFSResponseBase{Status: types.NFS3OK},
+		AttrBefore:      wccBefore,
+		AttrAfter:       wccAfter,
 	}, nil
 }
 
@@ -795,7 +744,7 @@ func DecodeSetAttrRequest(data []byte) (*SetAttrRequest, error) {
 // Example:
 //
 //	resp := &SetAttrResponse{
-//	    Status:     types.NFS3OK,
+//	    NFSResponseBase: NFSResponseBase{Status: types.NFS3OK},
 //	    AttrBefore: wccBefore,
 //	    AttrAfter:  wccAfter,
 //	}

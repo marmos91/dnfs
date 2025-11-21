@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"bytes"
-	"context"
 	"encoding/binary"
 	"fmt"
 
@@ -96,18 +95,7 @@ type DeviceSpec struct {
 //
 // The response is encoded in XDR format before being sent back to the client.
 type MknodResponse struct {
-	// Status indicates the result of the mknod operation.
-	// Common values:
-	//   - types.NFS3OK (0): Success
-	//   - NFS3ErrExist (17): File already exists
-	//   - types.NFS3ErrNoEnt (2): Parent directory not found
-	//   - types.NFS3ErrNotDir (20): Parent handle is not a directory
-	//   - NFS3ErrAcces (13): Permission denied
-	//   - NFS3ErrInval (22): Invalid file type or argument
-	//   - types.NFS3ErrIO (5): I/O error
-	//   - NFS3ErrNameTooLong (63): Name too long
-	//   - types.NFS3ErrBadHandle (10001): Invalid file handle
-	Status uint32
+	NFSResponseBase // Embeds Status field and GetStatus() method
 
 	// FileHandle is the handle of the newly created special file.
 	// Only present when Status == types.NFS3OK.
@@ -127,45 +115,6 @@ type MknodResponse struct {
 	// Used for weak cache consistency. May be nil on error.
 	DirAttrAfter *types.NFSFileAttr
 }
-
-// MknodContext contains the context information needed to process a MKNOD request.
-// This includes client identification and authentication details for access control.
-type MknodContext struct {
-	Context context.Context
-
-	// ClientAddr is the network address of the client making the request.
-	// Format: "IP:port" (e.g., "192.168.1.100:1234")
-	ClientAddr string
-
-	// AuthFlavor is the authentication method used by the client.
-	// Common values:
-	//   - 0: AUTH_NULL (no authentication)
-	//   - 1: AUTH_UNIX (Unix UID/GID authentication)
-	AuthFlavor uint32
-
-	// UID is the authenticated user ID (from AUTH_UNIX).
-	// Used for default file ownership if not specified in Attr.
-	// Only valid when AuthFlavor == AUTH_UNIX.
-	UID *uint32
-
-	// GID is the authenticated group ID (from AUTH_UNIX).
-	// Used for default file ownership if not specified in Attr.
-	// Only valid when AuthFlavor == AUTH_UNIX.
-	GID *uint32
-
-	// GIDs is a list of supplementary group IDs (from AUTH_UNIX).
-	// Used for access control checks by the store.
-	// Only valid when AuthFlavor == AUTH_UNIX.
-	GIDs []uint32
-}
-
-// Implement NFSAuthContext interface for MknodContext
-func (c *MknodContext) GetContext() context.Context { return c.Context }
-func (c *MknodContext) GetClientAddr() string       { return c.ClientAddr }
-func (c *MknodContext) GetAuthFlavor() uint32       { return c.AuthFlavor }
-func (c *MknodContext) GetUID() *uint32             { return c.UID }
-func (c *MknodContext) GetGID() *uint32             { return c.GID }
-func (c *MknodContext) GetGIDs() []uint32           { return c.GIDs }
 
 // ============================================================================
 // Protocol Handler
@@ -285,7 +234,7 @@ func (c *MknodContext) GetGIDs() []uint32           { return c.GIDs }
 //
 // **RFC 1813 Section 3.3.11: MKNOD Procedure**
 func (h *Handler) Mknod(
-	ctx *MknodContext,
+	ctx *NFSHandlerContext,
 	req *MknodRequest,
 ) (*MknodResponse, error) {
 	// ========================================================================
@@ -321,7 +270,7 @@ func (h *Handler) Mknod(
 	if err := validateMknodRequest(req); err != nil {
 		logger.Warn("MKNOD validation failed: name='%s' type=%d client=%s error=%v",
 			req.Name, req.Type, clientIP, err)
-		return &MknodResponse{Status: err.nfsStatus}, nil
+		return &MknodResponse{NFSResponseBase: NFSResponseBase{Status: err.nfsStatus}}, nil
 	}
 
 	// ========================================================================
@@ -329,18 +278,18 @@ func (h *Handler) Mknod(
 	// ========================================================================
 
 	parentHandle := metadata.FileHandle(req.DirHandle)
-	shareName, path, err := metadata.DecodeShareHandle(parentHandle)
+	shareName, path, err := metadata.DecodeFileHandle(parentHandle)
 	if err != nil {
 		logger.Warn("MKNOD failed: invalid directory handle: dir=%x client=%s error=%v",
 			req.DirHandle, clientIP, err)
-		return &MknodResponse{Status: types.NFS3ErrBadHandle}, nil
+		return &MknodResponse{NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrBadHandle}}, nil
 	}
 
 	// Check if share exists
 	if !h.Registry.ShareExists(shareName) {
 		logger.Warn("MKNOD failed: share not found: share=%s dir=%x client=%s",
 			shareName, req.DirHandle, clientIP)
-		return &MknodResponse{Status: types.NFS3ErrStale}, nil
+		return &MknodResponse{NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrStale}}, nil
 	}
 
 	// Get metadata store for this share
@@ -348,7 +297,7 @@ func (h *Handler) Mknod(
 	if err != nil {
 		logger.Error("MKNOD failed: cannot get metadata store: share=%s dir=%x client=%s error=%v",
 			shareName, req.DirHandle, clientIP, err)
-		return &MknodResponse{Status: types.NFS3ErrIO}, nil
+		return &MknodResponse{NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrIO}}, nil
 	}
 
 	logger.Debug("MKNOD: share=%s path=%s name=%s type=%d", shareName, path, req.Name, req.Type)
@@ -357,7 +306,7 @@ func (h *Handler) Mknod(
 	// Step 3: Verify parent directory exists and is valid
 	// ========================================================================
 
-	parentAttr, err := metadataStore.GetFile(ctx.Context, parentHandle)
+	parentFile, err := metadataStore.GetFile(ctx.Context, parentHandle)
 	if err != nil {
 		// Check if error is due to context cancellation
 		if ctx.Context.Err() != nil {
@@ -368,25 +317,25 @@ func (h *Handler) Mknod(
 
 		logger.Warn("MKNOD failed: parent not found: dir=%x client=%s error=%v",
 			req.DirHandle, clientIP, err)
-		return &MknodResponse{Status: types.NFS3ErrNoEnt}, nil
+		return &MknodResponse{NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrNoEnt}}, nil
 	}
 
 	// Capture pre-operation attributes for WCC data
-	wccBefore := xdr.CaptureWccAttr(parentAttr)
+	wccBefore := xdr.CaptureWccAttr(&parentFile.FileAttr)
 
 	// Verify parent is actually a directory
-	if parentAttr.Type != metadata.FileTypeDirectory {
+	if parentFile.Type != metadata.FileTypeDirectory {
 		logger.Warn("MKNOD failed: parent not a directory: dir=%x type=%d client=%s",
-			req.DirHandle, parentAttr.Type, clientIP)
+			req.DirHandle, parentFile.Type, clientIP)
 
 		// Get current parent state for WCC
 		dirID := xdr.ExtractFileID(parentHandle)
-		wccAfter := xdr.MetadataToNFS(parentAttr, dirID)
+		wccAfter := xdr.MetadataToNFS(&parentFile.FileAttr, dirID)
 
 		return &MknodResponse{
-			Status:        types.NFS3ErrNotDir,
-			DirAttrBefore: wccBefore,
-			DirAttrAfter:  wccAfter,
+			NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrNotDir},
+			DirAttrBefore:   wccBefore,
+			DirAttrAfter:    wccAfter,
 		}, nil
 	}
 
@@ -394,7 +343,7 @@ func (h *Handler) Mknod(
 	// Step 3: Build AuthContext for permission checking
 	// ========================================================================
 
-	authCtx, err := BuildAuthContextWithMapping(ctx, h.Registry, parentHandle)
+	authCtx, err := BuildAuthContextWithMapping(ctx, h.Registry, ctx.Share)
 	if err != nil {
 		// Check if error is due to context cancellation
 		if ctx.Context.Err() != nil {
@@ -403,12 +352,12 @@ func (h *Handler) Mknod(
 
 			// Get current parent state for WCC
 			dirID := xdr.ExtractFileID(parentHandle)
-			wccAfter := xdr.MetadataToNFS(parentAttr, dirID)
+			wccAfter := xdr.MetadataToNFS(&parentFile.FileAttr, dirID)
 
 			return &MknodResponse{
-				Status:        types.NFS3ErrIO,
-				DirAttrBefore: wccBefore,
-				DirAttrAfter:  wccAfter,
+				NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrIO},
+				DirAttrBefore:   wccBefore,
+				DirAttrAfter:    wccAfter,
 			}, ctx.Context.Err()
 		}
 
@@ -417,12 +366,12 @@ func (h *Handler) Mknod(
 
 		// Get current parent state for WCC
 		dirID := xdr.ExtractFileID(parentHandle)
-		wccAfter := xdr.MetadataToNFS(parentAttr, dirID)
+		wccAfter := xdr.MetadataToNFS(&parentFile.FileAttr, dirID)
 
 		return &MknodResponse{
-			Status:        types.NFS3ErrIO,
-			DirAttrBefore: wccBefore,
-			DirAttrAfter:  wccAfter,
+			NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrIO},
+			DirAttrBefore:   wccBefore,
+			DirAttrAfter:    wccAfter,
 		}, nil
 	}
 
@@ -443,21 +392,21 @@ func (h *Handler) Mknod(
 	// Step 4: Check if special file name already exists using Lookup
 	// ========================================================================
 
-	_, _, err = metadataStore.Lookup(authCtx, parentHandle, req.Name)
+	_, err = metadataStore.Lookup(authCtx, parentHandle, req.Name)
 	if err == nil {
 		// Child exists (no error from Lookup)
 		logger.Debug("MKNOD failed: file '%s' already exists: dir=%x client=%s",
 			req.Name, req.DirHandle, clientIP)
 
 		// Get updated parent attributes for WCC data
-		parentAttr, _ = metadataStore.GetFile(ctx.Context, parentHandle)
+		updatedParentFile, _ := metadataStore.GetFile(ctx.Context, parentHandle)
 		dirID := xdr.ExtractFileID(parentHandle)
-		wccAfter := xdr.MetadataToNFS(parentAttr, dirID)
+		wccAfter := xdr.MetadataToNFS(&updatedParentFile.FileAttr, dirID)
 
 		return &MknodResponse{
-			Status:        types.NFS3ErrExist,
-			DirAttrBefore: wccBefore,
-			DirAttrAfter:  wccAfter,
+			NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrExist},
+			DirAttrBefore:   wccBefore,
+			DirAttrAfter:    wccAfter,
 		}, nil
 	}
 	// If error from Lookup, file doesn't exist (good) - continue
@@ -506,7 +455,7 @@ func (h *Handler) Mknod(
 	}
 
 	// Create the special file
-	newHandle, err := metadataStore.CreateSpecialFile(
+	newFile, err := metadataStore.CreateSpecialFile(
 		authCtx,
 		parentHandle,
 		req.Name,
@@ -527,17 +476,17 @@ func (h *Handler) Mknod(
 			req.Name, req.Type, clientIP, err)
 
 		// Get updated parent attributes for WCC data
-		parentAttr, _ = metadataStore.GetFile(ctx.Context, parentHandle)
+		updatedParentFile, _ := metadataStore.GetFile(ctx.Context, parentHandle)
 		dirID := xdr.ExtractFileID(parentHandle)
-		wccAfter := xdr.MetadataToNFS(parentAttr, dirID)
+		wccAfter := xdr.MetadataToNFS(&updatedParentFile.FileAttr, dirID)
 
 		// Map store errors to NFS status codes
 		status := mapMetadataErrorToNFS(err)
 
 		return &MknodResponse{
-			Status:        status,
-			DirAttrBefore: wccBefore,
-			DirAttrAfter:  wccAfter,
+			NFSResponseBase: NFSResponseBase{Status: status},
+			DirAttrBefore:   wccBefore,
+			DirAttrAfter:    wccAfter,
 		}, nil
 	}
 
@@ -545,44 +494,35 @@ func (h *Handler) Mknod(
 	// Step 6: Build success response with new file attributes
 	// ========================================================================
 
-	// Get the newly created file's attributes
-	newFileAttr, err := metadataStore.GetFile(ctx.Context, newHandle)
+	// Encode the file handle for the new special file
+	newHandle, err := metadata.EncodeFileHandle(newFile)
 	if err != nil {
-		// Check if error is due to context cancellation
-		if ctx.Context.Err() != nil {
-			logger.Debug("MKNOD: final attribute lookup cancelled: name='%s' handle=%x client=%s",
-				req.Name, newHandle, clientIP)
-			return nil, ctx.Context.Err()
-		}
-
-		logger.Error("MKNOD: failed to get new file attributes: handle=%x error=%v",
-			newHandle, err)
-		// This shouldn't happen, but handle gracefully
-		return &MknodResponse{Status: types.NFS3ErrIO}, nil
+		logger.Error("MKNOD: failed to encode file handle: error=%v", err)
+		return &MknodResponse{NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrIO}}, nil
 	}
 
 	// Generate file ID from handle for NFS attributes
 	fileid := xdr.ExtractFileID(newHandle)
-	nfsAttr := xdr.MetadataToNFS(newFileAttr, fileid)
+	nfsAttr := xdr.MetadataToNFS(&newFile.FileAttr, fileid)
 
 	// Get updated parent attributes for WCC data
-	parentAttr, _ = metadataStore.GetFile(ctx.Context, parentHandle)
+	updatedParentFile, _ := metadataStore.GetFile(ctx.Context, parentHandle)
 	parentFileid := xdr.ExtractFileID(parentHandle)
-	wccAfter := xdr.MetadataToNFS(parentAttr, parentFileid)
+	wccAfter := xdr.MetadataToNFS(&updatedParentFile.FileAttr, parentFileid)
 
 	logger.Info("MKNOD successful: name='%s' type=%s handle=%x mode=%o major=%d minor=%d client=%s",
-		req.Name, specialFileTypeName(req.Type), newHandle, newFileAttr.Mode,
+		req.Name, specialFileTypeName(req.Type), newHandle, newFile.Mode,
 		req.Spec.SpecData1, req.Spec.SpecData2, clientIP)
 
 	logger.Debug("MKNOD details: fileid=%d uid=%d gid=%d parent=%d",
-		fileid, newFileAttr.UID, newFileAttr.GID, parentFileid)
+		fileid, newFile.UID, newFile.GID, parentFileid)
 
 	return &MknodResponse{
-		Status:        types.NFS3OK,
-		FileHandle:    newHandle,
-		Attr:          nfsAttr,
-		DirAttrBefore: wccBefore,
-		DirAttrAfter:  wccAfter,
+		NFSResponseBase: NFSResponseBase{Status: types.NFS3OK},
+		FileHandle:      newHandle,
+		Attr:            nfsAttr,
+		DirAttrBefore:   wccBefore,
+		DirAttrAfter:    wccAfter,
 	}, nil
 }
 

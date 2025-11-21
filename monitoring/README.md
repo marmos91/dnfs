@@ -27,46 +27,41 @@ This will start:
 
 1. Open http://localhost:3000
 2. Login with `admin` / `admin`
-3. The **"DittoFS Upload Performance"** dashboard should be automatically loaded
+3. The **"DittoFS NFS Performance"** dashboard is automatically loaded
 
 ## Dashboard Overview
 
-The dashboard is organized into sections:
+### DittoFS NFS Performance
 
-### 📊 Upload Performance Overview
-- **Cache Write Speed (instant)**: Current throughput to cache (MB/s) using irate()
-- **S3 Upload Speed (instant)**: Current throughput to S3 (MB/s) using irate()
-- **Active Buffers**: Number of files currently cached
-- **Flush Duration (p95)**: 95th percentile flush time
+Monitor NFS protocol performance and behavior:
 
-**Note**: Cache writes and S3 uploads happen at different times:
-- Cache writes are fast (MB/s) and happen when clients write files
-- S3 uploads are slower and happen during flushes (timeout-based or explicit)
-- When idle, both metrics will show ~0
+**NFS Overview**
+- **Active Connections**: Current number of active NFS client connections
+- **Request Rate**: Total NFS requests per second
+- **Error Rate**: Percentage of failed requests
+- **Request Latency (p95)**: 95th percentile request latency
 
-### 📈 Throughput Over Time
-- **Cache vs S3 Throughput**: Time series graph showing both rates over time
-  - Green line: Cache write throughput (spiky when files are written)
-  - Blue line: S3 upload throughput (happens during flushes)
-  - Legend shows mean and max values for the time range
+**Request Metrics**
+- **Requests per Second by Procedure**: Breakdown of which NFS operations are being called (READ, WRITE, LOOKUP, etc.)
+- **Request Duration by Procedure**: Latency distribution for each operation type
+- **Requests In Flight**: Currently processing requests by procedure
+- **Requests per Second by Share**: Request rate per NFS export
 
-### 🔄 S3 Flush Phase Breakdown
-- Time series showing duration of each flush phase:
-  - **Cache Read**: Time to read from cache
-  - **S3 Upload**: Time to upload to S3
-  - **Cache Clear**: Time to clear cache
+**Data Transfer**
+- **Throughput by Direction**: Read vs write throughput in MB/s
+- **Throughput by Procedure**: Which operations are transferring the most data
+- **Operation Size Distribution**: Size of READ/WRITE operations (p50, p95)
+- **Bytes Transferred by Procedure**: Pie chart showing data transfer distribution
 
-### ⚡ Cache Performance
-- **Cache Throughput**: Read/write MB/s
-- **Cache Latency**: Read/write latency in microseconds (p95)
+**Connection Metrics**
+- **Active Connections Over Time**: Connection count trends
+- **Connection Lifecycle**: Rate of connections accepted, closed, and force-closed
+- **Total Connection Stats**: Cumulative connection counters
 
-### 📈 Flush Operations
-- **Operations by Reason**: Count of flushes by trigger:
-  - `stable_write`: Explicit sync requested
-  - `commit`: NFS COMMIT procedure
-  - `timeout`: Auto-flush after idle period
-  - `threshold`: Cache size threshold exceeded
-- **Reasons Distribution**: Pie chart showing flush trigger breakdown
+**Error Analysis**
+- **Errors per Second by Procedure**: Which operations are failing
+- **Error Codes Distribution**: NFS error codes breakdown
+- **Top 20 Errors**: Table of most frequent errors by procedure and error code
 
 ## Running Benchmarks with Monitoring
 
@@ -77,35 +72,45 @@ cd monitoring && docker-compose up -d
 
 2. Open Grafana dashboard at http://localhost:3000
 
-3. Run your benchmark:
+3. Mount DittoFS and run operations:
 ```bash
-./scripts/benchmark_upload_v2.sh /tmp/nfstest
+# Mount NFS share
+sudo mount -t nfs -o nfsvers=3,tcp,port=2049,mountport=2049,resvport localhost:/export /mnt/test
+
+# Run some file operations
+cd /mnt/test
+dd if=/dev/zero of=testfile bs=1M count=100
+cat testfile > /dev/null
+ls -la
 ```
 
 4. Watch the metrics in real-time:
-   - Cache write speed should spike during file creation
-   - S3 upload speed should show actual throughput
-   - Flush phase breakdown shows where time is spent
+   - Request rate shows which operations are being performed
+   - Latency graphs show performance characteristics
+   - Throughput graphs show data transfer rates
+   - Error analysis helps identify issues
 
 ## Metrics Available
 
-### S3 Metrics
-- `dittofs_s3_flush_phase_duration_seconds{phase}` - Duration of cache_read, s3_upload, cache_clear
-- `dittofs_s3_flush_operations_total{reason,status}` - Count by trigger reason
-- `dittofs_s3_flush_bytes{reason}` - Size distribution of flushes
-- `dittofs_s3_operation_duration_seconds{operation}` - All S3 operations
-- `dittofs_s3_bytes_transferred_total{operation}` - Bytes uploaded/downloaded
-
-### Cache Metrics
-- `dittofs_cache_write_operations_total{status}` - Write operation count
-- `dittofs_cache_write_duration_seconds` - Write latency
-- `dittofs_cache_write_bytes_total` - Total bytes written
-- `dittofs_cache_read_operations_total{status}` - Read operation count
-- `dittofs_cache_read_duration_seconds` - Read latency
-- `dittofs_cache_read_bytes_total` - Total bytes read
-- `dittofs_cache_size_bytes{content_id}` - Cache size per file
-- `dittofs_cache_buffer_count` - Active buffer count
-- `dittofs_cache_reset_operations_total` - Cache clears
+### NFS Metrics
+- `dittofs_nfs_requests_total{procedure,share,status,error_code}` - Total number of NFS requests
+  - Labels:
+    - `procedure`: NFS procedure name (READ, WRITE, LOOKUP, GETATTR, etc.)
+    - `share`: Share/export path
+    - `status`: success or error
+    - `error_code`: NFS error code (empty for success)
+- `dittofs_nfs_request_duration_milliseconds{procedure,share}` - Duration of NFS requests in milliseconds
+  - Buckets: 1ms, 10ms, 100ms, 1s, 10s
+- `dittofs_nfs_requests_in_flight{procedure,share}` - Current number of NFS requests being processed
+- `dittofs_nfs_bytes_transferred_total{procedure,share,direction}` - Total bytes transferred via NFS operations
+  - Labels:
+    - `direction`: read or write
+- `dittofs_nfs_operation_size_bytes{operation,share}` - Distribution of READ/WRITE operation sizes
+  - Buckets: 4KB, 64KB, 1MB, 10MB
+- `dittofs_nfs_active_connections` - Current number of active NFS connections
+- `dittofs_nfs_connections_accepted_total` - Total number of NFS connections accepted
+- `dittofs_nfs_connections_closed_total` - Total number of NFS connections closed
+- `dittofs_nfs_connections_force_closed_total` - Total number of NFS connections force-closed during shutdown
 
 ## Customizing
 
@@ -118,9 +123,9 @@ global:
 
 ### Add alerting
 Create `prometheus/alerts.yml` and add alerting rules for:
-- High flush latency
-- S3 errors
-- Cache size exceeding thresholds
+- High request latency
+- High error rates
+- Connection saturation
 
 ### Create custom dashboards
 1. Go to Grafana → Dashboards → New

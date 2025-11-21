@@ -227,7 +227,14 @@ func (s *BadgerMetadataStore) CheckPermissions(
 
 	err := s.db.View(func(txn *badger.Txn) error {
 		// Get file data
-		item, err := txn.Get(keyFile(handle))
+		_, id, err := metadata.DecodeFileHandle(handle)
+		if err != nil {
+			return &metadata.StoreError{
+				Code:    metadata.ErrInvalidHandle,
+				Message: "invalid file handle",
+			}
+		}
+		item, err := txn.Get(keyFile(id))
 		if err == badger.ErrKeyNotFound {
 			return &metadata.StoreError{
 				Code:    metadata.ErrNotFound,
@@ -238,26 +245,25 @@ func (s *BadgerMetadataStore) CheckPermissions(
 			return fmt.Errorf("failed to get file: %w", err)
 		}
 
-		var fileData *fileData
+		var file *metadata.File
 		err = item.Value(func(val []byte) error {
-			fd, err := decodeFileData(val)
+			fd, err := decodeFile(val)
 			if err != nil {
 				return err
 			}
-			fileData = fd
+			file = fd
 			return nil
 		})
 		if err != nil {
 			return err
 		}
 
-		attr := fileData.Attr
 		identity := ctx.Identity
 
 		// Handle anonymous/no identity case
 		if identity == nil || identity.UID == nil {
 			// Only grant "other" permissions for anonymous users
-			granted = checkOtherPermissions(attr.Mode, requested)
+			granted = checkOtherPermissions(file.Mode, requested)
 			return nil
 		}
 
@@ -267,7 +273,7 @@ func (s *BadgerMetadataStore) CheckPermissions(
 		// Root bypass: UID 0 gets all permissions EXCEPT on read-only shares
 		if uid == 0 {
 			// Check if share is read-only
-			shareItem, err := txn.Get(keyShare(fileData.ShareName))
+			shareItem, err := txn.Get(keyShare(file.ShareName))
 			if err == nil {
 				err = shareItem.Value(func(val []byte) error {
 					sd, err := decodeShareData(val)
@@ -296,15 +302,15 @@ func (s *BadgerMetadataStore) CheckPermissions(
 		// Determine which permission bits apply
 		var permBits uint32
 
-		if uid == attr.UID {
+		if uid == file.UID {
 			// Owner permissions (bits 6-8)
-			permBits = (attr.Mode >> 6) & 0x7
-		} else if gid != nil && (*gid == attr.GID || identity.HasGID(attr.GID)) {
+			permBits = (file.Mode >> 6) & 0x7
+		} else if gid != nil && (*gid == file.GID || identity.HasGID(file.GID)) {
 			// Group permissions (bits 3-5)
-			permBits = (attr.Mode >> 3) & 0x7
+			permBits = (file.Mode >> 3) & 0x7
 		} else {
 			// Other permissions (bits 0-2)
-			permBits = attr.Mode & 0x7
+			permBits = file.Mode & 0x7
 		}
 
 		// Map Unix permission bits to Permission flags
@@ -319,12 +325,12 @@ func (s *BadgerMetadataStore) CheckPermissions(
 		}
 
 		// Owner gets additional privileges
-		if uid == attr.UID {
+		if uid == file.UID {
 			granted |= metadata.PermissionChangePermissions | metadata.PermissionChangeOwnership
 		}
 
 		// Apply read-only share restriction for all non-root users
-		shareItem, err := txn.Get(keyShare(fileData.ShareName))
+		shareItem, err := txn.Get(keyShare(file.ShareName))
 		if err == nil {
 			err = shareItem.Value(func(val []byte) error {
 				sd, err := decodeShareData(val)

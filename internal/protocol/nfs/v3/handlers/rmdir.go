@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"bytes"
-	"context"
 	"encoding/binary"
 	"fmt"
 	"strings"
@@ -51,19 +50,7 @@ type RmdirRequest struct {
 //
 // The response is encoded in XDR format before being sent back to the client.
 type RmdirResponse struct {
-	// Status indicates the result of the rmdir operation.
-	// Common values:
-	//   - types.NFS3OK (0): Success - directory removed
-	//   - types.NFS3ErrNoEnt (2): Directory or parent not found
-	//   - types.NFS3ErrNotDir (20): Parent handle or target is not a directory
-	//   - NFS3ErrNotEmpty (66): Directory is not empty
-	//   - NFS3ErrAcces (13): Permission denied
-	//   - types.NFS3ErrIO (5): I/O error
-	//   - NFS3ErrStale (70): Stale file handle
-	//   - types.NFS3ErrBadHandle (10001): Invalid file handle
-	//   - NFS3ErrInval (22): Invalid argument (bad name)
-	//   - NFS3ErrNameTooLong (63): Name too long
-	Status uint32
+	NFSResponseBase // Embeds Status field and GetStatus() method
 
 	// DirWccBefore contains pre-operation attributes of the parent directory.
 	// Used for weak cache consistency to help clients detect if the parent
@@ -75,46 +62,6 @@ type RmdirResponse struct {
 	// May be nil on error, but should be present on success.
 	DirWccAfter *types.NFSFileAttr
 }
-
-// RmdirContext contains the context information needed to process a RMDIR request.
-// This includes client identification and authentication details for access control
-// and auditing purposes.
-type RmdirContext struct {
-	Context context.Context
-
-	// ClientAddr is the network address of the client making the request.
-	// Format: "IP:port" (e.g., "192.168.1.100:1234")
-	ClientAddr string
-
-	// AuthFlavor is the authentication method used by the client.
-	// Common values:
-	//   - 0: AUTH_NULL (no authentication)
-	//   - 1: AUTH_UNIX (Unix UID/GID authentication)
-	AuthFlavor uint32
-
-	// UID is the authenticated user ID (from AUTH_UNIX).
-	// Used for access control checks by the store.
-	// Only valid when AuthFlavor == AUTH_UNIX.
-	UID *uint32
-
-	// GID is the authenticated group ID (from AUTH_UNIX).
-	// Used for access control checks by the store.
-	// Only valid when AuthFlavor == AUTH_UNIX.
-	GID *uint32
-
-	// GIDs is a list of supplementary group IDs (from AUTH_UNIX).
-	// Used for access control checks by the store.
-	// Only valid when AuthFlavor == AUTH_UNIX.
-	GIDs []uint32
-}
-
-// Implement NFSAuthContext interface for RmdirContext
-func (c *RmdirContext) GetContext() context.Context { return c.Context }
-func (c *RmdirContext) GetClientAddr() string       { return c.ClientAddr }
-func (c *RmdirContext) GetAuthFlavor() uint32       { return c.AuthFlavor }
-func (c *RmdirContext) GetUID() *uint32             { return c.UID }
-func (c *RmdirContext) GetGID() *uint32             { return c.GID }
-func (c *RmdirContext) GetGIDs() []uint32           { return c.GIDs }
 
 // ============================================================================
 // Protocol Handler
@@ -262,7 +209,7 @@ func (c *RmdirContext) GetGIDs() []uint32           { return c.GIDs }
 //	    // Directory removed successfully
 //	}
 func (h *Handler) Rmdir(
-	ctx *RmdirContext,
+	ctx *NFSHandlerContext,
 	req *RmdirRequest,
 ) (*RmdirResponse, error) {
 	// Extract client IP for logging
@@ -279,7 +226,7 @@ func (h *Handler) Rmdir(
 	case <-ctx.Context.Done():
 		logger.Warn("RMDIR cancelled: name='%s' dir=%x client=%s error=%v",
 			req.Name, req.DirHandle, clientIP, ctx.Context.Err())
-		return &RmdirResponse{Status: types.NFS3ErrIO}, nil
+		return &RmdirResponse{NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrIO}}, nil
 	default:
 	}
 
@@ -290,7 +237,7 @@ func (h *Handler) Rmdir(
 	if err := validateRmdirRequest(req); err != nil {
 		logger.Warn("RMDIR validation failed: name='%s' client=%s error=%v",
 			req.Name, clientIP, err)
-		return &RmdirResponse{Status: err.nfsStatus}, nil
+		return &RmdirResponse{NFSResponseBase: NFSResponseBase{Status: err.nfsStatus}}, nil
 	}
 
 	// ========================================================================
@@ -298,18 +245,18 @@ func (h *Handler) Rmdir(
 	// ========================================================================
 
 	parentHandle := metadata.FileHandle(req.DirHandle)
-	shareName, path, err := metadata.DecodeShareHandle(parentHandle)
+	shareName, path, err := metadata.DecodeFileHandle(parentHandle)
 	if err != nil {
 		logger.Warn("RMDIR failed: invalid directory handle: dir=%x client=%s error=%v",
 			req.DirHandle, clientIP, err)
-		return &RmdirResponse{Status: types.NFS3ErrBadHandle}, nil
+		return &RmdirResponse{NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrBadHandle}}, nil
 	}
 
 	// Check if share exists
 	if !h.Registry.ShareExists(shareName) {
 		logger.Warn("RMDIR failed: share not found: share=%s dir=%x client=%s",
 			shareName, req.DirHandle, clientIP)
-		return &RmdirResponse{Status: types.NFS3ErrStale}, nil
+		return &RmdirResponse{NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrStale}}, nil
 	}
 
 	// Get metadata store for this share
@@ -317,7 +264,7 @@ func (h *Handler) Rmdir(
 	if err != nil {
 		logger.Error("RMDIR failed: cannot get metadata store: share=%s dir=%x client=%s error=%v",
 			shareName, req.DirHandle, clientIP, err)
-		return &RmdirResponse{Status: types.NFS3ErrIO}, nil
+		return &RmdirResponse{NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrIO}}, nil
 	}
 
 	logger.Debug("RMDIR: share=%s path=%s name=%s", shareName, path, req.Name)
@@ -331,33 +278,33 @@ func (h *Handler) Rmdir(
 	case <-ctx.Context.Done():
 		logger.Warn("RMDIR cancelled before GetFile: name='%s' dir=%x client=%s error=%v",
 			req.Name, req.DirHandle, clientIP, ctx.Context.Err())
-		return &RmdirResponse{Status: types.NFS3ErrIO}, nil
+		return &RmdirResponse{NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrIO}}, nil
 	default:
 	}
 
-	parentAttr, err := metadataStore.GetFile(ctx.Context, parentHandle)
+	parentFile, err := metadataStore.GetFile(ctx.Context, parentHandle)
 	if err != nil {
 		logger.Warn("RMDIR failed: parent not found: dir=%x client=%s error=%v",
 			req.DirHandle, clientIP, err)
-		return &RmdirResponse{Status: types.NFS3ErrNoEnt}, nil
+		return &RmdirResponse{NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrNoEnt}}, nil
 	}
 
 	// Capture pre-operation attributes for WCC data
-	wccBefore := xdr.CaptureWccAttr(parentAttr)
+	wccBefore := xdr.CaptureWccAttr(&parentFile.FileAttr)
 
 	// Verify parent is actually a directory
-	if parentAttr.Type != metadata.FileTypeDirectory {
+	if parentFile.Type != metadata.FileTypeDirectory {
 		logger.Warn("RMDIR failed: parent not a directory: dir=%x type=%d client=%s",
-			req.DirHandle, parentAttr.Type, clientIP)
+			req.DirHandle, parentFile.Type, clientIP)
 
 		// Get current parent state for WCC
 		dirID := xdr.ExtractFileID(parentHandle)
-		wccAfter := xdr.MetadataToNFS(parentAttr, dirID)
+		wccAfter := xdr.MetadataToNFS(&parentFile.FileAttr, dirID)
 
 		return &RmdirResponse{
-			Status:       types.NFS3ErrNotDir,
-			DirWccBefore: wccBefore,
-			DirWccAfter:  wccAfter,
+			NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrNotDir},
+			DirWccBefore:    wccBefore,
+			DirWccAfter:     wccAfter,
 		}, nil
 	}
 
@@ -365,7 +312,7 @@ func (h *Handler) Rmdir(
 	// Step 4: Build authentication context with share-level identity mapping
 	// ========================================================================
 
-	authCtx, err := BuildAuthContextWithMapping(ctx, h.Registry, parentHandle)
+	authCtx, err := BuildAuthContextWithMapping(ctx, h.Registry, ctx.Share)
 	if err != nil {
 		// Check if the error is due to context cancellation
 		if ctx.Context.Err() != nil {
@@ -373,12 +320,12 @@ func (h *Handler) Rmdir(
 				req.Name, req.DirHandle, clientIP, ctx.Context.Err())
 
 			dirID := xdr.ExtractFileID(parentHandle)
-			wccAfter := xdr.MetadataToNFS(parentAttr, dirID)
+			wccAfter := xdr.MetadataToNFS(&parentFile.FileAttr, dirID)
 
 			return &RmdirResponse{
-				Status:       types.NFS3ErrIO,
-				DirWccBefore: wccBefore,
-				DirWccAfter:  wccAfter,
+				NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrIO},
+				DirWccBefore:    wccBefore,
+				DirWccAfter:     wccAfter,
 			}, nil
 		}
 
@@ -386,12 +333,12 @@ func (h *Handler) Rmdir(
 			req.Name, req.DirHandle, clientIP, err)
 
 		dirID := xdr.ExtractFileID(parentHandle)
-		wccAfter := xdr.MetadataToNFS(parentAttr, dirID)
+		wccAfter := xdr.MetadataToNFS(&parentFile.FileAttr, dirID)
 
 		return &RmdirResponse{
-			Status:       types.NFS3ErrIO,
-			DirWccBefore: wccBefore,
-			DirWccAfter:  wccAfter,
+			NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrIO},
+			DirWccBefore:    wccBefore,
+			DirWccAfter:     wccAfter,
 		}, nil
 	}
 
@@ -414,14 +361,14 @@ func (h *Handler) Rmdir(
 			req.Name, req.DirHandle, clientIP, ctx.Context.Err())
 
 		// Get updated parent attributes for WCC data
-		parentAttr, _ = metadataStore.GetFile(ctx.Context, parentHandle)
+		parentFile, _ = metadataStore.GetFile(ctx.Context, parentHandle)
 		dirID := xdr.ExtractFileID(parentHandle)
-		wccAfter := xdr.MetadataToNFS(parentAttr, dirID)
+		wccAfter := xdr.MetadataToNFS(&parentFile.FileAttr, dirID)
 
 		return &RmdirResponse{
-			Status:       types.NFS3ErrIO,
-			DirWccBefore: wccBefore,
-			DirWccAfter:  wccAfter,
+			NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrIO},
+			DirWccBefore:    wccBefore,
+			DirWccAfter:     wccAfter,
 		}, nil
 	default:
 	}
@@ -433,17 +380,17 @@ func (h *Handler) Rmdir(
 			req.Name, clientIP, err)
 
 		// Get updated parent attributes for WCC data
-		parentAttr, _ = metadataStore.GetFile(ctx.Context, parentHandle)
+		parentFile, _ = metadataStore.GetFile(ctx.Context, parentHandle)
 		dirID := xdr.ExtractFileID(parentHandle)
-		wccAfter := xdr.MetadataToNFS(parentAttr, dirID)
+		wccAfter := xdr.MetadataToNFS(&parentFile.FileAttr, dirID)
 
 		// Map store errors to NFS status codes
 		status := mapRmdirErrorToNFSStatus(err)
 
 		return &RmdirResponse{
-			Status:       status,
-			DirWccBefore: wccBefore,
-			DirWccAfter:  wccAfter,
+			NFSResponseBase: NFSResponseBase{Status: status},
+			DirWccBefore:    wccBefore,
+			DirWccAfter:     wccAfter,
 		}, nil
 	}
 
@@ -452,9 +399,9 @@ func (h *Handler) Rmdir(
 	// ========================================================================
 
 	// Get updated parent directory attributes
-	parentAttr, _ = metadataStore.GetFile(ctx.Context, parentHandle)
+	parentFile, _ = metadataStore.GetFile(ctx.Context, parentHandle)
 	dirID := xdr.ExtractFileID(parentHandle)
-	wccAfter := xdr.MetadataToNFS(parentAttr, dirID)
+	wccAfter := xdr.MetadataToNFS(&parentFile.FileAttr, dirID)
 
 	logger.Info("RMDIR successful: name='%s' dir=%x client=%s",
 		req.Name, req.DirHandle, clientIP)
@@ -462,9 +409,9 @@ func (h *Handler) Rmdir(
 	logger.Debug("RMDIR details: parent_id=%d", dirID)
 
 	return &RmdirResponse{
-		Status:       types.NFS3OK,
-		DirWccBefore: wccBefore,
-		DirWccAfter:  wccAfter,
+		NFSResponseBase: NFSResponseBase{Status: types.NFS3OK},
+		DirWccBefore:    wccBefore,
+		DirWccAfter:     wccAfter,
 	}, nil
 }
 
@@ -673,7 +620,7 @@ func DecodeRmdirRequest(data []byte) (*RmdirRequest, error) {
 // Example:
 //
 //	resp := &RmdirResponse{
-//	    Status:       types.NFS3OK,
+//	    NFSResponseBase: NFSResponseBase{Status: types.NFS3OK},
 //	    DirWccBefore: wccBefore,
 //	    DirWccAfter:  wccAfter,
 //	}

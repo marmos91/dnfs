@@ -309,6 +309,28 @@ func (s *BadgerMetadataStore) initializeSingletons(ctx context.Context) error {
 	})
 }
 
+// GetAllContentIDs returns all ContentIDs referenced by metadata.
+//
+// TODO: This is a stub implementation. Full implementation needs to:
+// - Iterate through all files in BadgerDB using prefix scan
+// - Collect ContentIDs from regular files
+// - Deduplicate IDs (for hard links)
+// - Check context cancellation periodically
+//
+// For now, this returns an empty list.
+func (s *BadgerMetadataStore) GetAllContentIDs(ctx context.Context) ([]metadata.ContentID, error) {
+	// Check context before starting
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
+	// TODO: Implement actual iteration through BadgerDB
+	// This would use db.View() with a prefix scan on the files prefix
+	// and collect all ContentIDs from regular files
+
+	return []metadata.ContentID{}, nil
+}
+
 // Close closes the BadgerDB database and releases all resources.
 //
 // This should be called when the store is no longer needed, typically during
@@ -325,62 +347,4 @@ func (s *BadgerMetadataStore) Close() error {
 	}
 
 	return nil
-}
-
-// lookupHashedHandlePath retrieves the original path for a hash-based file handle.
-//
-// This is used internally when a file handle was generated using hash-based format
-// (because the path exceeded 64 bytes). The reverse mapping is looked up from the
-// database.
-//
-// Thread Safety: Safe for concurrent use with appropriate locking.
-//
-// Parameters:
-//   - handle: The hash-based file handle
-//
-// Returns:
-//   - string: The original "shareName:fullPath" string
-//   - error: Error if handle not found or lookup fails
-func (s *BadgerMetadataStore) lookupHashedHandlePath(handle metadata.FileHandle) (string, error) {
-	var path string
-
-	err := s.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(keyHandleMapping(handle))
-		if err == badger.ErrKeyNotFound {
-			return &metadata.StoreError{
-				Code:    metadata.ErrNotFound,
-				Message: "handle mapping not found for hashed handle",
-			}
-		}
-		if err != nil {
-			return err
-		}
-
-		return item.Value(func(val []byte) error {
-			path = string(val)
-			return nil
-		})
-	})
-
-	return path, err
-}
-
-// storeHashedHandleMapping stores the reverse mapping for a hash-based file handle.
-//
-// This is called when a file handle is generated using hash-based format to maintain
-// the reverse mapping needed for path reconstruction.
-//
-// Thread Safety: Must be called within a transaction.
-//
-// Parameters:
-//   - txn: BadgerDB transaction
-//   - handle: The hash-based file handle
-//   - shareName: The share name
-//   - fullPath: The full path within the share
-//
-// Returns:
-//   - error: Error if storing the mapping fails
-func storeHashedHandleMapping(txn *badger.Txn, handle metadata.FileHandle, shareName, fullPath string) error {
-	mapping := shareName + ":" + fullPath
-	return txn.Set(keyHandleMapping(handle), []byte(mapping))
 }

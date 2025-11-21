@@ -32,20 +32,6 @@ import (
 // - Could use Gob for native Go type support
 // - For now, JSON provides the best balance of debuggability and functionality
 
-// fileData holds the internal representation of file metadata with share tracking.
-//
-// This structure extends FileAttr with the share name, which is needed to:
-//   - Enforce share-level policies (e.g., read-only shares)
-//   - Generate deterministic file handles (which include share name)
-//   - Track which share a file belongs to for management operations
-type fileData struct {
-	// Attr contains the protocol-agnostic file attributes
-	Attr *metadata.FileAttr `json:"attr"`
-
-	// ShareName tracks which share this file belongs to
-	ShareName string `json:"share_name"`
-}
-
 // shareData holds the internal representation of a share configuration.
 //
 // This structure combines the share configuration (access rules, options)
@@ -73,42 +59,62 @@ type deviceNumber struct {
 // ==================
 // These functions convert Go types to byte slices for storage in BadgerDB.
 
-// encodeFileData serializes fileData to JSON bytes.
+// encodeFile serializes a File to JSON bytes.
 //
-// This is used for storing complete file metadata including attributes and
-// share tracking information.
+// This stores the complete file metadata including:
+//   - Identity: UUID, ShareName, Path
+//   - Attributes: Type, Mode, UID, GID, Size, timestamps, ContentID, etc.
+//
+// Because File embeds FileAttr, all fields appear at the root level in JSON.
+//
+// Example JSON structure:
+//
+//	{
+//	  "id": "550e8400-e29b-41d4-a716-446655440000",
+//	  "share_name": "/export",
+//	  "path": "/documents/report.pdf",
+//	  "type": 0,
+//	  "mode": 420,
+//	  "uid": 1000,
+//	  "gid": 1000,
+//	  "size": 4096,
+//	  "atime": "2025-11-21T14:00:00Z",
+//	  "mtime": "2025-11-21T14:00:00Z",
+//	  "ctime": "2025-11-21T14:00:00Z",
+//	  "content_id": "export/documents/report.pdf"
+//	}
 //
 // Parameters:
-//   - data: The file data to encode
+//   - file: The file to encode
 //
 // Returns:
 //   - []byte: JSON-encoded bytes
 //   - error: Encoding error if serialization fails
-func encodeFileData(data *fileData) ([]byte, error) {
-	bytes, err := json.Marshal(data)
+func encodeFile(file *metadata.File) ([]byte, error) {
+	bytes, err := json.Marshal(file)
 	if err != nil {
-		return nil, fmt.Errorf("failed to encode file data: %w", err)
+		return nil, fmt.Errorf("failed to encode file: %w", err)
 	}
 	return bytes, nil
 }
 
-// decodeFileData deserializes fileData from JSON bytes.
+// decodeFile deserializes a File from JSON bytes.
 //
-// This is the inverse of encodeFileData, used when reading file metadata
+// This is the inverse of encodeFile, used when reading file metadata
 // from the database.
 //
 // Parameters:
 //   - bytes: JSON-encoded file data
 //
 // Returns:
-//   - *fileData: Decoded file data
+//   - *metadata.File: Decoded file with UUID, share, path, and all attributes
 //   - error: Decoding error if deserialization fails
-func decodeFileData(bytes []byte) (*fileData, error) {
-	var data fileData
-	if err := json.Unmarshal(bytes, &data); err != nil {
-		return nil, fmt.Errorf("failed to decode file data: %w", err)
+func decodeFile(bytes []byte) (*metadata.File, error) {
+	var file metadata.File
+	if err := json.Unmarshal(bytes, &file); err != nil {
+		return nil, fmt.Errorf("failed to decode file: %w", err)
 	}
-	return &data, nil
+	return &file, nil
 }
 
 // decodeShareData deserializes shareData from JSON bytes.

@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 	"slices"
-	"strings"
 	"time"
 
 	badger "github.com/dgraph-io/badger/v4"
+	"github.com/google/uuid"
 	"github.com/marmos91/dittofs/internal/logger"
 	"github.com/marmos91/dittofs/pkg/store/metadata"
 )
@@ -26,27 +26,32 @@ import (
 //   - name: Name to resolve (including "." and "..")
 //
 // Returns:
-//   - FileHandle: Handle of the resolved file/directory
-//   - *FileAttr: Complete attributes of the resolved file/directory
+//   - *File: Complete file information (ID, ShareName, Path, and all attributes)
 //   - error: ErrNotFound, ErrNotDirectory, ErrAccessDenied, or context errors
 func (s *BadgerMetadataStore) Lookup(
 	ctx *metadata.AuthContext,
 	dirHandle metadata.FileHandle,
 	name string,
-) (metadata.FileHandle, *metadata.FileAttr, error) {
+) (*metadata.File, error) {
 	// Check context cancellation
 	if err := ctx.Context.Err(); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
-	// Acquire read lock to ensure consistency during read
+	// Decode directory handle to get UUID
+	_, dirID, err := metadata.DecodeFileHandle(dirHandle)
+	if err != nil {
+		return nil, &metadata.StoreError{
+			Code:    metadata.ErrInvalidHandle,
+			Message: "invalid directory handle",
+		}
+	}
 
-	var targetHandle metadata.FileHandle
-	var targetAttr *metadata.FileAttr
+	var targetFile *metadata.File
 
-	err := s.db.View(func(txn *badger.Txn) error {
+	err = s.db.View(func(txn *badger.Txn) error {
 		// Get directory data
-		item, err := txn.Get(keyFile(dirHandle))
+		item, err := txn.Get(keyFile(dirID))
 		if err == badger.ErrKeyNotFound {
 			return &metadata.StoreError{
 				Code:    metadata.ErrNotFound,
@@ -57,13 +62,13 @@ func (s *BadgerMetadataStore) Lookup(
 			return fmt.Errorf("failed to get directory: %w", err)
 		}
 
-		var dirData *fileData
+		var dirFile *metadata.File
 		err = item.Value(func(val []byte) error {
-			fd, err := decodeFileData(val)
+			f, err := decodeFile(val)
 			if err != nil {
 				return err
 			}
-			dirData = fd
+			dirFile = f
 			return nil
 		})
 		if err != nil {
@@ -71,7 +76,7 @@ func (s *BadgerMetadataStore) Lookup(
 		}
 
 		// Verify it's a directory
-		if dirData.Attr.Type != metadata.FileTypeDirectory {
+		if dirFile.Type != metadata.FileTypeDirectory {
 			return &metadata.StoreError{
 				Code:    metadata.ErrNotDirectory,
 				Message: "not a directory",
@@ -79,9 +84,7 @@ func (s *BadgerMetadataStore) Lookup(
 		}
 
 		// Check execute/traverse permission on directory (search permission)
-		// Release lock temporarily for CheckPermissions
 		granted, err := s.CheckPermissions(ctx, dirHandle, metadata.PermissionTraverse)
-
 		if err != nil {
 			return err
 		}
@@ -96,38 +99,37 @@ func (s *BadgerMetadataStore) Lookup(
 		switch name {
 		case ".":
 			// Current directory - return directory itself
-			targetHandle = dirHandle
-			targetAttr = dirData.Attr
+			targetFile = dirFile
 
 		case "..":
 			// Parent directory
-			parentItem, err := txn.Get(keyParent(dirHandle))
+			parentItem, err := txn.Get(keyParent(dirID))
 			if err == badger.ErrKeyNotFound {
 				// This is a root directory, ".." refers to itself
-				targetHandle = dirHandle
-				targetAttr = dirData.Attr
+				targetFile = dirFile
 			} else if err != nil {
 				return fmt.Errorf("failed to get parent: %w", err)
 			} else {
+				var parentID uuid.UUID
 				err = parentItem.Value(func(val []byte) error {
-					targetHandle = metadata.FileHandle(val)
-					return nil
+					parentID, err = uuid.FromBytes(val)
+					return err
 				})
 				if err != nil {
 					return err
 				}
 
-				// Get parent attributes
-				parentFileItem, err := txn.Get(keyFile(targetHandle))
+				// Get parent file
+				parentFileItem, err := txn.Get(keyFile(parentID))
 				if err != nil {
 					return fmt.Errorf("failed to get parent file: %w", err)
 				}
 				err = parentFileItem.Value(func(val []byte) error {
-					parentData, err := decodeFileData(val)
+					parentFile, err := decodeFile(val)
 					if err != nil {
 						return err
 					}
-					targetAttr = parentData.Attr
+					targetFile = parentFile
 					return nil
 				})
 				if err != nil {
@@ -137,7 +139,7 @@ func (s *BadgerMetadataStore) Lookup(
 
 		default:
 			// Regular name lookup
-			childItem, err := txn.Get(keyChild(dirHandle, name))
+			childItem, err := txn.Get(keyChild(dirID, name))
 			if err == badger.ErrKeyNotFound {
 				return &metadata.StoreError{
 					Code:    metadata.ErrNotFound,
@@ -149,16 +151,17 @@ func (s *BadgerMetadataStore) Lookup(
 				return fmt.Errorf("failed to lookup child: %w", err)
 			}
 
+			var childID uuid.UUID
 			err = childItem.Value(func(val []byte) error {
-				targetHandle = metadata.FileHandle(val)
-				return nil
+				childID, err = uuid.FromBytes(val)
+				return err
 			})
 			if err != nil {
 				return err
 			}
 
-			// Get child attributes
-			childFileItem, err := txn.Get(keyFile(targetHandle))
+			// Get child file
+			childFileItem, err := txn.Get(keyFile(childID))
 			if err == badger.ErrKeyNotFound {
 				return &metadata.StoreError{
 					Code:    metadata.ErrNotFound,
@@ -170,11 +173,11 @@ func (s *BadgerMetadataStore) Lookup(
 			}
 
 			err = childFileItem.Value(func(val []byte) error {
-				childData, err := decodeFileData(val)
+				childFile, err := decodeFile(val)
 				if err != nil {
 					return err
 				}
-				targetAttr = childData.Attr
+				targetFile = childFile
 				return nil
 			})
 			if err != nil {
@@ -186,15 +189,13 @@ func (s *BadgerMetadataStore) Lookup(
 	})
 
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
-	// Return a copy of attributes to prevent external modification
-	attrCopy := *targetAttr
-	return targetHandle, &attrCopy, nil
+	return targetFile, nil
 }
 
-// GetFile retrieves file attributes by handle.
+// GetFile retrieves complete file information by handle.
 //
 // This is a lightweight operation that only reads metadata without permission
 // checking using a BadgerDB read transaction.
@@ -206,31 +207,30 @@ func (s *BadgerMetadataStore) Lookup(
 //   - handle: The file handle to query
 //
 // Returns:
-//   - *FileAttr: Complete file attributes
+//   - *File: Complete file information (ID, ShareName, Path, and all attributes)
 //   - error: ErrNotFound, ErrInvalidHandle, or context errors
 func (s *BadgerMetadataStore) GetFile(
 	ctx context.Context,
 	handle metadata.FileHandle,
-) (*metadata.FileAttr, error) {
+) (*metadata.File, error) {
 	// Check context cancellation
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
-	// Check for invalid (empty) handle
-	if len(handle) == 0 {
+	// Decode handle to get UUID
+	_, fileID, err := metadata.DecodeFileHandle(handle)
+	if err != nil {
 		return nil, &metadata.StoreError{
 			Code:    metadata.ErrInvalidHandle,
 			Message: "invalid file handle",
 		}
 	}
 
-	// Acquire read lock to ensure consistency during read
+	var file *metadata.File
 
-	var attr *metadata.FileAttr
-
-	err := s.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(keyFile(handle))
+	err = s.db.View(func(txn *badger.Txn) error {
+		item, err := txn.Get(keyFile(fileID))
 		if err == badger.ErrKeyNotFound {
 			return &metadata.StoreError{
 				Code:    metadata.ErrNotFound,
@@ -242,11 +242,11 @@ func (s *BadgerMetadataStore) GetFile(
 		}
 
 		return item.Value(func(val []byte) error {
-			fileData, err := decodeFileData(val)
+			f, err := decodeFile(val)
 			if err != nil {
 				return err
 			}
-			attr = fileData.Attr
+			file = f
 			return nil
 		})
 	})
@@ -255,19 +255,16 @@ func (s *BadgerMetadataStore) GetFile(
 		return nil, err
 	}
 
-	// Return a copy to prevent external modification
-	attrCopy := *attr
-	return &attrCopy, nil
+	return file, nil
 }
 
 // GetShareNameForHandle returns the share name for a given file handle.
 //
-// This works with both path-based and hash-based handles by looking up the
-// file metadata which contains the ShareName field.
+// This works with UUID-based handles by decoding the handle format.
 //
 // Parameters:
 //   - ctx: Context for cancellation
-//   - handle: File handle (path-based or hash-based)
+//   - handle: File handle (UUID-based)
 //
 // Returns:
 //   - string: Share name the file belongs to
@@ -281,40 +278,13 @@ func (s *BadgerMetadataStore) GetShareNameForHandle(
 		return "", err
 	}
 
-	// Check for invalid (empty) handle
-	if len(handle) == 0 {
+	// Decode handle to extract share name
+	shareName, _, err := metadata.DecodeFileHandle(handle)
+	if err != nil {
 		return "", &metadata.StoreError{
 			Code:    metadata.ErrInvalidHandle,
 			Message: "invalid file handle",
 		}
-	}
-
-	var shareName string
-
-	err := s.db.View(func(txn *badger.Txn) error {
-		item, err := txn.Get(keyFile(handle))
-		if err == badger.ErrKeyNotFound {
-			return &metadata.StoreError{
-				Code:    metadata.ErrNotFound,
-				Message: "file not found",
-			}
-		}
-		if err != nil {
-			return fmt.Errorf("failed to get file: %w", err)
-		}
-
-		return item.Value(func(val []byte) error {
-			fileData, err := decodeFileData(val)
-			if err != nil {
-				return err
-			}
-			shareName = fileData.ShareName
-			return nil
-		})
-	})
-
-	if err != nil {
-		return "", err
 	}
 
 	return shareName, nil
@@ -344,9 +314,18 @@ func (s *BadgerMetadataStore) SetFileAttributes(
 		return err
 	}
 
+	// Decode handle to get UUID
+	_, fileID, err := metadata.DecodeFileHandle(handle)
+	if err != nil {
+		return &metadata.StoreError{
+			Code:    metadata.ErrInvalidHandle,
+			Message: "invalid file handle",
+		}
+	}
+
 	return s.db.Update(func(txn *badger.Txn) error {
 		// Get file data
-		item, err := txn.Get(keyFile(handle))
+		item, err := txn.Get(keyFile(fileID))
 		if err == badger.ErrKeyNotFound {
 			return &metadata.StoreError{
 				Code:    metadata.ErrNotFound,
@@ -357,20 +336,18 @@ func (s *BadgerMetadataStore) SetFileAttributes(
 			return fmt.Errorf("failed to get file: %w", err)
 		}
 
-		var fileData *fileData
+		var file *metadata.File
 		err = item.Value(func(val []byte) error {
-			fd, err := decodeFileData(val)
+			f, err := decodeFile(val)
 			if err != nil {
 				return err
 			}
-			fileData = fd
+			file = f
 			return nil
 		})
 		if err != nil {
 			return err
 		}
-
-		attr := fileData.Attr
 
 		identity := ctx.Identity
 		if identity == nil || identity.UID == nil {
@@ -381,7 +358,7 @@ func (s *BadgerMetadataStore) SetFileAttributes(
 		}
 
 		uid := *identity.UID
-		isOwner := uid == attr.UID
+		isOwner := uid == file.UID
 		isRoot := uid == 0
 
 		// Track if any changes were made (for ctime update)
@@ -397,7 +374,7 @@ func (s *BadgerMetadataStore) SetFileAttributes(
 			}
 
 			newMode := *attrs.Mode & 0o7777
-			attr.Mode = newMode
+			file.Mode = newMode
 			changed = true
 		}
 
@@ -410,7 +387,7 @@ func (s *BadgerMetadataStore) SetFileAttributes(
 				}
 			}
 
-			attr.UID = *attrs.UID
+			file.UID = *attrs.UID
 			changed = true
 		}
 
@@ -442,13 +419,13 @@ func (s *BadgerMetadataStore) SetFileAttributes(
 				}
 			}
 
-			attr.GID = *attrs.GID
+			file.GID = *attrs.GID
 			changed = true
 		}
 
 		// Validate and apply size changes
 		if attrs.Size != nil {
-			if attr.Type != metadata.FileTypeRegular {
+			if file.Type != metadata.FileTypeRegular {
 				return &metadata.StoreError{
 					Code:    metadata.ErrInvalidArgument,
 					Message: "cannot change size of non-regular file",
@@ -467,8 +444,8 @@ func (s *BadgerMetadataStore) SetFileAttributes(
 				}
 			}
 
-			attr.Size = *attrs.Size
-			attr.Mtime = time.Now()
+			file.Size = *attrs.Size
+			file.Mtime = time.Now()
 			changed = true
 		}
 
@@ -487,7 +464,7 @@ func (s *BadgerMetadataStore) SetFileAttributes(
 				}
 			}
 
-			attr.Atime = *attrs.Atime
+			file.Atime = *attrs.Atime
 			changed = true
 		}
 
@@ -506,20 +483,20 @@ func (s *BadgerMetadataStore) SetFileAttributes(
 				}
 			}
 
-			attr.Mtime = *attrs.Mtime
+			file.Mtime = *attrs.Mtime
 			changed = true
 		}
 
 		// Update ctime if any changes were made
 		if changed {
-			attr.Ctime = time.Now()
+			file.Ctime = time.Now()
 
 			// Store updated file data
-			fileBytes, err := encodeFileData(fileData)
+			fileBytes, err := encodeFile(file)
 			if err != nil {
 				return err
 			}
-			if err := txn.Set(keyFile(handle), fileBytes); err != nil {
+			if err := txn.Set(keyFile(fileID), fileBytes); err != nil {
 				return fmt.Errorf("failed to update file data: %w", err)
 			}
 		}
@@ -542,14 +519,14 @@ func (s *BadgerMetadataStore) SetFileAttributes(
 //   - attr: Attributes including Type (must be Regular or Directory)
 //
 // Returns:
-//   - FileHandle: Handle of the newly created file/directory
+//   - *File: Complete file information for the newly created file/directory
 //   - error: ErrInvalidArgument, ErrAccessDenied, ErrAlreadyExists, or other errors
 func (s *BadgerMetadataStore) Create(
 	ctx *metadata.AuthContext,
 	parentHandle metadata.FileHandle,
 	name string,
 	attr *metadata.FileAttr,
-) (metadata.FileHandle, error) {
+) (*metadata.File, error) {
 	// Check context cancellation
 	if err := ctx.Context.Err(); err != nil {
 		return nil, err
@@ -572,11 +549,20 @@ func (s *BadgerMetadataStore) Create(
 		}
 	}
 
-	var newHandle metadata.FileHandle
+	// Decode parent handle
+	shareName, parentID, err := metadata.DecodeFileHandle(parentHandle)
+	if err != nil {
+		return nil, &metadata.StoreError{
+			Code:    metadata.ErrInvalidHandle,
+			Message: "invalid parent handle",
+		}
+	}
 
-	err := s.db.Update(func(txn *badger.Txn) error {
+	var newFile *metadata.File
+
+	err = s.db.Update(func(txn *badger.Txn) error {
 		// Verify parent exists and is a directory
-		item, err := txn.Get(keyFile(parentHandle))
+		item, err := txn.Get(keyFile(parentID))
 		if err == badger.ErrKeyNotFound {
 			return &metadata.StoreError{
 				Code:    metadata.ErrNotFound,
@@ -587,20 +573,20 @@ func (s *BadgerMetadataStore) Create(
 			return fmt.Errorf("failed to get parent: %w", err)
 		}
 
-		var parentData *fileData
+		var parentFile *metadata.File
 		err = item.Value(func(val []byte) error {
-			pd, err := decodeFileData(val)
+			pf, err := decodeFile(val)
 			if err != nil {
 				return err
 			}
-			parentData = pd
+			parentFile = pf
 			return nil
 		})
 		if err != nil {
 			return err
 		}
 
-		if parentData.Attr.Type != metadata.FileTypeDirectory {
+		if parentFile.Type != metadata.FileTypeDirectory {
 			return &metadata.StoreError{
 				Code:    metadata.ErrNotDirectory,
 				Message: "parent is not a directory",
@@ -620,7 +606,7 @@ func (s *BadgerMetadataStore) Create(
 		}
 
 		// Check if name already exists
-		_, err = txn.Get(keyChild(parentHandle, name))
+		_, err = txn.Get(keyChild(parentID, name))
 		if err == nil {
 			return &metadata.StoreError{
 				Code:    metadata.ErrAlreadyExists,
@@ -631,21 +617,11 @@ func (s *BadgerMetadataStore) Create(
 			return fmt.Errorf("failed to check child existence: %w", err)
 		}
 
-		// Build full path and generate deterministic handle
-		fullPath, err := buildFullPath(s, parentHandle, name)
-		if err != nil {
-			return fmt.Errorf("failed to build full path: %w", err)
-		}
+		// Generate UUID for new file
+		newID := uuid.New()
 
-		handle, isPathBased := generateFileHandle(parentData.ShareName, fullPath)
-		newHandle = handle
-
-		// If hash-based, store the reverse mapping
-		if !isPathBased {
-			if err := storeHashedHandleMapping(txn, handle, parentData.ShareName, fullPath); err != nil {
-				return fmt.Errorf("failed to store handle mapping: %w", err)
-			}
-		}
+		// Build full path
+		fullPath := buildFullPath(parentFile.Path, name)
 
 		now := time.Now()
 
@@ -671,55 +647,43 @@ func (s *BadgerMetadataStore) Create(
 			}
 		}
 
-		// Complete file attributes
-		newAttr := &metadata.FileAttr{
-			Type:       attr.Type,
-			Mode:       mode & 0o7777,
-			UID:        uid,
-			GID:        gid,
-			Size:       0,
-			Atime:      now,
-			Mtime:      now,
-			Ctime:      now,
-			LinkTarget: "",
+		// Create file
+		newFile = &metadata.File{
+			ID:        newID,
+			ShareName: shareName,
+			Path:      fullPath,
+			FileAttr: metadata.FileAttr{
+				Type:       attr.Type,
+				Mode:       mode & 0o7777,
+				UID:        uid,
+				GID:        gid,
+				Size:       0,
+				Atime:      now,
+				Mtime:      now,
+				Ctime:      now,
+				LinkTarget: "",
+			},
 		}
 
 		// Type-specific initialization
 		if attr.Type == metadata.FileTypeRegular {
 			// Generate ContentID for regular files
-			// Format: shareName/path/to/file (e.g., "export/docs/report.pdf")
-			// This mirrors the filesystem structure in S3 for easy inspection and recovery
+			contentID := buildContentID(shareName, fullPath)
+			newFile.ContentID = metadata.ContentID(contentID)
 
-			// Extract relative path from fullPath
-			// fullPath format: /<shareName>:/<relative-path>
-			// Example: /export:/scripts/file.txt -> /scripts/file.txt
-			// Note: In some contexts (e.g., tests), fullPath may not have a share prefix,
-			// in which case we use the entire path as the relative path.
-			relativePath := fullPath
-			if colonIndex := strings.Index(fullPath, ":"); colonIndex != -1 {
-				relativePath = fullPath[colonIndex+1:]
-			}
-
-			contentID := buildContentID(parentData.ShareName, relativePath)
-			newAttr.ContentID = metadata.ContentID(contentID)
-
-			// Log ContentID generation for debugging (only at Debug level to avoid log spam)
-			logger.Debug("Generated ContentID: file='%s' fullPath='%s' relativePath='%s' contentID='%s'",
-				name, fullPath, relativePath, contentID)
+			// Log ContentID generation for debugging
+			logger.Debug("Generated ContentID: file='%s' fullPath='%s' contentID='%s'",
+				name, fullPath, contentID)
 		} else {
-			newAttr.ContentID = ""
+			newFile.ContentID = ""
 		}
 
-		// Store file with ShareName inherited from parent
-		fileData := &fileData{
-			Attr:      newAttr,
-			ShareName: parentData.ShareName,
-		}
-		fileBytes, err := encodeFileData(fileData)
+		// Store file
+		fileBytes, err := encodeFile(newFile)
 		if err != nil {
 			return err
 		}
-		if err := txn.Set(keyFile(handle), fileBytes); err != nil {
+		if err := txn.Set(keyFile(newID), fileBytes); err != nil {
 			return fmt.Errorf("failed to store file: %w", err)
 		}
 
@@ -730,28 +694,28 @@ func (s *BadgerMetadataStore) Create(
 		} else {
 			linkCount = 1
 		}
-		if err := txn.Set(keyLinkCount(handle), encodeUint32(linkCount)); err != nil {
+		if err := txn.Set(keyLinkCount(newID), encodeUint32(linkCount)); err != nil {
 			return fmt.Errorf("failed to store link count: %w", err)
 		}
 
-		// Add to parent's children
-		if err := txn.Set(keyChild(parentHandle, name), []byte(handle)); err != nil {
+		// Add to parent's children (store UUID bytes)
+		if err := txn.Set(keyChild(parentID, name), newID[:]); err != nil {
 			return fmt.Errorf("failed to add child: %w", err)
 		}
 
-		// Set parent relationship
-		if err := txn.Set(keyParent(handle), []byte(parentHandle)); err != nil {
+		// Set parent relationship (store UUID bytes)
+		if err := txn.Set(keyParent(newID), parentID[:]); err != nil {
 			return fmt.Errorf("failed to set parent: %w", err)
 		}
 
 		// Update parent timestamps
-		parentData.Attr.Mtime = now
-		parentData.Attr.Ctime = now
-		parentBytes, err := encodeFileData(parentData)
+		parentFile.Mtime = now
+		parentFile.Ctime = now
+		parentBytes, err := encodeFile(parentFile)
 		if err != nil {
 			return err
 		}
-		if err := txn.Set(keyFile(parentHandle), parentBytes); err != nil {
+		if err := txn.Set(keyFile(parentID), parentBytes); err != nil {
 			return fmt.Errorf("failed to update parent: %w", err)
 		}
 
@@ -762,204 +726,37 @@ func (s *BadgerMetadataStore) Create(
 		return nil, err
 	}
 
-	return newHandle, nil
+	return newFile, nil
 }
 
 // CreateHardLink creates a hard link to an existing file.
 //
-// This uses a BadgerDB write transaction to atomically create the link and
-// increment the link count.
+// TODO: This is a stub implementation. Hard links need proper implementation
+// in BadgerDB with link count tracking and proper handle management.
 //
-// Thread Safety: Safe for concurrent use.
-//
-// Parameters:
-//   - ctx: Authentication context for permission checking
-//   - dirHandle: Target directory where the link will be created
-//   - name: Name for the new link
-//   - targetHandle: File to link to
-//
-// Returns:
-//   - error: Various errors based on validation failures
+// For now, this returns ErrNotSupported to indicate the feature is not yet implemented.
 func (s *BadgerMetadataStore) CreateHardLink(
 	ctx *metadata.AuthContext,
 	dirHandle metadata.FileHandle,
 	name string,
 	targetHandle metadata.FileHandle,
 ) error {
-	// Check context cancellation
-	if err := ctx.Context.Err(); err != nil {
-		return err
+	return &metadata.StoreError{
+		Code:    metadata.ErrNotSupported,
+		Message: "hard links not yet implemented in BadgerDB",
 	}
-
-	// Validate name
-	if name == "" || name == "." || name == ".." {
-		return &metadata.StoreError{
-			Code:    metadata.ErrInvalidArgument,
-			Message: "invalid name",
-			Path:    name,
-		}
-	}
-
-	err := s.db.Update(func(txn *badger.Txn) error {
-		// Verify target exists and is not a directory
-		targetItem, err := txn.Get(keyFile(targetHandle))
-		if err == badger.ErrKeyNotFound {
-			return &metadata.StoreError{
-				Code:    metadata.ErrNotFound,
-				Message: "target file not found",
-			}
-		}
-		if err != nil {
-			return fmt.Errorf("failed to get target: %w", err)
-		}
-
-		var targetData *fileData
-		err = targetItem.Value(func(val []byte) error {
-			td, err := decodeFileData(val)
-			if err != nil {
-				return err
-			}
-			targetData = td
-			return nil
-		})
-		if err != nil {
-			return err
-		}
-
-		if targetData.Attr.Type == metadata.FileTypeDirectory {
-			return &metadata.StoreError{
-				Code:    metadata.ErrIsDirectory,
-				Message: "cannot create hard link to directory",
-			}
-		}
-
-		// Verify directory exists
-		dirItem, err := txn.Get(keyFile(dirHandle))
-		if err == badger.ErrKeyNotFound {
-			return &metadata.StoreError{
-				Code:    metadata.ErrNotFound,
-				Message: "directory not found",
-			}
-		}
-		if err != nil {
-			return fmt.Errorf("failed to get directory: %w", err)
-		}
-
-		var dirData *fileData
-		err = dirItem.Value(func(val []byte) error {
-			dd, err := decodeFileData(val)
-			if err != nil {
-				return err
-			}
-			dirData = dd
-			return nil
-		})
-		if err != nil {
-			return err
-		}
-
-		if dirData.Attr.Type != metadata.FileTypeDirectory {
-			return &metadata.StoreError{
-				Code:    metadata.ErrNotDirectory,
-				Message: "not a directory",
-			}
-		}
-
-		// Check write permission on directory
-		granted, err := s.CheckPermissions(ctx, dirHandle, metadata.PermissionWrite)
-		if err != nil {
-			return err
-		}
-		if granted&metadata.PermissionWrite == 0 {
-			return &metadata.StoreError{
-				Code:    metadata.ErrAccessDenied,
-				Message: "no write permission on directory",
-			}
-		}
-
-		// Check if name already exists
-		_, err = txn.Get(keyChild(dirHandle, name))
-		if err == nil {
-			return &metadata.StoreError{
-				Code:    metadata.ErrAlreadyExists,
-				Message: fmt.Sprintf("name already exists: %s", name),
-				Path:    name,
-			}
-		} else if err != badger.ErrKeyNotFound {
-			return fmt.Errorf("failed to check child existence: %w", err)
-		}
-
-		// Add link
-		if err := txn.Set(keyChild(dirHandle, name), []byte(targetHandle)); err != nil {
-			return fmt.Errorf("failed to add child: %w", err)
-		}
-
-		// Increment link count
-		linkCountItem, err := txn.Get(keyLinkCount(targetHandle))
-		if err != nil {
-			return fmt.Errorf("failed to get link count: %w", err)
-		}
-
-		var linkCount uint32
-		err = linkCountItem.Value(func(val []byte) error {
-			lc, err := decodeUint32(val)
-			if err != nil {
-				return err
-			}
-			linkCount = lc
-			return nil
-		})
-		if err != nil {
-			return err
-		}
-
-		linkCount++
-		if err := txn.Set(keyLinkCount(targetHandle), encodeUint32(linkCount)); err != nil {
-			return fmt.Errorf("failed to update link count: %w", err)
-		}
-
-		// Update target ctime and directory timestamps
-		now := time.Now()
-		targetData.Attr.Ctime = now
-		targetBytes, err := encodeFileData(targetData)
-		if err != nil {
-			return err
-		}
-		if err := txn.Set(keyFile(targetHandle), targetBytes); err != nil {
-			return fmt.Errorf("failed to update target: %w", err)
-		}
-
-		dirData.Attr.Mtime = now
-		dirData.Attr.Ctime = now
-		dirBytes, err := encodeFileData(dirData)
-		if err != nil {
-			return err
-		}
-		if err := txn.Set(keyFile(dirHandle), dirBytes); err != nil {
-			return fmt.Errorf("failed to update directory: %w", err)
-		}
-
-		return nil
-	})
-
-	return err
 }
 
 // Move moves or renames a file or directory atomically.
 //
-// This uses a BadgerDB write transaction to ensure all changes are atomic.
+// TODO: This is a stub implementation. Move/rename operations need proper implementation
+// in BadgerDB with:
+// - Atomic update of parent-child relationships
+// - Proper handling of cross-directory moves
+// - Timestamp updates for source and destination directories
+// - Validation of replacement semantics (file over file, dir over empty dir, etc.)
 //
-// Thread Safety: Safe for concurrent use.
-//
-// Parameters:
-//   - ctx: Authentication context for permission checking
-//   - fromDir: Source directory handle
-//   - fromName: Current name
-//   - toDir: Destination directory handle
-//   - toName: New name
-//
-// Returns:
-//   - error: Various errors based on validation failures
+// For now, this returns ErrNotSupported to indicate the feature is not yet implemented.
 func (s *BadgerMetadataStore) Move(
 	ctx *metadata.AuthContext,
 	fromDir metadata.FileHandle,
@@ -967,272 +764,8 @@ func (s *BadgerMetadataStore) Move(
 	toDir metadata.FileHandle,
 	toName string,
 ) error {
-	// Check context cancellation
-	if err := ctx.Context.Err(); err != nil {
-		return err
+	return &metadata.StoreError{
+		Code:    metadata.ErrNotSupported,
+		Message: "move/rename not yet implemented in BadgerDB",
 	}
-
-	// Validate names
-	if fromName == "" || fromName == "." || fromName == ".." {
-		return &metadata.StoreError{
-			Code:    metadata.ErrInvalidArgument,
-			Message: "invalid source name",
-			Path:    fromName,
-		}
-	}
-	if toName == "" || toName == "." || toName == ".." {
-		return &metadata.StoreError{
-			Code:    metadata.ErrInvalidArgument,
-			Message: "invalid destination name",
-			Path:    toName,
-		}
-	}
-
-	err := s.db.Update(func(txn *badger.Txn) error {
-		// Get source handle
-		sourceItem, err := txn.Get(keyChild(fromDir, fromName))
-		if err == badger.ErrKeyNotFound {
-			return &metadata.StoreError{
-				Code:    metadata.ErrNotFound,
-				Message: fmt.Sprintf("source not found: %s", fromName),
-				Path:    fromName,
-			}
-		}
-		if err != nil {
-			return fmt.Errorf("failed to get source: %w", err)
-		}
-
-		var sourceHandle metadata.FileHandle
-		err = sourceItem.Value(func(val []byte) error {
-			sourceHandle = metadata.FileHandle(val)
-			return nil
-		})
-		if err != nil {
-			return err
-		}
-
-		// Check if same location (no-op)
-		if handleToKey(fromDir) == handleToKey(toDir) && fromName == toName {
-			return nil
-		}
-
-		// Get source data
-		sourceFileItem, err := txn.Get(keyFile(sourceHandle))
-		if err != nil {
-			return fmt.Errorf("failed to get source file: %w", err)
-		}
-
-		var sourceData *fileData
-		err = sourceFileItem.Value(func(val []byte) error {
-			sd, err := decodeFileData(val)
-			if err != nil {
-				return err
-			}
-			sourceData = sd
-			return nil
-		})
-		if err != nil {
-			return err
-		}
-
-		// Check write permission on source directory
-		granted, err := s.CheckPermissions(ctx, fromDir, metadata.PermissionWrite)
-		if err != nil {
-			return err
-		}
-		if granted&metadata.PermissionWrite == 0 {
-			return &metadata.StoreError{
-				Code:    metadata.ErrAccessDenied,
-				Message: "no write permission on source directory",
-			}
-		}
-
-		// Check write permission on destination directory
-		granted, err = s.CheckPermissions(ctx, toDir, metadata.PermissionWrite)
-		if err != nil {
-			return err
-		}
-		if granted&metadata.PermissionWrite == 0 {
-			return &metadata.StoreError{
-				Code:    metadata.ErrAccessDenied,
-				Message: "no write permission on destination directory",
-			}
-		}
-
-		// Check if destination exists
-		destChildItem, err := txn.Get(keyChild(toDir, toName))
-		if err == nil {
-			// Destination exists - handle replacement
-			var destHandle metadata.FileHandle
-			err = destChildItem.Value(func(val []byte) error {
-				destHandle = metadata.FileHandle(val)
-				return nil
-			})
-			if err != nil {
-				return err
-			}
-
-			// Get destination data
-			destFileItem, err := txn.Get(keyFile(destHandle))
-			if err != nil {
-				return fmt.Errorf("failed to get destination file: %w", err)
-			}
-
-			var destData *fileData
-			err = destFileItem.Value(func(val []byte) error {
-				dd, err := decodeFileData(val)
-				if err != nil {
-					return err
-				}
-				destData = dd
-				return nil
-			})
-			if err != nil {
-				return err
-			}
-
-			// Validate replacement rules
-			if sourceData.Attr.Type == metadata.FileTypeDirectory {
-				if destData.Attr.Type != metadata.FileTypeDirectory {
-					return &metadata.StoreError{
-						Code:    metadata.ErrNotDirectory,
-						Message: "cannot replace non-directory with directory",
-					}
-				}
-				// Check if destination directory is empty
-				opts := badger.DefaultIteratorOptions
-				opts.Prefix = keyChildPrefix(destHandle)
-				opts.PrefetchValues = false
-
-				it := txn.NewIterator(opts)
-				defer it.Close()
-
-				it.Rewind()
-				if it.Valid() {
-					return &metadata.StoreError{
-						Code:    metadata.ErrNotEmpty,
-						Message: "destination directory not empty",
-						Path:    toName,
-					}
-				}
-			} else {
-				if destData.Attr.Type == metadata.FileTypeDirectory {
-					return &metadata.StoreError{
-						Code:    metadata.ErrIsDirectory,
-						Message: "cannot replace directory with non-directory",
-					}
-				}
-			}
-
-			// Remove destination - properly cleanup all metadata
-			if err := txn.Delete(keyChild(toDir, toName)); err != nil {
-				return fmt.Errorf("failed to remove destination child: %w", err)
-			}
-			// Delete destination file metadata
-			if err := txn.Delete(keyFile(destHandle)); err != nil {
-				return fmt.Errorf("failed to delete destination file: %w", err)
-			}
-			if err := txn.Delete(keyLinkCount(destHandle)); err != nil && err != badger.ErrKeyNotFound {
-				return fmt.Errorf("failed to delete destination link count: %w", err)
-			}
-			if err := txn.Delete(keyParent(destHandle)); err != nil && err != badger.ErrKeyNotFound {
-				return fmt.Errorf("failed to delete destination parent: %w", err)
-			}
-			// Clean up device numbers and handle mapping if present (ignore not found)
-			_ = txn.Delete(keyDeviceNumber(destHandle))
-			_ = txn.Delete(keyHandleMapping(destHandle))
-		} else if err != badger.ErrKeyNotFound {
-			return fmt.Errorf("failed to check destination: %w", err)
-		}
-
-		// Remove from source directory
-		if err := txn.Delete(keyChild(fromDir, fromName)); err != nil {
-			return fmt.Errorf("failed to remove from source: %w", err)
-		}
-
-		// Add to destination directory
-		if err := txn.Set(keyChild(toDir, toName), []byte(sourceHandle)); err != nil {
-			return fmt.Errorf("failed to add to destination: %w", err)
-		}
-
-		// Update parent if different directory
-		if handleToKey(fromDir) != handleToKey(toDir) {
-			if err := txn.Set(keyParent(sourceHandle), []byte(toDir)); err != nil {
-				return fmt.Errorf("failed to update parent: %w", err)
-			}
-		}
-
-		// Update timestamps
-		now := time.Now()
-		sourceData.Attr.Ctime = now
-
-		// Update source file
-		sourceBytes, err := encodeFileData(sourceData)
-		if err != nil {
-			return err
-		}
-		if err := txn.Set(keyFile(sourceHandle), sourceBytes); err != nil {
-			return fmt.Errorf("failed to update source file: %w", err)
-		}
-
-		// Update source directory
-		fromDirItem, err := txn.Get(keyFile(fromDir))
-		if err != nil {
-			return fmt.Errorf("failed to get source directory: %w", err)
-		}
-		var fromDirData *fileData
-		err = fromDirItem.Value(func(val []byte) error {
-			dd, err := decodeFileData(val)
-			if err != nil {
-				return err
-			}
-			fromDirData = dd
-			return nil
-		})
-		if err != nil {
-			return err
-		}
-		fromDirData.Attr.Mtime = now
-		fromDirData.Attr.Ctime = now
-		fromDirBytes, err := encodeFileData(fromDirData)
-		if err != nil {
-			return err
-		}
-		if err := txn.Set(keyFile(fromDir), fromDirBytes); err != nil {
-			return fmt.Errorf("failed to update source directory: %w", err)
-		}
-
-		// Update destination directory if different
-		if handleToKey(fromDir) != handleToKey(toDir) {
-			toDirItem, err := txn.Get(keyFile(toDir))
-			if err != nil {
-				return fmt.Errorf("failed to get destination directory: %w", err)
-			}
-			var toDirData *fileData
-			err = toDirItem.Value(func(val []byte) error {
-				dd, err := decodeFileData(val)
-				if err != nil {
-					return err
-				}
-				toDirData = dd
-				return nil
-			})
-			if err != nil {
-				return err
-			}
-			toDirData.Attr.Mtime = now
-			toDirData.Attr.Ctime = now
-			toDirBytes, err := encodeFileData(toDirData)
-			if err != nil {
-				return err
-			}
-			if err := txn.Set(keyFile(toDir), toDirBytes); err != nil {
-				return fmt.Errorf("failed to update destination directory: %w", err)
-			}
-		}
-
-		return nil
-	})
-
-	return err
 }

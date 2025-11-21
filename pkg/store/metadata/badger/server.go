@@ -281,13 +281,13 @@ func (s *BadgerMetadataStore) GetFilesystemStatistics(ctx context.Context, handl
 
 			item := it.Item()
 			err := item.Value(func(val []byte) error {
-				fileData, err := decodeFileData(val)
+				file, err := decodeFile(val)
 				if err != nil {
 					return err
 				}
 
 				fileCount++
-				usedSize += fileData.Attr.Size
+				usedSize += file.Size
 				return nil
 			})
 			if err != nil {

@@ -79,7 +79,7 @@ func (r *Registry) ApplyIdentityMapping(shareName string, identity *metadata.Ide
 func (r *Registry) GetShareNameForHandle(ctx context.Context, handle metadata.FileHandle) (string, error) {
 	// Decode the share name from the handle (format: "shareName:/path")
 	// For simplicity, we can just call DecodeShareHandle from metadata package
-	shareName, _, err := metadata.DecodeShareHandle(handle)
+	shareName, _, err := metadata.DecodeFileHandle(handle)
 	if err != nil {
 		return "", fmt.Errorf("failed to decode share handle: %w", err)
 	}
