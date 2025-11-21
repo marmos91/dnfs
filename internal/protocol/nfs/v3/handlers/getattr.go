@@ -179,7 +179,7 @@ func (h *Handler) GetAttr(
 	// ========================================================================
 
 	fileHandle := metadata.FileHandle(req.Handle)
-	shareName, path, err := metadata.DecodeFileHandle(fileHandle)
+	shareName, _, err := metadata.DecodeFileHandle(fileHandle)
 	if err != nil {
 		logger.Warn("GETATTR failed: invalid file handle: handle=%x client=%s error=%v",
 			req.Handle, clientIP, err)
@@ -201,13 +201,11 @@ func (h *Handler) GetAttr(
 		return &GetAttrResponse{NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrIO}}, nil
 	}
 
-	logger.Debug("GETATTR: share=%s path=%s", shareName, path)
-
 	// ========================================================================
 	// Step 3: Verify file handle exists and retrieve attributes
 	// ========================================================================
 
-	attr, err := metadataStore.GetFile(ctx.Context, fileHandle)
+	file, err := metadataStore.GetFile(ctx.Context, fileHandle)
 	if err != nil {
 		// Check if the error is due to context cancellation
 		if ctx.Context.Err() != nil {
@@ -221,6 +219,8 @@ func (h *Handler) GetAttr(
 		return &GetAttrResponse{NFSResponseBase: NFSResponseBase{Status: types.NFS3ErrStale}}, nil
 	}
 
+	logger.Debug("GETATTR: share=%s path=%s", shareName, file.Path)
+
 	// ========================================================================
 	// Step 4: Generate file attributes with proper file ID
 	// ========================================================================
@@ -229,7 +229,7 @@ func (h *Handler) GetAttr(
 	// No cancellation check here - this operation is extremely fast (pure computation)
 
 	fileid := xdr.ExtractFileID(fileHandle)
-	nfsAttr := xdr.MetadataToNFS(attr, fileid)
+	nfsAttr := xdr.MetadataToNFS(&file.FileAttr, fileid)
 
 	logger.Info("GETATTR successful: handle=%x type=%d mode=%o size=%d client=%s",
 		req.Handle, nfsAttr.Type, nfsAttr.Mode, nfsAttr.Size, clientIP)
