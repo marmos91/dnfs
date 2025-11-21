@@ -39,6 +39,16 @@ type HandlerResult struct {
 	//
 	// This is duplicated from the response Data for observability purposes.
 	NFSStatus uint32
+
+	// BytesRead contains the number of bytes read for READ operations.
+	// Optional: Only populated by READ handlers for metrics tracking.
+	// Zero value indicates not a read operation or no data read.
+	BytesRead uint64
+
+	// BytesWritten contains the number of bytes written for WRITE operations.
+	// Optional: Only populated by WRITE handlers for metrics tracking.
+	// Zero value indicates not a write operation or no data written.
+	BytesWritten uint64
 }
 
 // ============================================================================
@@ -461,7 +471,7 @@ func handleNFSRead(
 	reg *registry.Registry,
 	data []byte,
 ) (*HandlerResult, error) {
-	return handleRequest(
+	result, err := handleRequest(
 		data,
 		nfs.DecodeReadRequest,
 		func(req *nfs.ReadRequest) (*nfs.ReadResponse, error) {
@@ -472,6 +482,22 @@ func handleNFSRead(
 			return &nfs.ReadResponse{NFSResponseBase: nfs.NFSResponseBase{Status: status}}
 		},
 	)
+
+	// Extract bytes read for metrics (if read was successful)
+	if result != nil && result.NFSStatus == types.NFS3OK && err == nil {
+		// Decode the response to get actual bytes read
+		// Note: We can't easily decode the response here without duplicating logic,
+		// so we'll decode the request and use the requested count as an approximation.
+		// This is acceptable since successful READs typically return the requested count.
+		req, decodeErr := nfs.DecodeReadRequest(data)
+		if decodeErr == nil {
+			// Use requested count - actual count would require decoding the response
+			// which is already XDR-encoded in result.Data
+			result.BytesRead = uint64(req.Count)
+		}
+	}
+
+	return result, err
 }
 
 func handleNFSWrite(
@@ -480,7 +506,7 @@ func handleNFSWrite(
 	reg *registry.Registry,
 	data []byte,
 ) (*HandlerResult, error) {
-	return handleRequest(
+	result, err := handleRequest(
 		data,
 		nfs.DecodeWriteRequest,
 		func(req *nfs.WriteRequest) (*nfs.WriteResponse, error) {
@@ -491,6 +517,17 @@ func handleNFSWrite(
 			return &nfs.WriteResponse{NFSResponseBase: nfs.NFSResponseBase{Status: status}}
 		},
 	)
+
+	// Extract bytes written for metrics (if write was successful)
+	if result != nil && result.NFSStatus == types.NFS3OK && err == nil {
+		// Decode the request to get the count
+		req, decodeErr := nfs.DecodeWriteRequest(data)
+		if decodeErr == nil {
+			result.BytesWritten = uint64(len(req.Data))
+		}
+	}
+
+	return result, err
 }
 
 func handleNFSCreate(

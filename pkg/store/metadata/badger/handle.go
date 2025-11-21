@@ -14,52 +14,30 @@ import (
 //
 // DittoFS uses path-based file handles to enable filesystem import/export and
 // metadata reconstruction from content stores. The handle format is designed to
-// be deterministic (same path = same handle), reversible (can extract path from
-// handle), and NFS-compatible (under 64 bytes for most paths).
+// be deterministic (same path = same handle) and reversible (can extract path
+// from handle).
 //
-// Handle Formats:
-//
-// 1. Path-Based (Primary) - For paths that fit in NFS limit
+// Handle Format:
 //    Format: "shareName:fullPath"
 //    Example: "/export:/images/photo.jpg" → []byte("/export:/images/photo.jpg")
-//    Size: Variable, typically 20-50 bytes
-//    Used when: len(shareName + ":" + fullPath) <= 64 bytes
+//    Size: Variable, typically 20-200 bytes
+//    Limit: 256 bytes (aligned with typical OS filename limits)
 //
-// 2. Hash-Based (Fallback) - For very long paths exceeding NFS limit
-//    Format: "H:" + sha256(shareName:fullPath)[:30]
-//    Example: "/export:/very/long/path..." → []byte("H:" + hash[:30])
-//    Size: Fixed 32 bytes (2 byte prefix + 30 bytes hash)
-//    Used when: len(shareName + ":" + fullPath) > 64 bytes
-//
-// The hybrid approach provides:
-// - Deterministic generation (reproducible across restarts)
-// - Path extraction for import/export (when using path-based)
-// - NFS compatibility (max 64 bytes per RFC 1813)
-// - Graceful handling of edge cases (very long paths)
-//
-// For hash-based handles, we maintain a reverse mapping in the database:
-//   Key: "hmap:" + string(handle)
-//   Value: shareName + ":" + fullPath
+// If a path would exceed 256 bytes, the operation fails with an appropriate error.
+// This limit is chosen to align with common filesystem constraints (255-byte
+// filename limit on most systems) while staying within reasonable NFS handle sizes.
 
 const (
-	// maxNFSHandleSize is the maximum file handle size supported by NFSv3 (RFC 1813)
-	maxNFSHandleSize = 64
-
-	// hashPrefixSize is the size of the "H:" prefix for hash-based handles
-	hashPrefixSize = 2
-
-	// hashHandleDataSize is the number of hash bytes included in hash-based handles
-	// This leaves room for: 2 (prefix) + 30 (hash) = 32 bytes total
-	hashHandleDataSize = 30
-
-	// hashHandlePrefix identifies hash-based handles
-	hashHandlePrefix = "H:"
+	// maxNFSHandleSize is the maximum file handle size we support.
+	// Increased from RFC 1813's 64-byte recommendation to 256 bytes to accommodate
+	// longer paths while staying within typical OS limits (255-char filenames).
+	maxNFSHandleSize = 256
 )
 
 // generateFileHandle creates a deterministic file handle from a share name and path.
 //
-// This function implements the hybrid handle generation strategy, choosing between
-// path-based and hash-based formats depending on the total length.
+// The handle format is simple: "shareName:fullPath"
+// If the resulting handle exceeds maxNFSHandleSize (256 bytes), an error is returned.
 //
 // Thread Safety: Safe for concurrent use (pure function).
 //
@@ -69,39 +47,29 @@ const (
 //
 // Returns:
 //   - metadata.FileHandle: Deterministic handle for the file
-//   - bool: True if path-based, false if hash-based
+//   - error: Error if the handle would exceed size limit
 //
 // Example:
 //
-//	handle, isPathBased := generateFileHandle("/export", "/images/photo.jpg")
-//	// Returns: []byte("/export:/images/photo.jpg"), true
-func generateFileHandle(shareName, fullPath string) (metadata.FileHandle, bool) {
+//	handle, err := generateFileHandle("/export", "/images/photo.jpg")
+//	// Returns: []byte("/export:/images/photo.jpg"), nil
+func generateFileHandle(shareName, fullPath string) (metadata.FileHandle, error) {
 	// Construct the path-based handle format
 	pathBased := shareName + ":" + fullPath
 
-	// If it fits in the NFS limit, use path-based format (preferred)
-	if len(pathBased) <= maxNFSHandleSize {
-		return metadata.FileHandle([]byte(pathBased)), true
+	// Check if it fits within our size limit
+	if len(pathBased) > maxNFSHandleSize {
+		return nil, fmt.Errorf("file handle too long (%d bytes, max %d): path too deep or filename too long",
+			len(pathBased), maxNFSHandleSize)
 	}
 
-	// For long paths, use hash-based format
-	// Format: "H:" + sha256(pathBased)[:30]
-	h := sha256.Sum256([]byte(pathBased))
-	handle := make([]byte, hashPrefixSize+hashHandleDataSize)
-	copy(handle, []byte(hashHandlePrefix))
-	copy(handle[hashPrefixSize:], h[:hashHandleDataSize])
-
-	return metadata.FileHandle(handle), false
+	return metadata.FileHandle([]byte(pathBased)), nil
 }
 
 // decodeFileHandle extracts the share name and full path from a file handle.
 //
-// This function handles both path-based and hash-based handle formats:
-//   - Path-based: Direct extraction by splitting on ":"
-//   - Hash-based: Returns an error indicating lookup required
-//
-// For hash-based handles, the caller must perform a database lookup using
-// the handle mapping key to retrieve the original path.
+// Handles are always in the format: "shareName:fullPath"
+// This function simply splits on the first ":" character.
 //
 // Thread Safety: Safe for concurrent use (pure function).
 //
@@ -109,37 +77,24 @@ func generateFileHandle(shareName, fullPath string) (metadata.FileHandle, bool) 
 //   - handle: The file handle to decode
 //
 // Returns:
-//   - shareName: The share name (empty if hash-based)
-//   - fullPath: The full path (empty if hash-based)
-//   - isHashBased: True if this is a hash-based handle requiring lookup
+//   - shareName: The share name
+//   - fullPath: The full path
 //   - error: Error if handle format is invalid
 //
 // Example:
 //
-//	// Path-based handle
-//	share, path, isHash, err := decodeFileHandle([]byte("/export:/file.txt"))
-//	// Returns: "/export", "/file.txt", false, nil
-//
-//	// Hash-based handle
-//	share, path, isHash, err := decodeFileHandle([]byte("H:abc123..."))
-//	// Returns: "", "", true, nil (caller must look up in database)
-func decodeFileHandle(handle metadata.FileHandle) (shareName, fullPath string, isHashBased bool, err error) {
+//	share, path, err := decodeFileHandle([]byte("/export:/file.txt"))
+//	// Returns: "/export", "/file.txt", nil
+func decodeFileHandle(handle metadata.FileHandle) (shareName, fullPath string, err error) {
 	if len(handle) == 0 {
-		return "", "", false, fmt.Errorf("empty file handle")
+		return "", "", fmt.Errorf("empty file handle")
 	}
 
-	// Check if this is a hash-based handle
-	if len(handle) >= hashPrefixSize && string(handle[:hashPrefixSize]) == hashHandlePrefix {
-		// Hash-based handle - cannot decode directly
-		// Caller must look up the mapping in the database
-		return "", "", true, nil
-	}
-
-	// Path-based handle - decode directly
+	// Decode path-based handle
 	s := string(handle)
 	idx := strings.Index(s, ":")
 	if idx < 0 {
-		return "", "", false, fmt.Errorf("invalid handle format: missing separator")
+		return "", "", fmt.Errorf("invalid handle format: missing separator")
 	}
 
 	shareName = s[:idx]
@@ -147,13 +102,13 @@ func decodeFileHandle(handle metadata.FileHandle) (shareName, fullPath string, i
 
 	// Validate the components
 	if shareName == "" {
-		return "", "", false, fmt.Errorf("invalid handle: empty share name")
+		return "", "", fmt.Errorf("invalid handle: empty share name")
 	}
 	if fullPath == "" {
-		return "", "", false, fmt.Errorf("invalid handle: empty path")
+		return "", "", fmt.Errorf("invalid handle: empty path")
 	}
 
-	return shareName, fullPath, false, nil
+	return shareName, fullPath, nil
 }
 
 // handleToKey converts a FileHandle to a string key for database indexing.

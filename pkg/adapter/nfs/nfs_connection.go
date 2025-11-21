@@ -10,8 +10,9 @@ import (
 
 	"github.com/marmos91/dittofs/internal/logger"
 	nfs "github.com/marmos91/dittofs/internal/protocol/nfs"
-	mount "github.com/marmos91/dittofs/internal/protocol/nfs/mount/handlers"
+	mount_handlers "github.com/marmos91/dittofs/internal/protocol/nfs/mount/handlers"
 	"github.com/marmos91/dittofs/internal/protocol/nfs/rpc"
+	nfs_types "github.com/marmos91/dittofs/internal/protocol/nfs/types"
 	"github.com/marmos91/dittofs/internal/protocol/nfs/xdr"
 	handlers "github.com/marmos91/dittofs/internal/protocol/nfs/v3/handlers"
 )
@@ -456,9 +457,25 @@ func (c *NFSConnection) handleNFSProcedure(ctx context.Context, call *rpc.RPCCal
 
 	// Record completion with NFS status code (e.g., "NFS3_OK", "NFS3ERR_NOENT")
 	// This provides RFC-compliant error tracking for observability
+	// Note: Pass empty string for NFS3_OK (success) to avoid labeling as error
 	var responseStatus string
 	if result != nil {
-		responseStatus = nfs.NFSStatusToString(result.NFSStatus)
+		if result.NFSStatus != nfs_types.NFS3OK {
+			responseStatus = nfs.NFSStatusToString(result.NFSStatus)
+		}
+
+		// Record bytes transferred for READ/WRITE operations
+		// Only successful operations populate these fields
+		if result.NFSStatus == nfs_types.NFS3OK {
+			if result.BytesRead > 0 {
+				c.server.metrics.RecordBytesTransferred(procedure.Name, share, "read", result.BytesRead)
+				c.server.metrics.RecordOperationSize("read", share, result.BytesRead)
+			}
+			if result.BytesWritten > 0 {
+				c.server.metrics.RecordBytesTransferred(procedure.Name, share, "write", result.BytesWritten)
+				c.server.metrics.RecordOperationSize("write", share, result.BytesWritten)
+			}
+		}
 	} else if err != nil {
 		responseStatus = "ERROR_NO_RESULT"
 	}
@@ -490,7 +507,7 @@ func (c *NFSConnection) handleMountProcedure(ctx context.Context, call *rpc.RPCC
 	share := ""
 
 	// Extract handler context for mount requests
-	handlerCtx := &mount.MountHandlerContext{
+	handlerCtx := &mount_handlers.MountHandlerContext{
 		Context:    ctx,
 		ClientAddr: clientAddr,
 		AuthFlavor: call.GetAuthFlavor(),
@@ -544,9 +561,12 @@ func (c *NFSConnection) handleMountProcedure(ctx context.Context, call *rpc.RPCC
 	duration := time.Since(startTime)
 
 	// Record request completion in metrics with Mount status code
+	// Note: Pass empty string for MountOK (success) to avoid labeling as error
 	var responseStatus string
 	if result != nil {
-		responseStatus = nfs.MountStatusToString(result.NFSStatus)
+		if result.NFSStatus != mount_handlers.MountOK {
+			responseStatus = nfs.MountStatusToString(result.NFSStatus)
+		}
 	} else if err != nil {
 		responseStatus = "ERROR_NO_RESULT"
 	}
